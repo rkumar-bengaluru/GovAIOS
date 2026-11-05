@@ -143,14 +143,29 @@ def make_server(home: Path, port: int = 0, now=time.time):
                      f"{form('all', label='Revoke all')}"
                      f"<p><a href='/'>Runs</a></p>")
 
+    SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer"), ("X-Content-Type-Options", "nosniff"),
+           ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'"))
+    code_lock = threading.Lock()
+
+    def guarded(fn):
+        """Host and lock checks run first on every method and path; a locked screen ends the server."""
+        def wrapper(self):
+            if self.headers.get("Host") != f"127.0.0.1:{self.server.server_address[1]}":
+                return self._send(403)
+            if auth.screen_locked():
+                state["sessions"].clear()
+                threading.Thread(target=self.server.shutdown, daemon=True).start()  # not from the handler thread
+                return self._send(403)
+            return fn(self)
+        return wrapper
+
     class H(BaseHTTPRequestHandler):
+        timeout = 10  # a short body must not hold a thread forever
+
         def _send(self, status, body=""):
             data = body.encode() if body else f"{status}".encode()
             self.send_response(status)
-            for k, v in (("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(data))),
-                         ("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer"),
-                         ("X-Content-Type-Options", "nosniff"),
-                         ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")):
+            for k, v in (("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(data))), *SEC):
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
@@ -161,12 +176,9 @@ def make_server(home: Path, port: int = 0, now=time.time):
         def log_message(self, *a):  # default logging would print the login code
             pass
 
-        def _ok_host(self):
-            return self.headers.get("Host") == f"127.0.0.1:{self.server.server_address[1]}"
-
         def _session(self):
-            """(created, csrf) of a live session, else None. Expiry or a locked screen ends the server."""
-            if auth.screen_locked() or any(now() - c > SESSION_TTL for c, _ in state["sessions"].values()):
+            """(created, csrf) of a live session, else None. Expiry ends the server."""
+            if any(now() - c > SESSION_TTL for c, _ in state["sessions"].values()):
                 state["sessions"].clear()
                 threading.Thread(target=self.server.shutdown, daemon=True).start()  # not from the handler thread
                 return None
@@ -179,23 +191,21 @@ def make_server(home: Path, port: int = 0, now=time.time):
                     return v
             return None
 
+        @guarded
         def do_GET(self):
             u = urlsplit(self.path)
-            if not self._ok_host():
-                return self._send(403)
             if u.path == "/login":
                 c = parse_qs(u.query).get("c", [""])[0]
-                fresh = not state["code_used"] and now() - state["code_ts"] < LOGIN_TTL
-                if auth.screen_locked() or not (hmac.compare_digest(c.encode(), code.encode()) and fresh):
-                    return self._send(403)
-                state["code_used"] = True
+                with code_lock:  # check-and-set: two concurrent requests cannot both log in
+                    fresh = not state["code_used"] and now() - state["code_ts"] < LOGIN_TTL
+                    if not (hmac.compare_digest(c.encode(), code.encode()) and fresh):
+                        return self._send(403)
+                    state["code_used"] = True
                 sid = secrets.token_urlsafe(32)
                 state["sessions"][sid] = (now(), secrets.token_urlsafe(32))
                 self.send_response(303)
                 for k, v in (("Set-Cookie", f"s={sid}; HttpOnly; SameSite=Strict; Path=/"), ("Location", "/"),
-                             ("Content-Length", "0"), ("Cache-Control", "no-store"),
-                             ("Referrer-Policy", "no-referrer"), ("X-Content-Type-Options", "nosniff"),
-                             ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")):
+                             ("Content-Length", "0"), *SEC):
                     self.send_header(k, v)
                 return self.end_headers()
             sess = self._session()
@@ -209,10 +219,11 @@ def make_server(home: Path, port: int = 0, now=time.time):
                 return self._send(500, "internal error")
             self._send(200, page) if page else self._send(404)
 
+        @guarded
         def do_POST(self):
             if urlsplit(self.path).path != "/revoke":
                 return self._send(405)
-            sess = self._session() if self._ok_host() else None
+            sess = self._session()
             origin = self.headers.get("Origin")  # absent is fine (row 37); a wrong one is not
             if not sess or (origin is not None and origin != f"http://127.0.0.1:{self.server.server_address[1]}"):
                 return self._send(403)
@@ -239,11 +250,11 @@ def make_server(home: Path, port: int = 0, now=time.time):
             except Exception:
                 return self._send(500, "internal error")
             self.send_response(303)
-            self.send_header("Location", "/approvals")
-            self.send_header("Content-Length", "0")
-            self.send_header("Cache-Control", "no-store")
+            for k, v in (("Location", "/approvals"), ("Content-Length", "0"), *SEC):
+                self.send_header(k, v)
             self.end_headers()
 
+        @guarded
         def _no(self):
             self._send(405)
 

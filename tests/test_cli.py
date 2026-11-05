@@ -234,3 +234,23 @@ def test_cli_hook_passes_exit2(monkeypatch):
     import io
     monkeypatch.setattr("sys.stdin", io.StringIO("{nope"))
     assert main(["hook"]) == 2
+
+
+def test_audit_ui_deny_and_allow(monkeypatch, capsys, govaios_home):
+    import json
+    from govaios import auth
+    from govaios.audit import web
+    from govaios.audit.log import AuditLog
+    monkeypatch.setattr(web, "make_server", lambda *a, **k: pytest.fail("must not bind"))
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
+    assert main(["audit-ui"]) == 1
+    e = json.loads(AuditLog(govaios_home).path.read_text().splitlines()[-1])
+    assert e["kind"] == "ui_login" and e["channel"] == "touch_id" and e["auth"] == "failed"
+
+    class Srv:
+        server_address = ("127.0.0.1", 1234)
+        serve_forever = server_close = lambda self: None
+    monkeypatch.setattr(web, "make_server", lambda home, port: (Srv(), "CODE"))
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    assert main(["audit-ui"]) == 0
+    assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out

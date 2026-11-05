@@ -88,7 +88,9 @@ def test_login_code_single_use_and_expiry(tmp_path):
     clock2 = Clock()
     srv, code = _start(tmp_path / "h", clock2)
     clock2.t += 61
-    assert _client(srv, code)[1] is None
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+    c.request("GET", f"/login?c={code}")
+    assert c.getresponse().status == 403
     srv.shutdown(); srv.server_close()
 
 
@@ -111,8 +113,12 @@ def test_session_expires_and_lock_ends_server(tmp_path, monkeypatch):
     req, sid = _client(srv, code)
     assert req("/", cookie=sid)[0] == 200
     clock.t += 3601
+    called = threading.Event()
+    real = srv.shutdown
+    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
     assert req("/", cookie=sid)[0] == 403
-    srv.shutdown(); srv.server_close()
+    assert called.wait(2)
+    srv.server_close()
     srv, code = _start(tmp_path / "h2", Clock())
     req, sid = _client(srv, code)
     called = threading.Event()
@@ -285,3 +291,32 @@ def test_render_exception_500(web, monkeypatch):
     s, body, r = web[2]("/")
     assert s == 500 and body == "internal error" and "secret" not in body
     assert r.getheader("Cache-Control") == "no-store"
+
+
+def test_host_checked_on_post_and_other_methods(web):
+    get = web[2]
+    h = {"Host": "evil.example"}
+    assert get.req("/revoke", "POST", cookie=get.sid, headers=h, body={"kind": "all"})[0] == 403
+    assert get.req("/", "PUT", cookie=get.sid, headers=h)[0] == 403
+    assert get.req("/", "PUT", cookie=get.sid)[0] == 405
+
+
+def test_locked_login_shuts_down(tmp_path, monkeypatch):
+    from govaios import auth
+    srv, code = _start(tmp_path / "h", Clock())
+    called = threading.Event()
+    real = srv.shutdown
+    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+    c.request("GET", f"/login?c={code}")
+    assert c.getresponse().status == 403 and called.wait(2)
+    srv.server_close()
+
+
+def test_revoke_303_has_security_headers(web):
+    get = web[2]
+    r = get.req("/revoke", "POST", cookie=get.sid, body={"csrf": _csrf(get), "kind": "all"})[2]
+    assert r.status == 303 and r.getheader("Referrer-Policy") == "no-referrer"
+    assert "default-src 'none'" in r.getheader("Content-Security-Policy")
+    assert r.getheader("X-Content-Type-Options") == "nosniff"
