@@ -222,3 +222,49 @@ def test_audit_accepts_new_kinds_and_fields(home):
         log.append(k)
     with pytest.raises(AuditError):
         log.append("request", bogus="x")
+
+
+def test_raising_session_seam_is_locked(monkeypatch):
+    def boom():
+        raise RuntimeError("quartz")
+    monkeypatch.setattr(auth, "_cg_session_dict", boom)
+    assert auth.screen_locked() is True
+
+
+def test_raising_lacontext_is_failed(monkeypatch):
+    la = FakeLA(reply=(True, None))
+
+    def boom(*a):
+        raise RuntimeError("pyobjc")
+    la.LAContext.canEvaluatePolicy_error_ = boom
+    monkeypatch.setattr(auth, "LA", la)
+    monkeypatch.setattr(auth, "_now", lambda: 0.0)
+    assert auth._la_evaluate("r", 60.0) == "failed"
+
+
+def test_home_is_a_file_denies(calls, tmp_path):
+    f = tmp_path / "notadir"
+    f.write_text("")
+    assert auth.approve("q?", "r", f) == (False, "none")
+    assert calls.dialog == [] and calls.la == []
+
+
+def test_symlinked_lock_denies(calls, home):
+    (home / "target").write_text("")
+    (home / "ask.lock").symlink_to(home / "target")
+    assert auth.prove("r", home) == (False, "none")
+    assert calls.la == []
+
+
+def test_nul_in_question_is_deny():
+    assert auth.dialog("bad\0q", 60) is False
+
+
+def test_dialog_subprocess_timeout_follows_deadline(monkeypatch):
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(kw)
+        raise auth.subprocess.TimeoutExpired(cmd, kw["timeout"])
+    monkeypatch.setattr(auth.subprocess, "run", run)
+    assert auth.dialog("q", 30) is False and seen["timeout"] == 31

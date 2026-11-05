@@ -1,9 +1,11 @@
 """Presence proof: the one place that proves the admin is at the Mac before any grant of power.
 
-Anything but an explicit success is a deny, and nothing waits longer than the 60 s deadline (rows 4-8, 35, 36).
+Anything but an explicit success is a deny, returned and never raised (only an unknown channel raises).
+A proof takes at most the 60 s deadline plus about 3 s (2 s lock wait, 2 s post-invalidate wait, 1 s osascript slack) (rows 4-8, 35, 36).
 auth values: biometric, device_owner, failed, none, busy.
 """
 import fcntl
+import os
 import subprocess
 import threading
 import time
@@ -27,7 +29,10 @@ def _cg_session_dict():
 
 def screen_locked() -> bool:
     """Row 8 / 52: missing dict, locked flag set, or not on console -> locked (fail closed)."""
-    d = _cg_session_dict()
+    try:
+        d = _cg_session_dict()
+    except Exception:
+        return True
     if d is None:
         return True
     # `!= True` (not `is not True`) so an NSNumber 1 from the bridge still counts as on-console.
@@ -40,14 +45,21 @@ def dialog(question: str, timeout_s: int) -> bool:
     script = (f'display dialog "{q}" with title "GOV-AIOS approval" '
               f'buttons {{"Deny", "Approve"}} default button "Deny" giving up after {timeout_s}')
     try:
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout_s + 5)
-    except subprocess.TimeoutExpired:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout_s + 1)
+    except (subprocess.TimeoutExpired, OSError, ValueError):   # ValueError: NUL byte in the question
         return False
     return "button returned:Approve" in r.stdout and "gave up:true" not in r.stdout
 
 
 def _la_evaluate(reason: str, deadline: float) -> str:
     """One Touch ID (or device-owner) prompt on a fresh LAContext; 'failed' unless the reply is ok in time."""
+    try:
+        return _la_prompt(reason, deadline)
+    except Exception:   # any pyobjc error is a failed proof, never a raise
+        return "failed"
+
+
+def _la_prompt(reason: str, deadline: float) -> str:
     ctx = LA.LAContext.alloc().init()   # new context per prompt (row 4)
     ctx.setTouchIDAuthenticationAllowableReuseDuration_(0)
     if ctx.canEvaluatePolicy_error_(LA.LAPolicyDeviceOwnerAuthenticationWithBiometrics, None)[0]:
@@ -76,9 +88,12 @@ def _gate(question, reason: str, home: Path, channel: str) -> tuple[bool, str]:
         raise ValueError(f"unknown presence channel: {channel}")
     if screen_locked():
         return False, "none"
-    home = Path(home)
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(home / "ask.lock", "a") as lock:   # held for the whole prompt; closing releases it
+    try:
+        Path(home).mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(Path(home) / "ask.lock", os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)   # no symlink swap
+    except (OSError, ValueError):
+        return False, "none"
+    with os.fdopen(fd, "w") as lock:   # held for the whole prompt; closing releases it
         until = _now() + LOCK_WAIT_S
         while True:
             try:
