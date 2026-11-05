@@ -240,7 +240,6 @@ Submit and payment elements are never relearned by vision.
 | `himalayas_job_vetting` | Opens the newest Himalayas job matches and asks a local vetting service whether each suits the admin | Second flow (Part III). Read-only on the site; data stays on the laptop. |
 | `book_travel` | Searches booking.com for a route and date and prepares the booking | Stops at payment for approval (Rule 4). |
 | `send_drive_file` | Finds a Google Drive file and sends it to the admin's phone | Destination limited to the admin's own devices. |
-| `upwork_scan` | Lists Upwork openings that match saved criteria | Read-only. Criteria are part of the flow, not judged live. |
 | `build_with_claude` | Opens Claude, submits a build request, reports when Claude finishes | Rule 5 governs Claude's permission prompts. Claude's output is untrusted (Rule 7). |
 
 ### Example: `build_with_claude`
@@ -265,7 +264,7 @@ result is good, because that would be guessing.
 The admin's laptop is paired with a phone number. Away from home, the
 admin calls it and asks for one or more flows, for example: "run
 book_travel from Bangalore to Delhi on Friday, send me the itinerary
-from Drive, and run upwork_scan." The admin hangs up and the flows run.
+from Drive, and run himalayas_job_vetting." The admin hangs up and the flows run.
 Approvals and results reach the admin's phone.
 
 Design to be finalized separately. Current intent:
@@ -294,7 +293,7 @@ Design to be finalized separately. Current intent:
     hook with `build_with_claude`.
 3.  **Phone control channel.** Calls, admin verification, flow
     selection, and approvals.
-4.  **More flows.** `book_travel`, `send_drive_file`, `upwork_scan`.
+4.  **More flows.** `book_travel`, `send_drive_file`.
 5.  **Unattended execution.**
 6.  **OS-level enforcement** for uncooperative executors.
 
