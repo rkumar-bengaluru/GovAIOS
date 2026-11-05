@@ -119,6 +119,51 @@ def _resume(args) -> int:
     return 0
 
 
+def _hook(args) -> int:
+    from .hook import main as hook_main
+    from .home import data_home
+
+    return hook_main(sys.stdin, sys.stdout, sys.stderr, data_home())
+
+
+def _claude_settings(args) -> int:
+    import hashlib
+    import json
+
+    from . import auth, executor
+    from .approvals import Approvals
+    from .audit.log import AuditLog
+    from .hook import ID, bad_root, managed_settings
+    from .home import data_home
+
+    home = data_home()
+    path = home / executor.POLICY_PATH
+    if any(bad_root(r, home) for r in args.root):
+        print("refused: a project root equals, contains or sits inside a protected path", file=sys.stderr)
+        return 1
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(executor.default_policy(*(os.path.realpath(r) for r in args.root)))
+    raw = path.read_bytes()   # shown and approved bytes must be the hashed bytes (Rule 11)
+    pol, digest = executor.load(home)
+    if hashlib.sha256(raw).hexdigest() != digest:
+        print("refused: policy changed while reading; try again", file=sys.stderr)
+        return 1
+    if not pol.get("project_roots") or any(bad_root(r, home) for r in pol["project_roots"]):
+        print(f"refused: {path} needs project_roots, none inside or above a protected path", file=sys.stderr)
+        return 1
+    q = f"Approve this Claude Code executor policy ({path})?\n\n" + raw.decode(errors="replace")
+    ok, how = auth.approve(q, "approve Claude Code executor policy", home)
+    AuditLog(home).append("flow_approval", flow=ID, flow_hash=digest, executor=ID, decision="allow" if ok else "deny",
+                          approver="admin", channel="touch_id", auth=how)
+    if not ok:
+        print("approval busy" if how == "busy" else "not approved", file=sys.stderr)
+        return 1
+    Approvals(home / "approvals.json").approve_flow(ID, digest)
+    print(json.dumps(managed_settings(pol, home), indent=2))
+    return 0
+
+
 def _selftest(args) -> int:
     if not args.dev:
         sys.exit("selftest requires --dev")
@@ -153,6 +198,10 @@ def main(argv: list[str] | None = None) -> int:
     x.set_defaults(fn=_dump)
     sub.add_parser("guard").set_defaults(fn=_guard)
     sub.add_parser("resume").set_defaults(fn=_resume)
+    sub.add_parser("hook").set_defaults(fn=_hook)
+    c = sub.add_parser("claude-settings")
+    c.add_argument("--root", action="append", required=True)
+    c.set_defaults(fn=_claude_settings)
     pf = os.environ.get("GOVAIOS_PID_FILE")  # lets the shim stop this run on Ctrl-C
     if pf:
         with open(pf, "w") as fh:

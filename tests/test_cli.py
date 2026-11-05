@@ -133,3 +133,62 @@ def test_guard_plist():
     p = plistlib.loads((REPO / "packaging" / "com.govaios.guard.plist").read_bytes())
     assert p == {"Label": "com.govaios.guard", "KeepAlive": True, "RunAtLoad": True,
                  "ProgramArguments": ["/Applications/gov-aios.app/Contents/MacOS/gov-aios", "guard"]}
+
+
+def _settings(monkeypatch, answer):
+    from govaios import auth
+    asked = []
+    monkeypatch.setattr(auth, "approve", lambda q, r, h: (asked.append(q), answer)[1])
+    return asked
+
+
+ROW14_KEYS = {"allowManagedHooksOnly", "hooks", "permissions", "sandbox"}
+
+
+def test_claude_settings_output(monkeypatch, capsys, tmp_path, govaios_home):
+    import json
+
+    from govaios.approvals import Approvals
+    from govaios.executor import DESTINATIONS, POLICY_PATH, load
+    root = tmp_path / "proj"
+    root.mkdir()
+    asked = _settings(monkeypatch, (True, "biometric"))
+    assert main(["claude-settings", "--root", str(root)]) == 0
+    s = json.loads(capsys.readouterr().out)
+    assert ROW14_KEYS <= set(s) and s["sandbox"]["network"]["allowedDomains"] == DESTINATIONS
+    pol, digest = load(govaios_home)
+    assert Approvals(govaios_home / "approvals.json").flow_ok("claude_code", digest)
+    assert asked == [asked[0]] and (govaios_home / POLICY_PATH).read_text() in asked[0]
+    assert pol["project_roots"] == [str(root.resolve())]
+
+
+def test_claude_settings_not_approved(monkeypatch, capsys, tmp_path, govaios_home):
+    from govaios.approvals import Approvals
+    from govaios.executor import load
+    root = tmp_path / "proj"
+    root.mkdir()
+    _settings(monkeypatch, (False, "failed"))
+    assert main(["claude-settings", "--root", str(root)]) == 1
+    assert capsys.readouterr().out == ""
+    assert not Approvals(govaios_home / "approvals.json").flow_ok("claude_code", load(govaios_home)[1])
+
+
+@pytest.mark.parametrize("pick", [lambda h: h, lambda h: h.parent, lambda h: "/", lambda h: h / "sub",
+                                  lambda h: str(h.parent).upper()])
+def test_claude_settings_refuses_protected_root(monkeypatch, capsys, govaios_home, pick):
+    govaios_home.mkdir(parents=True, exist_ok=True)
+    asked = _settings(monkeypatch, (True, "biometric"))
+    assert main(["claude-settings", "--root", str(pick(govaios_home))]) == 1
+    out = capsys.readouterr()
+    assert asked == [] and out.out == "" and out.err.count("\n") == 1
+
+
+def test_claude_settings_refuses_hand_edited_root(monkeypatch, capsys, tmp_path, govaios_home):
+    from govaios.executor import POLICY_PATH, default_policy
+    (govaios_home / "executors").mkdir(parents=True)
+    (govaios_home / POLICY_PATH).write_text(default_policy(tmp_path))   # tmp_path holds the data home
+    root = tmp_path / "proj"
+    root.mkdir()
+    asked = _settings(monkeypatch, (True, "biometric"))
+    assert main(["claude-settings", "--root", str(root)]) == 1
+    assert asked == [] and capsys.readouterr().out == ""

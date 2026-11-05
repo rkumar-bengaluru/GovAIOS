@@ -39,8 +39,8 @@ def protected_paths(home):
     return tuple(os.path.realpath(p) for p in raw) + tuple(str(p) for p in raw)
 
 
-def default_policy(root):
-    return yaml.safe_dump({"project_roots": [str(root)], "allow_commands": ALLOW_COMMANDS,
+def default_policy(*roots):
+    return yaml.safe_dump({"project_roots": [str(r) for r in roots], "allow_commands": ALLOW_COMMANDS,
                            "destinations": DESTINATIONS, "tools": DEFAULT_TOOLS}, sort_keys=False)
 
 
