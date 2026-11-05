@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from .approvals import Approvals, flow_hash
+from .approvals import Approvals, flow_hash, pages_used
 from .policy import decide, origin
 
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
@@ -81,11 +81,12 @@ class Runner:
         self.d = desktop
         self.app = self.flow["browser"]["application"]
         self.approvals = Approvals(approvals_path)
-        self.page_files = sorted((REPO / "pages").glob("*.yaml"))
         self.pages = {}
-        for p in self.page_files:
-            pg = yaml.safe_load(p.read_text())["page"]
-            self.pages[pg["id"]] = pg
+        for pid in sorted(pages_used(self.flow)):
+            try:
+                self.pages[pid] = yaml.safe_load((REPO / "pages" / f"{pid}.yaml").read_text())["page"]
+            except FileNotFoundError:
+                raise Stop(f"unknown page: {pid}") from None
         self.ctx = {}
 
     def log(self, msg):
@@ -108,7 +109,7 @@ class Runner:
         self.log(f"allow {action} risk={risk} {destination or ''}")
 
     def approve_flow(self):
-        digest = flow_hash(self.flow_path, self.page_files)
+        digest = flow_hash(self.flow_path, REPO / "pages")
         if self.approvals.flow_ok(self.flow["id"], digest):
             return
         f = self.flow

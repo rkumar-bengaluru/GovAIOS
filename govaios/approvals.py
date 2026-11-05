@@ -3,12 +3,35 @@ import hashlib
 import json
 from pathlib import Path
 
+import yaml
 
-def flow_hash(flow_path, page_paths):
-    """Approval covers the flow and every page schema it relies on (Rule 11)."""
-    h = hashlib.sha256()
-    for p in [flow_path, *sorted(page_paths)]:
-        h.update(Path(p).read_bytes())
+
+def pages_used(flow):
+    """Every page id a flow's steps reference, recursing into nested steps."""
+    ids = set()
+
+    def walk(steps):
+        for s in steps:
+            t = s.get("target", "").split(".")[0]
+            if t and t != "current_item":
+                ids.add(t)
+            ids.update(s[k] for k in ("page", "verify_page") if k in s)
+            ids.update(k for k in s.get("on_match", {}) if k != "unknown")
+            walk(s.get("steps", []))
+
+    walk(flow["steps"])
+    return ids
+
+
+def flow_hash(flow_path, pages_dir):
+    """Approval covers the flow and only the page schemas it uses (Rule 11)."""
+    flow = yaml.safe_load(Path(flow_path).read_text())["workflow"]
+    h = hashlib.sha256(Path(flow_path).read_bytes())
+    for pid in sorted(pages_used(flow)):
+        try:
+            h.update((Path(pages_dir) / f"{pid}.yaml").read_bytes())
+        except FileNotFoundError:
+            raise KeyError(pid) from None
     return h.hexdigest()
 
 
