@@ -39,6 +39,13 @@ def protected_paths(home):
     return tuple(os.path.realpath(p) for p in raw) + tuple(str(p) for p in raw)
 
 
+def project_config(roots):
+    """Each project root's Claude Code config (`.claude`, `.mcp.json`): deny for every tool, no carve-out.
+    Project settings and MCP servers run code outside the hook and the sandbox (final review C-1)."""
+    raw = [os.path.join(r, n) for r in roots for n in (".claude", ".mcp.json")]
+    return tuple(dict.fromkeys([os.path.realpath(p) for p in raw] + raw))
+
+
 def default_policy(*roots):
     return yaml.safe_dump({"project_roots": [str(r) for r in roots], "allow_commands": ALLOW_COMMANDS,
                            "destinations": DESTINATIONS, "tools": DEFAULT_TOOLS}, sort_keys=False)

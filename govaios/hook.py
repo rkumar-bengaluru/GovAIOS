@@ -64,7 +64,8 @@ def _decide(payload, home: Path, managed: Path):
     cmd = redact_command(raw_cmd) if raw_cmd is not None else None
     url = req.get("url") if isinstance(req.get("url"), str) else None
     target = req.get("path") or (url_for_audit(url) if url else None)
-    verdict = decide_tool(req, pol, approvals, executor.protected_paths(home))
+    verdict = decide_tool(req, pol, approvals, executor.protected_paths(home),
+                          executor.project_config(pol.get("project_roots", [])))
     how, reason, remember = None, None, None
     if verdict == "ask" and cmd != raw_cmd:   # redaction could hide code from the admin: never offer it
         verdict, reason = "deny", "denied by GOV-AIOS policy: command contains secret-like values; not offered for approval"
@@ -110,8 +111,11 @@ def managed_settings(pol, home: Path) -> dict:
     """Row 14 (amended): Read/Edit deny rules only, `//` absolute paths, host-name allowedDomains."""
     prot = executor.protected_paths(home)
     deny = [f"{k}(/{prot[i]}/**)" for i in DENY_RULE_IDX for k in ("Read", "Edit")] + ["Edit(~/.claude.json)"]
+    deny += [f"Edit(/{r}/{n})" for r in pol.get("project_roots", []) for n in (".claude/**", ".mcp.json")]   # C-1
     return {
         "allowManagedHooksOnly": True,
+        # project .mcp.json servers run unsandboxed; key names from the settings reference (final review C-1)
+        "enableAllProjectMcpServers": False, "strictPluginOnlyCustomization": ["mcp"],
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": HOOK_COMMAND, "timeout": 300, "onFailure": "block"}]}]},
         "permissions": {"disableBypassPermissionsMode": "disable", "deny": deny},

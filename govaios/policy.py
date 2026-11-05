@@ -60,9 +60,14 @@ def _fetch_host(url):
     return host
 
 
-def decide_tool(request, policy, approvals, protected):
-    """Return 'allow', 'deny' or 'ask' for one Claude tool call. Pure: paths arrive realpathed."""
+def decide_tool(request, policy, approvals, protected, config=()):
+    """Return 'allow', 'deny' or 'ask' for one Claude tool call. Pure: paths arrive realpathed.
+    `config`: project Claude Code config paths, denied for every tool and in any command (no carve-out, no ask)."""
     cat, tool, path = request.get("category"), request.get("tool"), request.get("path")
+    if path is not None and any(_inside(path, q, True) for q in config):
+        return "deny"
+    if cat == "shell" and any(q.casefold() in (request.get("command") or "").casefold() for q in config):
+        return "deny"
     memory = False
     if path is not None:
         memory = tool in ("Read", "Edit", "Write") and _memory_md(path, protected[CLAUDE_IDX])

@@ -1,4 +1,5 @@
 import io
+import os
 import json
 
 import pytest
@@ -211,3 +212,43 @@ def test_managed_settings_row14(env):
     n = sb["network"]
     assert n["allowManagedDomainsOnly"] is True and n["allowedDomains"] == DESTINATIONS
     assert n["allowAllUnixSockets"] is False and n["allowLocalBinding"] is False
+
+
+def _config_paths(env):
+    return [str(env["root"] / ".claude" / "settings.json"), str(env["root"] / ".mcp.json")]
+
+
+@pytest.mark.parametrize("which", [0, 1])
+@pytest.mark.parametrize("make", [
+    lambda p: ("Write", {"file_path": p, "content": "{}"}),
+    lambda p: ("Edit", {"file_path": p, "old_string": "a", "new_string": "b"}),
+    lambda p: ("Bash", {"command": f"ls {p}"}),           # an allowed prefix: still denied
+    lambda p: ("Bash", {"command": f"cat {p.upper()}"}),  # casefolded, and never offered for approval
+])
+def test_project_claude_config_denied(env, which, make):
+    """C-1: <root>/.claude and <root>/.mcp.json are denied for every tool, without a prompt."""
+    name, inp = make(_config_paths(env)[which])
+    code, out, _ = call(env, tool(env, name, **inp))
+    assert code == 0 and env["asks"] == []
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_project_claude_dir_read_denied(env):
+    (env["root"] / ".claude").mkdir()
+    for p in (env["root"] / ".claude" / "x", env["root"] / ".claude", env["root"] / ".CLAUDE" / "x"):
+        code, out, _ = call(env, tool(env, "Read", file_path=str(p)))
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_managed_settings_deny_project_config(env):
+    pol, _ = load(env["home"])
+    deny = hook.managed_settings(pol, env["home"])["permissions"]["deny"]
+    r = os.path.realpath(env["root"])
+    assert f"Edit(/{r}/.claude/**)" in deny and f"Edit(/{r}/.mcp.json)" in deny
+    assert f"Edit(/{r}/.claude/**)".startswith("Edit(//")
+
+
+def test_managed_settings_lock_project_mcp(env):
+    """C-1: key names from code.claude.com/docs/en/settings-reference (MCP and Plugins sections)."""
+    s = hook.managed_settings(load(env["home"])[0], env["home"])
+    assert s["enableAllProjectMcpServers"] is False and s["strictPluginOnlyCustomization"] == ["mcp"]
