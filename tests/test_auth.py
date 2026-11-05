@@ -1,11 +1,13 @@
 """Presence proof with every dialog, LocalAuthentication and Quartz call mocked: no real prompt or sheet."""
 import fcntl
 import itertools
+import threading
+import time
 import types
 
 import pytest
 
-from govaios import auth
+from govaios import auth, runstate
 from govaios.audit.log import AuditError, AuditLog
 
 UNLOCKED = {auth.Quartz.kCGSessionOnConsoleKey: True}
@@ -16,11 +18,11 @@ class Calls:
         self.dialog_ret, self.la_ret = dialog, la
         self.dialog, self.la = [], []
 
-    def fake_dialog(self, question, timeout_s):
+    def fake_dialog(self, question, timeout_s, cancelled=None):
         self.dialog.append((question, timeout_s))
         return self.dialog_ret
 
-    def fake_la(self, reason, deadline):
+    def fake_la(self, reason, deadline, cancelled=None):
         self.la.append((reason, deadline))
         return self.la_ret
 
@@ -197,20 +199,36 @@ def test_unknown_channel_rejected(calls, home):
         auth.prove("r", home, channel="phone")
 
 
+class FakeOsascript:
+    """Stands in for osascript: answers `out` at once, or (out=None) never answers until killed."""
+    def __init__(self, out=None):
+        self.out, self.cmd, self.killed = out, None, False
+
+    def __call__(self, cmd, **kw):
+        self.cmd = cmd
+        return self
+
+    def communicate(self, timeout=None):
+        if self.out is not None or self.killed:
+            return (self.out or ""), ""
+        time.sleep(timeout)
+        raise auth.subprocess.TimeoutExpired(self.cmd, timeout)
+
+    def poll(self):
+        return 0 if self.out is not None or self.killed else None
+
+    def kill(self):
+        self.killed = True
+
+
 def test_dialog_escapes_and_defaults_to_deny(monkeypatch):
-    seen = {}
-
-    def run(cmd, **kw):
-        seen["script"] = cmd[2]
-        return types.SimpleNamespace(stdout="button returned:Approve, gave up:false\n")
-
-    monkeypatch.setattr(auth.subprocess, "run", run)
+    fake = FakeOsascript("button returned:Approve, gave up:false\n")
+    monkeypatch.setattr(auth.subprocess, "Popen", fake)
     assert auth.dialog('say "hi" \\ now', 60) is True
-    s = seen["script"]
+    s = fake.cmd[2]
     assert 'say \\"hi\\" \\\\ now' in s and 'default button "Deny"' in s and "giving up after 60" in s
 
-    monkeypatch.setattr(auth.subprocess, "run",
-                        lambda cmd, **kw: types.SimpleNamespace(stdout="button returned:, gave up:true\n"))
+    monkeypatch.setattr(auth.subprocess, "Popen", FakeOsascript("button returned:, gave up:true\n"))
     assert auth.dialog("q", 60) is False
 
 
@@ -260,11 +278,36 @@ def test_nul_in_question_is_deny():
     assert auth.dialog("bad\0q", 60) is False
 
 
-def test_dialog_subprocess_timeout_follows_deadline(monkeypatch):
-    seen = {}
+def test_dialog_killed_after_deadline(monkeypatch):
+    fake = FakeOsascript()
+    monkeypatch.setattr(auth.subprocess, "Popen", fake)
+    clock = itertools.count(0, 10)
+    monkeypatch.setattr(auth, "_now", lambda: next(clock))
+    monkeypatch.setattr(auth, "POLL_S", 0)
+    assert auth.dialog("q", 30) is False and fake.killed   # deadline is 30 s + 1 s slack
 
-    def run(cmd, **kw):
-        seen.update(kw)
-        raise auth.subprocess.TimeoutExpired(cmd, kw["timeout"])
-    monkeypatch.setattr(auth.subprocess, "run", run)
-    assert auth.dialog("q", 30) is False and seen["timeout"] == 31
+
+def test_stop_cancels_pending_prompt(home, monkeypatch):
+    monkeypatch.setattr(auth, "_cg_session_dict", lambda: UNLOCKED)
+    fake = FakeOsascript()   # the dialog stays open until killed
+    monkeypatch.setattr(auth.subprocess, "Popen", fake)
+    threading.Timer(0.3, (home / "STOPPED").touch).start()
+    t0 = time.monotonic()
+    assert auth.approve("q?", "r", home) == (False, "none")
+    assert time.monotonic() - t0 < 1.3 and fake.killed
+
+
+def test_stop_cancels_pending_touch_id(home, monkeypatch):
+    monkeypatch.setattr(auth, "_cg_session_dict", lambda: UNLOCKED)
+    la = FakeLA(reply=None)
+    monkeypatch.setattr(auth, "LA", la)
+    threading.Timer(0.3, (home / "STOPPED").touch).start()
+    t0 = time.monotonic()
+    assert auth.prove("r", home) == (False, "none")
+    assert time.monotonic() - t0 < 1.3 and la.ctxs[0].invalidated
+
+
+def test_existing_stop_does_not_cancel_resume_proof(calls, home):
+    (home / "STOPPED").touch()   # resume proves while STOPPED exists; only a new stop cancels
+    assert auth.prove("resume gov-aios", home) == (True, "biometric")
+    assert runstate.stopped(home)

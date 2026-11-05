@@ -4,6 +4,7 @@ decided by policy.decide() first."""
 import json
 import os
 import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -24,6 +25,10 @@ NO_DEST = object()
 
 class Stop(Exception):
     """Flow stopped: unexpected state, denial, or admin needed (Rule 2)."""
+
+
+def _emergency_stop(signum, frame):
+    raise Stop("emergency stop")
 
 
 # ---------- element location (neutral roles only) ----------
@@ -213,6 +218,13 @@ class Runner:
 
     # ----- step actions -----
     def run(self):
+        prev = signal.signal(signal.SIGTERM, _emergency_stop)   # the guard's stop (row 11): end as a recorded stop
+        try:
+            self._run()
+        finally:
+            signal.signal(signal.SIGTERM, prev)
+
+    def _run(self):
         self.step = None
         self._audit("flow_start", flow_hash=self.digest)
         try:

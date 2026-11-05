@@ -99,6 +99,26 @@ def _dump(args) -> int:
     return 0
 
 
+def _guard(args) -> int:
+    from .guard import main as guard_main
+    from .home import data_home
+
+    return guard_main(data_home())
+
+
+def _resume(args) -> int:
+    from .audit.log import AuditLog
+    from .home import data_home
+    from .runstate import resume
+
+    home = data_home()
+    if not resume(home, AuditLog(home)):
+        print("resume not proven; gov-aios stays stopped", file=sys.stderr)
+        return 1
+    print("resumed")
+    return 0
+
+
 def _selftest(args) -> int:
     if not args.dev:
         sys.exit("selftest requires --dev")
@@ -131,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     x = sub.add_parser("dump")
     x.add_argument("--dev", action="store_true")
     x.set_defaults(fn=_dump)
+    sub.add_parser("guard").set_defaults(fn=_guard)
+    sub.add_parser("resume").set_defaults(fn=_resume)
     pf = os.environ.get("GOVAIOS_PID_FILE")  # lets the shim stop this run on Ctrl-C
     if pf:
         with open(pf, "w") as fh:

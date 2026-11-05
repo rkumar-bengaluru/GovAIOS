@@ -108,3 +108,28 @@ def test_run_executor_label(monkeypatch):
     seen = _fake_run(monkeypatch, None, packaged=True)
     main(["run", "x.yaml"])
     assert seen["executor"] == "gov_runner"
+
+
+def test_resume_exit_follows_proof(monkeypatch, govaios_home):
+    from govaios import auth
+    (govaios_home / "STOPPED").parent.mkdir(parents=True, exist_ok=True)
+    (govaios_home / "STOPPED").touch()
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
+    assert main(["resume"]) == 1 and (govaios_home / "STOPPED").exists()
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    assert main(["resume"]) == 0 and not (govaios_home / "STOPPED").exists()
+
+
+def test_guard_subcommand_calls_guard(monkeypatch, govaios_home):
+    from govaios import guard
+    seen = []
+    monkeypatch.setattr(guard, "main", lambda home: seen.append(home) or 0)
+    assert main(["guard"]) == 0 and seen == [govaios_home]
+
+
+def test_guard_plist():
+    import plistlib
+    from govaios.engine import REPO
+    p = plistlib.loads((REPO / "packaging" / "com.govaios.guard.plist").read_bytes())
+    assert p == {"Label": "com.govaios.guard", "KeepAlive": True, "RunAtLoad": True,
+                 "ProgramArguments": ["/Applications/gov-aios.app/Contents/MacOS/gov-aios", "guard"]}

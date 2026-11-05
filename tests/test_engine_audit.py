@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import shutil
 
 import pytest
@@ -356,3 +358,17 @@ def test_lock_mid_run_stops(tmp_path, monkeypatch):
     r, e, err = run(tmp_path, [True] * 10)
     assert isinstance(err, Stop) and e[-1]["reason"] == "screen_locked"
     assert [x["action"] for x in e if x["kind"] == "action"] == ["launch_application"]
+
+
+class TermOnClick(FakeDesktop):
+    def click(self, node):
+        os.kill(os.getpid(), signal.SIGTERM)   # the guard's emergency stop, aimed at this run
+
+
+def test_sigterm_stops_run(tmp_path):
+    before = signal.getsignal(signal.SIGTERM)
+    r, e, err = run(tmp_path, [True] * 10, TermOnClick)
+    assert isinstance(err, Stop) and str(err) == "emergency stop"
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
+    assert signal.getsignal(signal.SIGTERM) is before
+    assert verify(r.audit.path, r.audit.pub_path).ok
