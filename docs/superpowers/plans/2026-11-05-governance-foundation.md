@@ -40,6 +40,8 @@ authentication, so it moves to plan 2; this plan's UI is read-only.
 - Nothing is ever written inside the app bundle, which the signature seals: every output, including `write_json` directories, goes under the data home.
 - Silence, timeout, or anything but an explicit approve means deny (spec 5.3).
 - No website APIs (spec 9.3).
+- Tests never touch the real data home: `tests/conftest.py` sets `GOVAIOS_HOME` to a fresh `tmp_path` for every test (autouse). This home holds no credentials, keys or approvals from the real one, so even if a guard is bypassed, nothing real can leak.
+- PyInstaller must use `--onedir` inside the `.app` (`EXE` + `COLLECT` + `BUNDLE`), never `--onefile`, so `sys._MEIPASS` is the stable `Contents/Frameworks` directory. `hiddenimports=['objc', 'AppKit', 'Foundation', 'ApplicationServices', 'Quartz', 'yaml', 'cryptography']`.
 
 ## Review Focus
 
@@ -83,7 +85,7 @@ spikes/ax-flows/README.md         kept; points to govaios/
 ### Task 1: Package skeleton from the spike
 
 **Files:**
-- Create: `pyproject.toml`, `govaios/__init__.py`, `govaios/home.py`, `tests/test_policy.py`, `.gitignore` (root; same ignores as the spike plus `build/`, `dist/`, `.venv/`)
+- Create: `pyproject.toml`, `govaios/__init__.py`, `govaios/home.py`, `tests/conftest.py` (the autouse `GOVAIOS_HOME` fixture from Global Constraints), `tests/test_policy.py`, `.gitignore` (root; same ignores as the spike plus `build/`, `dist/`, `.venv/`)
 - Move (`git mv`): `spikes/ax-flows/{roles.yaml,desktop/,engine.py,flows/,pages/}` → `govaios/roles.yaml`, `govaios/desktop/`, `govaios/engine.py`, `flows/`, `pages/`
 - Split: `spikes/ax-flows/governance.py` → `govaios/policy.py` (`RISK_ORDER`, `origin`, `decide`) and `govaios/approvals.py` (`Approvals`, `flow_hash`)
 - Delete: `spikes/ax-flows/{run.py,dump.py,test_governance.py,.gitignore}` (dump becomes `gov-aios dump` in Task 8)
@@ -103,6 +105,45 @@ spikes/ax-flows/README.md         kept; points to govaios/
   Then fix the imports.
 - [ ] **Step 4:** Run `python -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/python -m pytest -v`. Expected: 9 passed.
 - [ ] **Step 5:** Commit: `git commit -m "Move spike into govaios package"`.
+
+### Task 1b: Early packaging smoke test
+
+Packaging pyobjc with PyInstaller is brittle, so the app identity is proven
+before anything else depends on it.
+
+**Files:**
+- Create: `govaios/identity.py`, `govaios/cli.py` (the `doctor` subcommand only), `packaging/gov-aios.spec`, `packaging/build.sh`, `bin/gov-aios`
+- Test: `tests/test_identity.py`
+
+**Interfaces:**
+- Consumes: `govaios.home.data_home()` (Task 1).
+- Produces:
+  - `identity.check() -> dict` with keys `bundle_id` (`NSBundle.mainBundle().bundleIdentifier()` or `None`), `frozen` (`getattr(sys, "frozen", False)`), `accessibility` (`AXIsProcessTrusted()`), and `screen_recording` (`Quartz.CGPreflightScreenCaptureAccess()`).
+  - `cli.main(argv: list[str] | None = None) -> int`, with `doctor` printing one `key: value` line per check field and returning 1 if any is false.
+  - At exit, `cli.main` writes its return code to the path in env `GOVAIOS_EXIT_FILE` if that is set.
+  - `dist/gov-aios.app`:
+    - `CFBundleIdentifier = com.govaios.cli`, executable `gov-aios`, `LSUIElement = true`, and `NSAppleEventsUsageDescription` (for the approval dialogs via `osascript`);
+    - built `--onedir` with the Global Constraints' `hiddenimports`, and datas `govaios/roles.yaml`, `flows/` and `pages/`;
+    - signed with `codesign --force --deep --options runtime --sign "${GOVAIOS_SIGN_ID:--}" --identifier com.govaios.cli`.
+  - `bin/gov-aios <args>` (bash, `set -euo pipefail`) works the same from Terminal, VS Code, scripts, and with no TTY:
+    1. Create per-invocation temp files with `mktemp`: `out`, `err`, `exitf`. They are removed by a `trap` on EXIT, so concurrent invocations never share a file.
+    2. Convert arguments that name existing files to absolute paths, because `open` starts the app with working directory `/`.
+    3. Run `open -W -n -a "$REPO/dist/gov-aios.app" --stdout "$out" --stderr "$err" --env GOVAIOS_EXIT_FILE="$exitf" --env GOVAIOS_HOME="${GOVAIOS_HOME:-}" --args "$@"` in the background.
+    4. Stream `out` and `err` with `tail -f` to the caller's stdout and stderr until `open` returns.
+    5. Exit with the code in `exitf`, or 70 if it is empty.
+  - In the frozen app, `REPO` in `engine.py` resolves to `Path(sys._MEIPASS)`, where the datas place `pages/` and `flows/`.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `test_check_keys`: `set(identity.check()) == {"bundle_id", "frozen", "accessibility", "screen_recording"}`.
+  - `test_not_frozen_under_pytest`: `identity.check()["frozen"] is False`.
+  - `test_exit_file_written`: with `GOVAIOS_EXIT_FILE=tmp_path/'x'` and `identity.check` monkeypatched to all true, `main(["doctor"])` returns 0 and the file contains `0`.
+- [ ] **Step 2:** Run `pytest tests/test_identity.py -v`. Expected: FAIL.
+- [ ] **Step 3:** Implement `identity.check`, the `doctor` subcommand, the spec, `build.sh` (`pyinstaller --clean --noconfirm packaging/gov-aios.spec`, then `codesign`, then `codesign --verify --strict --verbose=2 dist/gov-aios.app`), and the shim, then `chmod +x bin/gov-aios`.
+- [ ] **Step 4:** Run `pytest tests/test_identity.py -v`. Expected: 3 passed.
+- [ ] **Step 5:** Run `packaging/build.sh && codesign -dv dist/gov-aios.app 2>&1 | grep Identifier`. Expected: `Identifier=com.govaios.cli`.
+- [ ] **Step 6:** Run `bin/gov-aios doctor; echo "exit=$?"`, then `bin/gov-aios doctor < /dev/null | cat; echo "exit=$?"` (no TTY). Expected both times: `bundle_id: com.govaios.cli`, `frozen: True`. `accessibility` may be False before the admin grants it, in which case the exit is 1. No `ModuleNotFoundError` from objc, AppKit or Quartz.
+- [ ] **Step 7:** Run two shims at once: `bin/gov-aios doctor > /tmp/a & bin/gov-aios doctor > /tmp/b; wait`. Expected: both files have the full `doctor` output and neither has the other's lines.
+- [ ] **Step 8:** Commit: `git commit -m "Prove gov-aios.app identity with early packaging smoke test"`.
 
 ### Task 2: Approval binds to the pages a flow uses
 
@@ -238,7 +279,7 @@ spikes/ax-flows/README.md         kept; points to govaios/
   - `test_unix_socket_allowed`: `socket.socket(socket.AF_UNIX)` succeeds.
   - `test_osascript_dialog_unaffected`: `subprocess.run(["osascript", "-e", "return 1"])` returns 0.
 - [ ] **Step 2:** Run `pytest tests/test_netguard.py -v`. Expected: FAIL.
-- [ ] **Step 3:** Implement by wrapping `socket.socket.__init__` and `socket.getaddrinfo`. Mark it `# shortcut: in-process guard only; OS-level egress block (sandbox profile) comes with the isolation plan.`
+- [ ] **Step 3:** Implement by wrapping `socket.socket.__init__` and `socket.getaddrinfo`. Mark it `# shortcut: in-process guard only; a C extension can bypass it. Runs under test use a credential-free GOVAIOS_HOME, so a bypass leaks nothing. The OS-level egress block (sandbox profile) comes with plan 2.`
 - [ ] **Step 4:** Run `pytest tests/test_netguard.py -v`. Expected: 4 passed.
 - [ ] **Step 5:** Commit: `git commit -m "Block network during flow runs"`.
 
@@ -255,7 +296,7 @@ spikes/ax-flows/README.md         kept; points to govaios/
   - `/run/<seq>` lists that run's entries in a table (kind, step, action, target, decision, approver, channel, outcome, reason);
   - `/approvals` lists the approved flows and destinations from `approvals.json`.
 
-  A missing or wrong token gives 403, an unknown path 404, and any other method 405. All values are HTML-escaped. Day-1 auth is marked `# shortcut: URL token, not Touch ID; replaced by admin authentication in plan 2.`
+  A missing or wrong token gives 403, an unknown path 404, and any other method 405. Every response carries `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, because the token in the URL ends up in browser history. All values are HTML-escaped. Day-1 auth is marked `# shortcut: URL token, not Touch ID; replaced by admin authentication in plan 2.`
 
 - [ ] **Step 1: Write the failing tests**, starting the server on a thread with port 0:
   - `test_requires_token`: GET `/` without a token gives 403.
@@ -265,21 +306,21 @@ spikes/ax-flows/README.md         kept; points to govaios/
   - `test_unknown_path_404`: GET `/../audit_key.pem?t=..` gives 404.
   - `test_escapes_html`: an entry with `reason="<script>x</script>"` is rendered escaped.
   - `test_binds_localhost_only`: `server.server_address[0] == "127.0.0.1"`.
+  - `test_no_store_headers`: every response, including the 403, has `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 - [ ] **Step 2:** Run `pytest tests/test_audit_web.py -v`. Expected: FAIL.
 - [ ] **Step 3:** Implement using a `BaseHTTPRequestHandler` subclass and server-rendered HTML with inline CSS, with no JavaScript and no external assets.
-- [ ] **Step 4:** Run `pytest tests/test_audit_web.py -v`. Expected: 7 passed.
+- [ ] **Step 4:** Run `pytest tests/test_audit_web.py -v`. Expected: 8 passed.
 - [ ] **Step 5:** Commit: `git commit -m "Add read-only local audit web UI"`.
 
 ### Task 8: CLI and identity checks
 
 **Files:**
-- Create: `govaios/identity.py`, `govaios/cli.py`
+- Modify: `govaios/identity.py`, `govaios/cli.py` (both from Task 1b)
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: `Runner` (Task 5), `block_all_network` (Task 6), `verify.main` (Task 4), `make_server` (Task 7), `get_desktop` (Task 1).
+- Consumes: `Runner` (Task 5), `block_all_network` (Task 6), `verify.main` (Task 4), `make_server` (Task 7), `get_desktop` (Task 1), `identity.check` and `cli.main`'s exit file (Task 1b).
 - Produces:
-  - `identity.check() -> dict` with keys `bundle_id` (from `NSBundle.mainBundle().bundleIdentifier()`, or `None`), `frozen` (`getattr(sys, "frozen", False)`), `accessibility` (`AXIsProcessTrusted()`), and `screen_recording` (`Quartz.CGPreflightScreenCaptureAccess()`).
   - `identity.require_app(dev: bool) -> None` raises `SystemExit` with the message `gov-aios must run as com.govaios.cli (use bin/gov-aios); --dev allows Python for development only` unless `bundle_id == "com.govaios.cli"` or `dev`. With `dev` it prints a `DEV MODE: insecure, not for real use` warning to stderr.
   - `cli.main(argv: list[str] | None = None) -> int` with subcommands:
     - `run <flow.yaml> [--dev]`: `require_app`, then `block_all_network()`, then `Runner(...).run()`; exit 1 with `STOPPED: <reason>` on `Stop`;
@@ -300,31 +341,31 @@ spikes/ax-flows/README.md         kept; points to govaios/
 - [ ] **Step 4:** Run `pytest -v`. Expected: all pass.
 - [ ] **Step 5:** Commit: `git commit -m "Add gov-aios CLI with identity checks"`.
 
-### Task 9: Signed `gov-aios.app` and shim
+### Task 9: Attended end-to-end verification and docs
 
 **Files:**
-- Create: `packaging/gov-aios.spec`, `packaging/build.sh`, `bin/gov-aios`, `packaging/README.md`
+- Create: `packaging/README.md`
 - Modify: `README.md` (add a "Run gov-aios" section under Part I "Build order", 6 lines: build, grant permissions, doctor, run, audit-ui, verify)
 
 **Interfaces:**
-- Consumes: `govaios.cli:main` (Task 8).
-- Produces:
-  - `dist/gov-aios.app`: `CFBundleIdentifier = com.govaios.cli`, executable `gov-aios`, `LSUIElement = true` (no Dock icon), plus `NSAppleEventsUsageDescription` (for the approval dialogs via `osascript`). It is signed with `codesign --force --deep --options runtime --sign "${GOVAIOS_SIGN_ID:--}" --identifier com.govaios.cli`.
-  - `bin/gov-aios <args>` runs `open -W -n -a <repo>/dist/gov-aios.app --stdout "$(tty)" --stderr "$(tty)" --args "$@"`, falling back to temp files that are `cat`-ed afterwards when there's no TTY, and propagates the exit code by having the app write it to `$GOVAIOS_HOME/last_exit`.
-  - Arguments that name existing files are converted to absolute paths first, because `open` starts the app with working directory `/`.
-  - In the frozen app, `REPO` resolves to `sys._MEIPASS`, where the spec's `datas` place `pages/` and `flows/`.
+- Consumes: the app and shim (Task 1b), and the full CLI (Task 8).
 
-- [ ] **Step 1:** Write `packaging/gov-aios.spec` (PyInstaller `BUNDLE` with `bundle_identifier='com.govaios.cli'`, `name='gov-aios.app'`, the datas `govaios/roles.yaml`, `flows/` and `pages/`, and the `info_plist` keys above), then `packaging/build.sh` (runs `pyinstaller --clean --noconfirm packaging/gov-aios.spec`, then the `codesign` line above, then `codesign --verify --strict --verbose=2 dist/gov-aios.app`).
-- [ ] **Step 2:** Run `packaging/build.sh && codesign -dv dist/gov-aios.app 2>&1 | grep Identifier`. Expected: `Identifier=com.govaios.cli`.
-- [ ] **Step 3:** Write `bin/gov-aios` (bash, `set -euo pipefail`), then `chmod +x bin/gov-aios`.
-- [ ] **Step 4:** Run `bin/gov-aios doctor`. Expected before granting permissions: it prints `bundle_id: com.govaios.cli`, `frozen: True`, `accessibility: False`, and exits 1.
-- [ ] **Step 5 (admin):** Ask the admin to add `dist/gov-aios.app` under System Settings › Privacy & Security › Accessibility and Screen Recording. Do not toggle these yourself. Then run `bin/gov-aios doctor`. Expected: all `True`, exit 0. Then run `.venv/bin/python -m govaios.cli doctor --dev` from Terminal and confirm its `accessibility` reflects Terminal's own grant, not the app's. This proves the permission belongs to `com.govaios.cli`.
-- [ ] **Step 6 (admin attended):** Run `bin/gov-aios run flows/himalayas_job_vetting.yaml`. Expected:
+- [ ] **Step 1:** Run `packaging/build.sh && bin/gov-aios doctor; echo "exit=$?"`. Expected: `bundle_id: com.govaios.cli`, `frozen: True`.
+- [ ] **Step 2 (admin):** Ask the admin to add `dist/gov-aios.app` under System Settings › Privacy & Security › Accessibility and Screen Recording. Do not toggle these yourself. Then run `bin/gov-aios doctor`. Expected: all `True`, exit 0. Then run `.venv/bin/python -m govaios.cli doctor --dev` from Terminal and confirm its `accessibility` reflects Terminal's own grant, not the app's. This proves the permission belongs to `com.govaios.cli`.
+- [ ] **Step 3 (admin attended):** Run `bin/gov-aios run flows/himalayas_job_vetting.yaml`. Expected:
   1. one flow-approval dialog (new home, new hash);
   2. destination dialogs for google.com and himalayas.app;
   3. 5 files written to `~/Library/Application Support/GOV-AIOS/jd_selected/`;
   4. `bin/gov-aios verify-audit` prints `OK <n> entries`.
 
   Then run `bin/gov-aios audit-ui`, open the printed URL, and confirm the run is listed with the green OK banner.
-- [ ] **Step 7:** Write `packaging/README.md`: build, signing identity (`GOVAIOS_SIGN_ID`; how to create a stable self-signed "GOV-AIOS Dev" code-signing certificate in Keychain Access, and why ad-hoc loses permissions on rebuild), granting permissions, and "never grant Terminal or Python these permissions for GOV-AIOS".
-- [ ] **Step 8:** Commit: `git commit -m "Package gov-aios as signed com.govaios.cli app"`.
+- [ ] **Step 4:** Write `packaging/README.md`, covering:
+  - the build;
+  - `--onedir` and why `--onefile` breaks `_MEIPASS`;
+  - the signing identity (`GOVAIOS_SIGN_ID`): how to create a stable self-signed "GOV-AIOS Dev" code-signing certificate in Keychain Access, and why ad-hoc signing loses the permissions on every rebuild;
+  - granting permissions;
+  - the shim's temp-file stdio;
+  - "never grant Terminal or Python these permissions for GOV-AIOS".
+
+  Then write the README section.
+- [ ] **Step 5:** Commit: `git commit -m "Verify gov-aios end to end and document packaging"`.

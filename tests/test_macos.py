@@ -1,0 +1,202 @@
+"""MacDesktop input guards with every pyobjc call mocked: no real input, focus, AX or app launch."""
+import types
+
+import pytest
+
+from govaios.desktop import Node
+from govaios.desktop import macos
+
+CHROME, OTHER = 100, 200
+
+
+class Running:
+    def __init__(self):
+        self.activated = 0
+
+    def processIdentifier(self):
+        return CHROME
+
+    def activateWithOptions_(self, opts):
+        self.activated += 1
+
+
+class AX:
+    """Fake accessibility state: which pid/window has focus, what is under the click point."""
+
+    def __init__(self):
+        self.focus_pid, self.window, self.hit_pid = CHROME, "win1", CHROME
+        self.hit_window = "win1"
+        self.focus_err = self.hit_err = 0
+
+    def copy_attr(self, el, name, _):
+        if (el, name) == ("sys", "AXFocusedApplication"):
+            return self.focus_err, "focused_app"
+        if (el, name) == ("focused_app", "AXFocusedWindow"):
+            return 0, self.window
+        if (el, name) == ("hit", "AXWindow"):
+            return 0, self.hit_window
+        return -25212, None
+
+    def get_pid(self, el, _):
+        return 0, {"focused_app": self.focus_pid, "hit": self.hit_pid}[el]
+
+    def at_position(self, el, x, y, _):
+        return self.hit_err, "hit"
+
+
+@pytest.fixture
+def env(monkeypatch):
+    ax, posted = AX(), []
+    fake_q = types.SimpleNamespace(
+        CGEventCreateKeyboardEvent=lambda src, code, down: ("key", code, down),
+        CGEventCreateMouseEvent=lambda src, t, pt, b: ("mouse", t),
+        CGEventSetFlags=lambda ev, f: None,
+        CGEventKeyboardSetUnicodeString=lambda ev, n, ch: None,
+        CGEventPost=lambda tap, ev: posted.append(("hid", ev)),
+        CGEventPostToPid=lambda pid, ev: posted.append((pid, ev)),
+        kCGEventMouseMoved=5, kCGEventLeftMouseDown=1, kCGEventLeftMouseUp=2, kCGMouseButtonLeft=0, kCGHIDEventTap=0)
+    monkeypatch.setattr(macos, "Q", fake_q)
+    monkeypatch.setattr(macos, "AXIsProcessTrusted", lambda: True)
+    monkeypatch.setattr(macos, "AXUIElementCreateSystemWide", lambda: "sys")
+    monkeypatch.setattr(macos, "AXUIElementCopyAttributeValue", ax.copy_attr)
+    monkeypatch.setattr(macos, "AXUIElementGetPid", ax.get_pid)
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", ax.at_position)
+    monkeypatch.setattr(macos, "CFEqual", lambda a, b: a == b)
+    monkeypatch.setattr(macos.time, "sleep", lambda s: None)
+    calls = []
+    monkeypatch.setattr(macos, "subprocess", types.SimpleNamespace(
+        Popen=lambda *a, **k: calls.append(("popen", a[0])), run=lambda *a, **k: calls.append(("run", a[0])),
+        DEVNULL=None))
+    d = macos.MacDesktop()
+    app = Running()
+    d._app = lambda name: app
+    d._bounds = lambda node: (10, 10, 100, 20)
+    d.activate("chrome")
+    return types.SimpleNamespace(d=d, ax=ax, posted=posted, app=app, calls=calls)
+
+
+def test_other_app_focused_refuses_keys(env):
+    env.ax.focus_pid = OTHER
+    with pytest.raises(RuntimeError, match="not frontmost"):
+        env.d.press("enter")
+    with pytest.raises(RuntimeError):
+        env.d.type_text("x")
+    assert env.posted == []
+
+
+def test_target_focused_posts_keys_to_pid(env):
+    env.d.press("enter")
+    env.d.type_text("ab")
+    assert env.posted and all(dest == CHROME for dest, _ in env.posted)
+
+
+def test_ax_error_reading_focus_refuses(env):
+    env.ax.focus_err = -25204
+    with pytest.raises(RuntimeError):
+        env.d.press("enter")
+    assert env.posted == []
+
+
+def test_no_target_refuses(env):
+    env.d._target = None
+    with pytest.raises(RuntimeError):
+        env.d.press("enter")
+
+
+def test_pinned_window_must_keep_focus(env):
+    env.d.pin_window(env.d.focused_window_id("chrome"))
+    env.d.type_text("a")
+    env.ax.window = "win2"
+    with pytest.raises(RuntimeError, match="verified window"):
+        env.d.type_text("b")
+    env.ax.window = None   # AX could not read the window: fail closed
+    with pytest.raises(RuntimeError):
+        env.d.press("enter")
+    assert len(env.posted) == 2
+
+
+def test_pin_refused_when_window_no_longer_focused(env):
+    tok = env.d.focused_window_id("chrome")
+    env.ax.window = "win2"
+    with pytest.raises(RuntimeError):
+        env.d.pin_window(tok)
+
+
+def test_focused_window_id_requires_target_focus(env):
+    env.ax.focus_pid = OTHER
+    with pytest.raises(RuntimeError):
+        env.d.focused_window_id("chrome")
+
+
+def test_click_point_owned_by_other_app_refuses(env):
+    env.ax.hit_pid = OTHER
+    with pytest.raises(RuntimeError, match="click point"):
+        env.d.click(Node("link", "SECRET"))
+    env.ax.hit_pid, env.ax.hit_err = CHROME, -25200
+    with pytest.raises(RuntimeError):
+        env.d.click(Node("link", "SECRET"))
+    assert env.posted == []
+
+
+def test_click_in_target_posts_mouse(env):
+    env.d.click(Node("link", "SECRET"))
+    assert len(env.posted) == 3
+
+
+def test_activate_waits_for_ax_focus(env):
+    env.ax.focus_pid = OTHER
+    with pytest.raises(RuntimeError, match="front"):
+        env.d.activate("chrome")
+    env.ax.focus_pid = CHROME
+    env.d.activate("chrome")
+
+
+def test_errors_carry_no_page_content(env, monkeypatch):
+    d = macos.MacDesktop()
+    d._app, d._target = env.d._app, "chrome"
+    monkeypatch.setattr(macos, "_attr", lambda el, name: None)
+    with pytest.raises(RuntimeError) as e:
+        d._bounds(Node("link", "SECRET-NAME"))
+    assert "SECRET" not in str(e.value)
+    env.d._bounds = lambda node: (10, 10, 0, 0)
+    with pytest.raises(RuntimeError) as e:
+        env.d.click(Node("link", "SECRET-NAME"))
+    assert "SECRET" not in str(e.value)
+
+
+def test_launch_hands_profile_to_running_chrome(env):
+    env.d.launch_application("chrome", "Profile 2")
+    assert env.calls[0][0] == "popen" and env.calls[0][1][-1] == "--profile-directory=Profile 2"
+
+
+def test_launch_starts_chrome_via_open_when_not_running(env):
+    env.d._app = lambda name: None
+    env.d.activate = lambda app: None
+    env.d.launch_application("chrome", "Profile 2")
+    assert env.calls == [("run", ["open", "-a", "Google Chrome", "--args", "--profile-directory=Profile 2"])]
+
+
+def test_permission_error_names_the_app(monkeypatch):
+    monkeypatch.setattr(macos, "AXIsProcessTrusted", lambda: False)
+    with pytest.raises(PermissionError, match="gov-aios.app"):
+        macos.MacDesktop()
+
+
+def test_click_rechecks_before_button_down(env, monkeypatch):
+    def move_then_steal(tap, ev):   # a dialog takes the point right after the pointer moves
+        env.posted.append(("hid", ev))
+        env.ax.hit_pid = OTHER
+    monkeypatch.setattr(macos.Q, "CGEventPost", move_then_steal)
+    with pytest.raises(RuntimeError, match="click point"):
+        env.d.click(Node("link", "SECRET"))
+    assert [ev[1] for _, ev in env.posted] == [5]   # mouse moved only; no down/up
+
+
+def test_click_point_in_other_window_of_target_refuses(env):
+    env.d.pin_window(env.d.focused_window_id("chrome"))
+    env.ax.hit_window = "win2"   # e.g. another Chrome window overlapping the element
+    with pytest.raises(RuntimeError, match="verified window"):
+        env.d.click(Node("link", "SECRET"))
+    env.ax.hit_window = "win1"
+    env.d.click(Node("link", "SECRET"))
+    assert len(env.posted) == 3

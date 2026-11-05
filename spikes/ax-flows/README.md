@@ -1,3 +1,5 @@
+Code moved to `govaios/`; this file keeps the spike's findings.
+
 # Spike: governed flows on Gmail and Himalayas
 
 A minimal GOV-AIOS runner: flow YAML → governance decision → OS adapter →
