@@ -40,10 +40,7 @@ class FakeDesktop:
 
     def __init__(self, answers):
         self.answers, self.calls, self.url, self.typed = list(answers), [], "about:blank", ""
-
-    def ask_admin(self, q, timeout_s=60):
-        self.calls.append("ask")
-        return self.answers.pop(0) if self.answers else False
+        FakeDesktop.current = self
 
     def activate(self, app):
         self.calls.append("activate")
@@ -91,7 +88,20 @@ def nosleep(monkeypatch):
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
 
 
-def run(tmp_path, answers, desk=FakeDesktop, directory=None):
+@pytest.fixture(autouse=True)
+def fake_auth(monkeypatch):
+    """Scripted answers (from the FakeDesktop) stand in for Touch ID; never real prompts."""
+    def approve(q, reason, home, channel="touch_id"):
+        d = FakeDesktop.current
+        d.calls.append("ask")
+        ok = d.answers.pop(0) if d.answers else False
+        return ok, "biometric" if ok else "failed"
+    monkeypatch.setattr(engine.auth, "approve", approve)
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
+
+
+def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False):
     src = tmp_path / "src"
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
@@ -102,6 +112,8 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None):
         t = t.replace("directory: jd_selected", f"directory: {directory}")
     f.write_text(t)
     r = Runner(f, desk(answers), tmp_path)
+    if preapprove:
+        r.approvals.approve_flow(r.flow["id"], r.digest)
     try:
         r.run()
         err = None
@@ -189,7 +201,7 @@ def test_resume_denied_is_audited(tmp_path):
     assert isinstance(err, Stop)
     req = [x for x in e if x["kind"] == "request" and x["action"] == "resume"]
     assert len(req) == 1 and req[0]["decision"] == "deny" and req[0]["approver"] == "admin"
-    assert req[0]["channel"] == "desktop_dialog" and e[-1]["kind"] == "stop"
+    assert req[0]["channel"] == "touch_id" and req[0]["auth"] == "failed" and e[-1]["kind"] == "stop"
     assert verify(r.audit.path, r.audit.pub_path).ok
 
 
@@ -304,3 +316,43 @@ def test_revoked_flow_stops_at_next_gate(tmp_path):
     assert isinstance(err, Stop)
     assert entries[-1]["kind"] == "stop" and entries[-1]["reason"] == "revoked"
     assert r.d.calls.count("click") == 1
+
+
+def test_approved_flow_start_needs_proof(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (False, "failed"))
+    r, e, err = run(tmp_path, [True] * 10, preapprove=True)
+    assert isinstance(err, Stop) and "launch" not in r.d.calls and "ask" not in r.d.calls
+    req = [x for x in e if x.get("action") == "run_start"]
+    assert len(req) == 1 and req[0]["decision"] == "deny" and req[0]["auth"] == "failed"
+    assert req[0]["approver"] == "admin" and req[0]["channel"] == "touch_id"
+
+
+def test_unapproved_flow_one_prompt(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("prove must not run")
+    monkeypatch.setattr(engine.auth, "prove", boom)
+    _, e, err = run(tmp_path, [True] * 10)
+    fa = [x for x in e if x["kind"] == "flow_approval"]
+    assert err is None and fa[0]["auth"] == "biometric" and fa[0]["channel"] == "touch_id"
+    assert not [x for x in e if x.get("action") == "run_start"]
+
+
+def test_first_contact_records_auth(tmp_path):
+    _, e, _ = run(tmp_path, [True] * 10)
+    asks = [x for x in e if x["kind"] == "request" and x["approver"] == "admin"]
+    assert asks and all(x["channel"] == "touch_id" and x["auth"] == "biometric" for x in asks)
+    assert all(x["auth"] is None for x in e if x["kind"] == "request" and x["approver"] == "policy")
+
+
+def test_busy_deny_names_busy_not_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (False, "busy"))
+    _, e, err = run(tmp_path, [])
+    assert isinstance(err, Stop) and "busy" in str(err) and e[-2]["auth"] == "busy"
+
+
+def test_lock_mid_run_stops(tmp_path, monkeypatch):
+    n = []
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: bool(n.append(1)) or len(n) > 1)
+    r, e, err = run(tmp_path, [True] * 10)
+    assert isinstance(err, Stop) and e[-1]["reason"] == "screen_locked"
+    assert [x["action"] for x in e if x["kind"] == "action"] == ["launch_application"]

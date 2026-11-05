@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from . import auth
 from .audit.log import AuditLog, url_for_audit
 from .approvals import Approvals, pages_used, read_bound
 from .policy import decide, origin
@@ -120,12 +121,12 @@ class Runner:
         self._audit("action", action=name, target=target, outcome="done")
         return out
 
-    def ask(self, question, timeout_s):
-        """Admin dialog; afterwards (any answer) the flow's app is brought back before any further input."""
-        ok = self.d.ask_admin(question, timeout_s=timeout_s) is True   # only an explicit approve
+    def ask(self, question, reason):
+        """Authenticated admin prompt; afterwards (any answer) the flow's app is brought back before any further input."""
+        ok, how = auth.approve(question, reason, self.home)
         if self.launched:
             self._act("activate", self.d.activate, self.app)
-        return ok
+        return ok, how
 
     # governance gate for every side effect
     def gate(self, action, risk, target=None, destination=NO_DEST):
@@ -139,20 +140,21 @@ class Runner:
             destination = None
         dest = url_for_audit(destination) if destination else None
         verdict = decide({"action": action, "risk": risk, "destination": destination}, self.flow, self.approvals)
-        asked = verdict == "ask"
+        asked, how = verdict == "ask", None
         if asked:
             q = f"Flow '{self.flow['id']}' wants to {action}"
             q += f" and reach {origin(destination)} for the first time." if destination else "."
-            if self.ask(q + " Approve?", 180):
+            ok, how = self.ask(q + " Approve?", f"{self.flow['id']}: {action} {origin(destination) if destination else ''}".strip())
+            if ok:
                 if destination:
                     self.approvals.approve_destination(self.flow["id"], origin(destination))
                 verdict = "allow"
             else:
                 verdict = "deny"
         self._audit("request", action=action, risk=risk, target=target, destination=dest, decision=verdict,
-                    approver="admin" if asked else "policy", channel="desktop_dialog" if asked else None)
+                    approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how)
         if verdict != "allow":
-            raise Stop(f"denied {action} (risk {risk}) {dest or ''}")
+            raise Stop(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
 
     def approve_flow(self):
         digest = self.digest
@@ -162,11 +164,11 @@ class Runner:
         q = (f"First run of flow '{f['id']}' (v{f['version']}). It may: {', '.join(f['permissions']['allow'])}; "
              f"max element risk {f['permissions']['max_element_risk']}; destinations "
              f"{', '.join(f['destinations'])}. Approve this flow?")
-        ok = self.ask(q, 180)
+        ok, how = self.ask(q, f"approve flow {f['id']}")
         self._audit("flow_approval", flow_hash=digest, decision="allow" if ok else "deny",
-                    approver="admin", channel="desktop_dialog")
+                    approver="admin", channel="touch_id", auth=how)
         if not ok:
-            raise Stop("admin did not approve the flow")
+            raise Stop("flow approval busy" if how == "busy" else "admin did not approve the flow")
         self.approvals.approve_flow(f["id"], digest)
 
     def snapshot(self):
@@ -214,7 +216,14 @@ class Runner:
         self.step = None
         self._audit("flow_start", flow_hash=self.digest)
         try:
-            self.approve_flow()
+            if self.approvals.flow_ok(self.flow["id"], self.digest):   # approved flow: Touch ID is the start proof
+                ok, how = auth.prove(f"run {self.flow['id']}", self.home)
+                self._audit("request", action="run_start", decision="allow" if ok else "deny",
+                            approver="admin", channel="touch_id", auth=how)
+                if not ok:
+                    raise Stop("start not proven")
+            else:
+                self.approve_flow()
             self.steps(self.flow["steps"])
         except Exception as e:   # fail closed: any failure is a recorded stop
             self._audit("stop", reason=str(e) if isinstance(e, Stop) else type(e).__name__)
@@ -224,6 +233,8 @@ class Runner:
 
     def steps(self, steps):
         for s in steps:
+            if auth.screen_locked():
+                raise Stop("screen_locked")
             self.step = s["id"]
             getattr(self, "do_" + s["action"])(s)
 
@@ -263,10 +274,10 @@ class Runner:
             if what == "stop_and_report":
                 raise Stop("unexpected page")
             # stop_and_request_user (Rule 6)
-            ok = self.ask(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
-                          f"then click Approve to continue.", 300)
+            ok, how = self.ask(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
+                               f"then click Approve to continue.", f"{self.flow['id']}: resume {page}")
             self._audit("request", action="resume", risk="read", target=page, decision="allow" if ok else "deny",
-                        approver="admin", channel="desktop_dialog")
+                        approver="admin", channel="touch_id", auth=how)
             if not ok:
                 raise Stop(f"stopped at {page}; admin did not resume")
         raise Stop("still not on the expected page after admin action")

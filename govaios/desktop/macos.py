@@ -62,6 +62,8 @@ class MacDesktop:
 
     def _require_focus(self):
         """Synthetic input goes to whatever has focus: refuse unless it is the flow's app (and pinned window)."""
+        if auth.screen_locked():
+            raise RuntimeError("input refused: screen locked")
         pid = self._target_pid()
         fpid, win = self._focused()
         if fpid is None or fpid != pid:
@@ -134,10 +136,6 @@ class MacDesktop:
         doc = self._find(win, "AXWebArea", 30) if win is not None else None
         url = _attr(doc, "AXURL") if doc is not None else None
         return str(url.absoluteString()) if url is not None else ""
-
-    def ask_admin(self, question, timeout_s=60):
-        """Native dialog; anything but an explicit Approve (incl. timeout) is a deny."""
-        return auth.dialog(question, timeout_s)
 
     # --- perception ---
     def web_root(self, app):

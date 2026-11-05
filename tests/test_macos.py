@@ -200,3 +200,10 @@ def test_click_point_in_other_window_of_target_refuses(env):
     env.ax.hit_window = "win1"
     env.d.click(Node("link", "SECRET"))
     assert len(env.posted) == 3
+
+
+def test_locked_screen_refuses_input(env, monkeypatch):
+    monkeypatch.setattr(macos.auth, "screen_locked", lambda: True)
+    with pytest.raises(RuntimeError, match="screen locked"):
+        env.d.press("enter")
+    assert env.posted == []
