@@ -20,7 +20,10 @@ def test_run_dev_blocks_network(tmp_path):
     driver = textwrap.dedent("""
         import socket
         from govaios import auth, cli, engine
-        auth.screen_locked = lambda: False   # dev preflight still checks the lock; never depend on the real screen
+        from govaios import powers, runstate
+        auth.screen_locked = lambda: False   # dev runs every preflight check; never depend on the real screen or guard
+        runstate.guard_alive = lambda home: True
+        powers.fresh = lambda home, now=None: True
         def run(self):
             socket.create_connection(("127.0.0.1", 9))
         engine.Runner.__init__ = lambda self, *a: None
@@ -131,43 +134,64 @@ def _fake_run(monkeypatch, exc, packaged=False):
     monkeypatch.setattr(engine, "Runner", R)
     monkeypatch.setattr(desktop, "get_desktop", lambda: None)
     monkeypatch.setattr("govaios.netguard.block_all_network", lambda: None)
-    monkeypatch.setattr(identity, "check", lambda: {**OK, "bundle_id": "com.govaios.cli" if packaged else "x"})
     _checks(monkeypatch)
+    monkeypatch.setattr(identity, "check", lambda: {**OK, "bundle_id": "com.govaios.cli" if packaged else "x"})
     return seen
 
 
-def _checks(monkeypatch, guard=True, stopped=False, locked=False, fresh=True):
+def _checks(monkeypatch, guard=True, stopped=False, locked=False, fresh=True, ident=None):
     from govaios import auth, powers, runstate
+    monkeypatch.setattr(identity, "check", lambda: {**OK, **(ident or {})})
     monkeypatch.setattr(runstate, "guard_alive", lambda home: guard)
     monkeypatch.setattr(runstate, "stopped", lambda home: stopped)
     monkeypatch.setattr(auth, "screen_locked", lambda: locked)
     monkeypatch.setattr(powers, "fresh", lambda home, now=None: fresh)
 
 
-def test_preflight_order(monkeypatch, govaios_home):
+BAD_IDENT = {"bundle_id": "x", "frozen": False, "accessibility": False, "screen_recording": False}
+
+
+@pytest.mark.parametrize("dev", [False, True])   # row 28: no dev exemptions
+def test_preflight_order(monkeypatch, govaios_home, dev):
     from govaios.cli import preflight
-    want = [("guard", dict(guard=False, stopped=True, locked=True, fresh=False)),
-            ("STOPPED", dict(stopped=True, locked=True, fresh=False)),
-            ("locked", dict(locked=True, fresh=False)),
-            ("powers review", dict(fresh=False))]
+    want = [("guard", dict(guard=False, stopped=True, locked=True, fresh=False, ident=BAD_IDENT)),
+            ("STOPPED", dict(stopped=True, locked=True, fresh=False, ident=BAD_IDENT)),
+            ("locked", dict(locked=True, fresh=False, ident=BAD_IDENT)),
+            ("powers review", dict(fresh=False, ident=BAD_IDENT))]
     for word, bad in want:
         _checks(monkeypatch, **bad)
         with pytest.raises(SystemExit) as e:
-            preflight(govaios_home, dev=False)
+            preflight(govaios_home, dev=dev)
         assert word in str(e.value) and "\n" not in str(e.value)
-    _checks(monkeypatch)
-    preflight(govaios_home, dev=False)
-
-
-def test_preflight_dev_skips_guard_and_powers_only(monkeypatch, govaios_home):
-    from govaios.cli import preflight
-    _checks(monkeypatch, guard=False, fresh=False)
-    preflight(govaios_home, dev=True)
-    for word, bad in [("STOPPED", dict(stopped=True)), ("locked", dict(locked=True))]:
-        _checks(monkeypatch, guard=False, fresh=False, **bad)
+    _checks(monkeypatch, ident=BAD_IDENT)
+    if dev:
+        preflight(govaios_home, dev=True)   # identity is the one dev difference
+    else:
         with pytest.raises(SystemExit) as e:
-            preflight(govaios_home, dev=True)
-        assert word in str(e.value)
+            preflight(govaios_home, dev=False)
+        assert "bundle_id" in str(e.value) and "\n" not in str(e.value)
+    _checks(monkeypatch)
+    preflight(govaios_home, dev=dev)
+
+
+@pytest.mark.parametrize("key", ["bundle_id", "frozen", "accessibility", "screen_recording"])
+def test_preflight_identity_names_failing_check(monkeypatch, govaios_home, key):
+    from govaios.cli import preflight
+    _checks(monkeypatch, ident={key: BAD_IDENT[key]})
+    with pytest.raises(SystemExit) as e:
+        preflight(govaios_home, dev=False)
+    assert str(e.value).endswith(key)
+
+
+def test_run_refuses_failed_identity_before_runner(monkeypatch, capsys):
+    from govaios import auth
+    seen = _fake_run(monkeypatch, None, packaged=True)
+    calls = iter([OK, {**OK, "accessibility": False}])   # require_app passes; doctor's checks then fail
+    monkeypatch.setattr(identity, "check", lambda: next(calls))
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    with pytest.raises(SystemExit):
+        main(["run", "x.yaml"])
+    assert "executor" not in seen and "accessibility" in capsys.readouterr().err
 
 
 def test_run_preflight_refusal(monkeypatch, capsys, govaios_home):
@@ -232,11 +256,11 @@ def test_dump_needs_proof(monkeypatch, capsys, govaios_home):
     monkeypatch.setattr(desktop, "get_desktop", lambda: D())
     monkeypatch.setattr(auth, "prove", lambda reason, home: (reasons.append(reason), (False, "failed"))[1])
     assert main(["dump", "--dev"]) == 1
-    assert reads == [] and reasons == ["read the current Chrome page"]
+    assert reads == [] and reasons == ["print the open Chrome page"]
     _checks(monkeypatch, locked=True)
     with pytest.raises(SystemExit):
         main(["dump", "--dev"])
-    assert reasons == ["read the current Chrome page"]   # preflight refuses before the proof
+    assert reasons == ["print the open Chrome page"]   # preflight refuses before the proof
 
 
 @pytest.mark.parametrize("argv,profile", [(["run", "x.yaml", "--dev"], "RUN_PROFILE"), (["hook"], "RUN_PROFILE"),

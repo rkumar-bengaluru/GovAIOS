@@ -16,6 +16,12 @@ def check() -> dict:
     }
 
 
+def failing(c: dict) -> list[str]:
+    """Doctor's identity checks that fail: the installed, frozen app holding its two TCC grants."""
+    bad = [] if c["bundle_id"] == "com.govaios.cli" else ["bundle_id"]
+    return bad + [k for k in ("frozen", "accessibility", "screen_recording") if not c[k]]
+
+
 def require_app(dev: bool) -> bool:
     """True when running as the packaged app; with --dev outside it, False (dev mode)."""
     if check()["bundle_id"] == "com.govaios.cli":

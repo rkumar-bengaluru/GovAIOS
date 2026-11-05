@@ -24,23 +24,25 @@ def _doctor(args) -> int:
              powers_review=ts.date().isoformat() if ts else "missing", screen_locked=auth.screen_locked())
     for k, v in c.items():
         print(f"{k}: {v}")
-    ok = c["bundle_id"] == "com.govaios.cli" and all(c[k] for k in ("frozen", "accessibility", "screen_recording"))
-    ok = ok and c["guard"] and managed and powers.fresh(home) and not c["screen_locked"]
+    ok = not identity.failing(c) and c["guard"] and managed and powers.fresh(home) and not c["screen_locked"]
     return 0 if ok else 1
 
 
 def preflight(home, dev: bool) -> None:
-    """Row 28, in order (the sandbox is already applied in main). Dev skips only what needs the installed app."""
+    """Rows 28 and 24, in order (the sandbox is already applied in main). Dev differs only in identity."""
     from . import auth, powers, runstate
 
-    if not dev and not runstate.guard_alive(home):
+    if not runstate.guard_alive(home):
         raise SystemExit("refused: the gov-aios guard is not running")
     if runstate.stopped(home):
         raise SystemExit("refused: STOPPED (emergency stop); run `gov-aios resume`")
     if auth.screen_locked():
         raise SystemExit("refused: the screen is locked")
-    if not dev and not powers.fresh(home):
+    if not powers.fresh(home):
         raise SystemExit("refused: no powers review in the last 30 days; run `gov-aios review-powers`")
+    bad = [] if dev else identity.failing(identity.check())
+    if bad:
+        raise SystemExit(f"refused: doctor check failed: {', '.join(bad)}")
 
 
 def _run(args) -> int:
@@ -117,7 +119,7 @@ def _dump(args) -> int:
     block_all_network()  # dump reads page content; nothing it does needs the network
     home = data_home()
     preflight(home, dev=not packaged)
-    if not auth.prove("read the current Chrome page", home)[0]:   # row 29: else a confused deputy for AX
+    if not auth.prove("print the open Chrome page", home)[0]:   # row 29: else a confused deputy for AX
         print("not proven; nothing read", file=sys.stderr)
         return 1
     d = get_desktop()
