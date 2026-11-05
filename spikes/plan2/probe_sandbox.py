@@ -1,11 +1,11 @@
 """Row 22 probe: sandbox_init with the plan-2 profiles, then check what still works.
 
 Usage (always in a throwaway process: sandbox_init cannot be undone):
-  python probe_sandbox.py run            # RUN_PROFILE, no-TCC checks
+  python probe_sandbox.py run            # RUN_PROFILE: network checks + no-prompt API checks
   python probe_sandbox.py ui --drive     # UI_PROFILE; unsandboxed parent fetches the served URL
   python probe_sandbox.py run --tcc      # + AX / CGEvent / activate / osascript / LAContext (signed app, admin)
   python probe_sandbox.py run --exec     # apply via /usr/bin/sandbox-exec -p instead (fallback)
-  ... --dnsfix                           # append DNS_FIX (row 22 as written does not block DNS)
+  ... --original                         # row 22's first strings, without the mDNSResponder deny (row 39)
 Prints one line per check: PASS/FAIL <name> <detail>. Never prints window titles or page content.
 """
 import ctypes
@@ -16,15 +16,16 @@ import sys
 import threading
 import time
 
-# Verbatim from decision log row 22.
-RUN_PROFILE = (
-    '(version 1) (allow default) (deny network*) (allow network* (remote unix-socket)) '
-    '(deny mach-lookup (global-name "com.apple.dnssd.service"))'
-)
-UI_PROFILE = RUN_PROFILE + ' (allow network-bind network-inbound (local ip "localhost:*"))'
-# Spike finding: row 22's mach-lookup deny does not stop DNS; libinfo reaches mDNSResponder over this
-# Unix socket, which "(allow network* (remote unix-socket))" lets through. Candidate amendment (--dnsfix).
+_BASE = ('(version 1) (allow default) (deny network*) (allow network* (remote unix-socket)) '
+         '(deny mach-lookup (global-name "com.apple.dnssd.service"))')
+_UI_BIND = ' (allow network-bind network-inbound (local ip "localhost:*"))'
+# Row 39: libinfo reaches mDNSResponder over this Unix socket, which the unix-socket allow lets through.
 DNS_FIX = '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))'
+# Final strings, verbatim from amended row 22 (DNS_FIX last, so it overrides the unix-socket allow).
+RUN_PROFILE = _BASE + " " + DNS_FIX
+UI_PROFILE = _BASE + _UI_BIND + " " + DNS_FIX
+# Row 22's first strings (--original), kept to reproduce row 39.
+ORIGINAL = {"run": _BASE, "ui": _BASE + _UI_BIND}
 
 # Working ctypes binding (Task 5/6 copy this).
 _lib = ctypes.CDLL("/usr/lib/libsandbox.1.dylib")
@@ -127,6 +128,21 @@ def ui_checks():
                 lambda: socket.create_connection(("127.0.0.1", port), timeout=2).close())
 
 
+def api_checks():
+    """No-prompt pyobjc calls the subcommands make; must still be callable inside the sandbox."""
+    import AppKit
+    import ApplicationServices as AS
+    import LocalAuthentication as LA
+
+    expect_ok("AXIsProcessTrusted callable", lambda: f"returned {bool(AS.AXIsProcessTrusted())}")
+    expect_ok("NSWorkspace.runningApplications",
+              lambda: f"{len(AppKit.NSWorkspace.sharedWorkspace().runningApplications())} apps")
+    for name, pol in (("biometrics", LA.LAPolicyDeviceOwnerAuthenticationWithBiometrics),
+                      ("device_owner", LA.LAPolicyDeviceOwnerAuthentication)):
+        ok, err = LA.LAContext.alloc().init().canEvaluatePolicy_error_(pol, None)
+        report(bool(ok), f"LAContext canEvaluate {name}", f"error={err.code() if err else None}")
+
+
 def tcc_checks():
     import AppKit
     import ApplicationServices as AS
@@ -150,7 +166,7 @@ def tcc_checks():
                    f"windows={len(wins)} title_len={len(title) if title else 0}")
         for down in (True, False):  # left shift (56): harmless
             Quartz.CGEventPostToPid(pid, Quartz.CGEventCreateKeyboardEvent(None, 56, down))
-        report(True, "CGEventPostToPid shift", "posted (no error raised)")
+        print("INFO CGEventPostToPid shift posted (effect unverified)", flush=True)
 
     finder = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_("com.apple.finder")
     ok = bool(finder) and finder[0].activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
@@ -160,7 +176,8 @@ def tcc_checks():
                         'display dialog "GOV-AIOS sandbox probe: click OK" buttons {"OK"} '
                         'default button "OK" giving up after 30'],
                        capture_output=True, text=True)
-    report(r.returncode == 0, "osascript dialog", (r.stdout or r.stderr).strip())
+    out = (r.stdout or r.stderr).strip()
+    report(r.returncode == 0 and "gave up:true" not in out, "osascript dialog", out)
 
     import LocalAuthentication as LA
     ctx = LA.LAContext.alloc().init()
@@ -195,8 +212,8 @@ def main(argv):
         return drive(argv)
     profile_name = argv[0] if argv and argv[0] in ("run", "ui") else "run"
     profile = UI_PROFILE if profile_name == "ui" else RUN_PROFILE
-    if "--dnsfix" in argv:
-        profile += " " + DNS_FIX
+    if "--original" in argv:
+        profile = ORIGINAL[profile_name]
     if "--exec" in argv and os.environ.get("GOVAIOS_PROBE_EXECED") != "1":
         os.environ["GOVAIOS_PROBE_EXECED"] = "1"
         os.execv("/usr/bin/sandbox-exec", ["sandbox-exec", "-p", profile, sys.executable, *sys.argv])
@@ -212,6 +229,7 @@ def main(argv):
     if profile_name == "ui":
         ui_checks()
     net_checks(profile_name)
+    api_checks()
     if "--tcc" in argv:
         tcc_checks()
     return 0

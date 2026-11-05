@@ -11,15 +11,15 @@ Run from the repo root with `.venv/bin/python` (needs
 | Probe | Row | Command | Expected | Observed (2026-11-05, Claude Code 2.1.318) |
 | :- | :- | :- | :- | :- |
 | `probe_latency.sh` | 13 | `spikes/plan2/probe_latency.sh` | median < 1 s | median 39 ms (20 runs, min 38, max 77) |
-| `probe_sandbox.py` | 22 | `.venv/bin/python spikes/plan2/probe_sandbox.py run --drive` | sandbox_init ok; TCP and DNS fail; Unix sockets work | sandbox_init ok, TCP and child `curl` blocked, socketpair and named Unix socket work, bind blocked. **DNS still resolves** (also uncached names): FAIL |
-| `probe_sandbox.py` | 22 | `... run --dnsfix --drive` | as above, DNS fails | all PASS: `DNS_FIX` blocks DNS |
-| `probe_sandbox.py` | 22 | `... ui --dnsfix --drive` | serves on 127.0.0.1 | http.server on 127.0.0.1:0 serves an unsandboxed client; sandboxed outbound to localhost blocked; rest as `run` |
-| `probe_sandbox.py` | 22 | `... run --exec --dnsfix --drive`, `ui --exec ...` | fallback works | `/usr/bin/sandbox-exec -p` gives the same results |
-| `probe_sandbox.py` (app) | 22 | `spikes/plan2/build_probe_app.sh`; `open -W --stdout F --stderr F build/probe/dist/gov-aios-probe.app --args run --dnsfix` | works in a signed, hardened-runtime app | all PASS. TCC checks (`--tcc`): RUNBOOK §4 |
-| one-off under `RUN_PROFILE + DNS_FIX` | 22 | see report | no-prompt pyobjc still callable | `AXIsProcessTrusted` returns (False, no grant), `NSWorkspace.runningApplications` works, `LAContext.canEvaluatePolicy` works |
+| `probe_sandbox.py` | 22 | `.venv/bin/python spikes/plan2/probe_sandbox.py run --original --drive` (row 22's first strings) | sandbox_init ok; TCP and DNS fail; Unix sockets work | sandbox_init ok, TCP and child `curl` blocked, socketpair and named Unix socket work, bind blocked. **DNS still resolves** (also uncached names): FAIL (row 39) |
+| `probe_sandbox.py` | 22 | `... run --drive` (final row-22 `RUN_PROFILE`, the default) | as above, DNS fails | all PASS: the mDNSResponder deny blocks DNS |
+| `probe_sandbox.py` | 22 | `... ui --drive` (final `UI_PROFILE`) | serves on 127.0.0.1 | http.server on 127.0.0.1:0 serves an unsandboxed client; sandboxed outbound to localhost blocked; rest as `run` |
+| `probe_sandbox.py` | 22 | `... run --exec --drive`, `ui --exec --drive` | fallback works | `/usr/bin/sandbox-exec -p` gives the same results |
+| `probe_sandbox.py` `api_checks` (every mode) | 22 | as above | no-prompt pyobjc still callable in the sandbox | `AXIsProcessTrusted` returns (False, no grant), `NSWorkspace.runningApplications` works, `LAContext.canEvaluatePolicy` works for both policies |
+| `probe_sandbox.py` (app) | 22 | `spikes/plan2/build_probe_app.sh`; `open -W --stdout F --stderr F build/probe/dist/gov-aios-probe.app --args run` | works in a signed, hardened-runtime app | all PASS. TCC checks (`--tcc`): RUNBOOK §4 |
 | `probe_auth.py` | 4, 6 | `.venv/bin/python spikes/plan2/probe_auth.py` | both policies evaluable with Touch ID | biometrics True, device_owner True, biometryType 1 (Touch ID), lid open. Prompts: RUNBOOK §1 |
 | `probe_lock.py` | 8 | `.venv/bin/python spikes/plan2/probe_lock.py 2` | keys present | `kCGSessionOnConsoleKey` == `"kCGSSessionOnConsoleKey"`, True; `CGSSessionScreenIsLocked` **absent** (not False) while unlocked. Lock/switch: RUNBOOK §2 |
-| `probe_hotkey.py` | 10 | `.venv/bin/python spikes/plan2/probe_hotkey.py 0` (Terminal, no grants) | registers | status 0; also 0 under `RUN_PROFILE + DNS_FIX`; a second process gets -9878 (`eventHotKeyExistsErr`, exclusive flag). Firing: RUNBOOK §3 |
+| `probe_hotkey.py` | 10 | `.venv/bin/python spikes/plan2/probe_hotkey.py 0` and `... 0 --sandbox` (Terminal, no grants) | registers | status 0; also 0 with `--sandbox` (final `RUN_PROFILE`); a second process gets -9878 (`eventHotKeyExistsErr`, exclusive flag). Firing: RUNBOOK §3 |
 | `probe_chrome.py` | 23 | RUNBOOK §5 | one Chrome, page loads | admin |
 | `probe_hook.sh` + `probe_mcp.py` | 14, 27 | headless `claude -p` in a scratch dir (below) | matcher `*` covers everything | fires for Bash, Read, ToolSearch, `mcp__probe__echo`, Agent, and the subagent's Bash (payload has `agent_id`, `agent_type`) |
 | `probe_hook.sh` | 27, 28 | same | hook outside Claude's sandbox | hook reads a `sandbox.filesystem.denyRead` file; sandboxed `cat` of it gets "Operation not permitted" |
@@ -120,9 +120,10 @@ Checked against code.claude.com/docs/en/settings-reference, /hooks, /sandboxing,
 }
 ```
 
-## Sandbox profiles (row 22, amended by this spike)
+## Sandbox profiles (row 22, amended after this spike)
 
-`RUN_PROFILE` and `UI_PROFILE` in `probe_sandbox.py` are row 22 verbatim. DNS
+`RUN_PROFILE` and `UI_PROFILE` in `probe_sandbox.py` are the final strings of
+amended row 22 verbatim; `--original` uses row 22's first strings. DNS
 goes to mDNSResponder over the Unix socket `/private/var/run/mDNSResponder`,
 which `(allow network* (remote unix-socket))` lets through, so the
 `com.apple.dnssd.service` mach-lookup deny does not stop it. Appending
@@ -131,4 +132,4 @@ which `(allow network* (remote unix-socket))` lets through, so the
 (deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 ```
 
-(`DNS_FIX`) blocks it; the architect decides the row-22 amendment.
+(`DNS_FIX`) blocks it; row 22 now ends both profiles with it.

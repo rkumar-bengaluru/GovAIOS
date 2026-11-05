@@ -22,7 +22,8 @@ Cases:
 - **B. Lid closed, external display and keyboard** (no Touch ID reachable).
 - **C. Biometric lockout**: in case A, run `prompt` and touch with a finger
   that is *not* enrolled until the sheet stops accepting it (5 tries), let it
-  fail; then run the plain command again.
+  fail. Then, while locked out, do steps 1-4 below in full (as a separate
+  case C; the lockout run itself is not pasted back).
 
 Commands per case:
 
@@ -67,9 +68,10 @@ It must print `RegisterEventHotKey status=0`. Then, within 120 s, press
 
 1. Chrome frontmost (any window).
 2. Terminal frontmost.
-3. A password field has focus (secure input): e.g. the Terminal running
-   `sudo -k; sudo true` at its `Password:` prompt (press the hotkey, then
-   ctrl+C the sudo), or a password field in Chrome.
+3. A password field has focus (secure input): open a **second** Terminal tab
+   or window (the probe occupies the first), run `sudo -k; sudo true` there,
+   and at its `Password:` prompt press the hotkey, then ctrl+C the sudo. Or
+   use a password field in Chrome.
 
 Paste back: all printed lines (`FIRED n at hh:mm:ss`, `done: fired=N`) and
 which situation each press was. Expect 3 fires. Confirm no Accessibility or
@@ -89,33 +91,40 @@ Have Chrome running with at least one window. Then:
 ```
 rm -f /tmp/govaios-probe.txt
 open -W --stdout /tmp/govaios-probe.txt --stderr /tmp/govaios-probe.txt \
-  build/probe/dist/gov-aios-probe.app --args run --tcc --dnsfix
+  build/probe/dist/gov-aios-probe.app --args run --tcc
 cat /tmp/govaios-probe.txt
 ```
 
 During the run: Finder comes to the front (activation check); a dialog
 "GOV-AIOS sandbox probe: click OK" appears, click **OK**; a password/Touch ID
 sheet with reason `approve: sandbox probe` appears, authenticate. A left-shift
-press/release is posted to Chrome (no visible effect).
+press/release is posted to Chrome (no visible effect; printed as `INFO`).
+This uses the final row-22 `RUN_PROFILE`.
 
-Repeat without `--dnsfix` (row 22 verbatim) to show the fix changes nothing
-else:
-`... --args run --tcc` then `cat` again.
+Repeat with row 22's first strings (`--original`, no mDNSResponder deny) to
+show the deny changes nothing else:
+
+```
+rm -f /tmp/govaios-probe.txt
+open -W --stdout /tmp/govaios-probe.txt --stderr /tmp/govaios-probe.txt \
+  build/probe/dist/gov-aios-probe.app --args run --tcc --original
+cat /tmp/govaios-probe.txt
+```
 
 Then the UI profile with the real browser:
 
 ```
 rm -f /tmp/govaios-probe.txt
 open --stdout /tmp/govaios-probe.txt --stderr /tmp/govaios-probe.txt \
-  build/probe/dist/gov-aios-probe.app --args ui --dnsfix
-sleep 2; grep URL /tmp/govaios-probe.txt
+  build/probe/dist/gov-aios-probe.app --args ui
+for i in 1 2 3 4 5 6 7 8 9 10; do grep URL /tmp/govaios-probe.txt && break; sleep 1; done
 ```
 
 Open that URL in Chrome within 30 s; the page should say `govaios-probe-ok`.
 Then `sleep 5; cat /tmp/govaios-probe.txt`.
 
-Paste back: the three outputs. Expect every line `PASS` (in the run without
-`--dnsfix`, the two `dns` lines `FAIL`, which is the known finding), and
+Paste back: the three outputs. Expect every line `PASS` (in the `--original`
+run, the two `dns` lines `FAIL`, which is the known finding of row 39), and
 `AXIsProcessTrusted True`, `AX read Chrome window title ... title_len>0`.
 
 ## 5. Chrome profile via LaunchServices (row 23): `probe_chrome.py`

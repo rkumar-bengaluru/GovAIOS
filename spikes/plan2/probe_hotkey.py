@@ -3,6 +3,7 @@
 Usage:
   python probe_hotkey.py [seconds=60]   # register, print "FIRED <n>" on each press, exit after N s
   python probe_hotkey.py 0              # register and exit at once (status only)
+  python probe_hotkey.py 0 --sandbox    # apply RUN_PROFILE (row 22) first, as `guard` will
 Exit 2 if registration fails (e.g. combo taken by another process with the exclusive flag).
 Needs no Accessibility or Input Monitoring grant (that is what this probe checks). Task 5 copies the ctypes code.
 """
@@ -83,4 +84,9 @@ def main(seconds: int) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(int(sys.argv[1]) if len(sys.argv) > 1 else 60))
+    args = [a for a in sys.argv[1:] if a != "--sandbox"]
+    if "--sandbox" in sys.argv:
+        from probe_sandbox import RUN_PROFILE, sandbox_init
+        sandbox_init(RUN_PROFILE)
+        print("sandbox_init applied (RUN_PROFILE, row 22)", flush=True)
+    sys.exit(main(int(args[0]) if args else 60))
