@@ -58,7 +58,7 @@ def _audit_ui(args) -> int:
 
 
 def _dump(args) -> int:
-    # Read-only: no navigation, keystrokes or app launch; prints names/values to stdout only, never the audit.
+    # Read-only: no navigation, keystrokes or app launch (only sets Chrome's AX-enable flags); stdout only, never the audit.
     import time
 
     from .desktop import get_desktop
@@ -106,7 +106,7 @@ def _selftest(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="gov-aios")
+    p = argparse.ArgumentParser(prog="gov-aios", allow_abbrev=False)
     sub = p.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("doctor")
     d.add_argument("--dev", action="store_true")  # accepted and ignored (R1)
