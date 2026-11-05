@@ -87,7 +87,9 @@ def decide_tool(request, policy, approvals, protected):
         cmd = request.get("command")
         if cmd is None:
             return "deny"
-        if not _META.intersection(cmd) and any(
+        args = cmd.casefold().split()
+        touchy = any("~" in a or ".." in a.split("/") or any(q.casefold() in a for q in protected) for a in args)
+        if not touchy and not _META.intersection(cmd) and any(
                 cmd == c or cmd.startswith(c + " ") for c in policy.get("allow_commands", [])):
             return "allow"
         return "ask"

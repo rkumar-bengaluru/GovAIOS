@@ -135,3 +135,11 @@ def test_glob_pattern_escape(env):
     for pat in (str(env["user"] / ".claude/**"), "~/.claude/*", "../*", "a/../../*"):
         assert run(env, "Glob", path=r, pattern=pat) == "deny"
     assert run(env, "Glob", path=r, pattern="**/*.py") == "allow"
+
+
+def test_shell_args_touching_protected_paths_ask(env):
+    u, h = env["user"], env["home"]
+    for c in ("git diff --no-index ~/.claude.json /dev/null", f"ls {u}/.CLAUDE", f"ls {h}", "git log ../other",
+              "ls ~", f"git diff --output={u}/.claude.json", "ls $HOME/.claude"):
+        assert run(env, "Bash", command=c) == "ask", c
+    assert run(env, "Bash", command="git status") == "allow"
