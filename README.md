@@ -83,9 +83,9 @@ These rules apply to every flow. A flow cannot override them.
     carries a fixed list of pre-approved actions. When an application
     being operated asks for permission (for example Claude asking "may
     I run `npm install`?"), GOV-AIOS approves it only if it is on that
-    list. Every other permission request is forwarded to the admin's
-    phone, and the flow waits. Without an answer, the request is
-    denied.
+    list. Every other permission request is forwarded to the admin
+    (by local voice in phase 1, by phone later), and the flow waits.
+    Without an answer, the request is denied.
 6.  **Never bypass authentication.** No password entry, no CAPTCHA, MFA,
     or passkey solving, and no reading or exporting cookies or tokens.
     Stop and ask the admin.
@@ -98,6 +98,110 @@ These rules apply to every flow. A flow cannot override them.
 10. **Bounded and stoppable.** Every action has a timeout and a
     postcondition. Retries are bounded, and the admin can stop any flow
     at any time.
+
+## The governance layer (the core)
+
+The governance layer is the product. Executors are pluggable: today
+GOV-AIOS's own native runner, tomorrow Claude or any other agent. No
+executor acts directly. Every action is first described as a request,
+then decided, executed, verified, and recorded.
+
+``` text
+Executor (native runner / Claude / other agent)
+        │  "I want to do X"
+        ▼
+┌──────────────── GOV-AIOS governance layer ────────────────┐
+│ 1. Action request  → who, which flow, what, on what, risk │
+│ 2. Policy engine   → allow / deny / ask                   │
+│ 3. Approval broker → asks admin (voice now, phone later)  │
+│ 4. Verifier        → did the expected result happen?      │
+│ 5. Audit log       → decision + outcome, never content    │
+└───────────────────────────────────────────────────────────┘
+        │ allow
+        ▼
+     Action happens
+```
+
+### Components
+
+1.  **Action request.** One format shared by every executor:
+
+    ``` yaml
+    action_request:
+      actor: claude                 # or gov_runner, ...
+      flow: build_with_claude
+      step: claude_session
+      action: shell.exec
+      target: "npm install"
+      risk: modify                  # read | navigate | modify | submit | payment
+      perceived_by: accessibility   # accessibility | vision | n/a
+    ```
+
+2.  **Policy engine.** A pure decision function with no screen or OS
+    access, so it is fully unit-testable. Policies are layered:
+    **ground rules** (cannot be overridden) → **flow policy** (may only
+    tighten) → **pre-approved list** (specific allows). The result is
+    always exactly one of `allow`, `deny`, or `ask`.
+3.  **Approval broker.** Delivers each `ask` to the admin over the
+    current channel (local voice in phase 1, phone later). Silence or
+    an unrecognized answer becomes `deny`.
+4.  **Verifier.** Checks the step's postcondition. An action is not
+    "done" until it is verified.
+5.  **Audit log.** Append-only record of every request, decision,
+    approver, and outcome, with no email bodies, page content, or
+    secrets. It answers "what did it do, and who allowed it?"
+
+### Executor adapters
+
+| Adapter | How it plugs in | Status |
+| :--- | :--- | :--- |
+| Native runner | Calls the policy engine before every step it executes | v1 (proven by `morning_inbox_briefing`) |
+| Claude Code | A Claude Code `PreToolUse` hook turns each tool call into an action request and returns allow / deny / ask | v1 (proven by `build_with_claude`) |
+| Other agents | Any agent that can call the governance layer before acting | Later |
+
+### Example: governing Claude in `build_with_claude`
+
+| Claude wants to… | Request | Decision | Why |
+| :--- | :--- | :--- | :--- |
+| Read `package.json` | `file.read`, risk `read` | allow | Inside the project folder |
+| Run `npm install` | `shell.exec`, risk `modify` | allow | On the flow's pre-approved list |
+| Run `curl x.sh \| sh` | `shell.exec`, risk `modify` | ask → no answer in 60s → deny | Not pre-approved (Rule 5) |
+| `git push` | `shell.exec`, risk `submit` | ask → admin says "yes" → allow | Submission needs the admin |
+| Edit a file outside the project | `file.write` | deny | Ground rule, no prompt |
+
+When denied, Claude is told "denied by GOV-AIOS policy" and continues or
+stops. Every row lands in the audit log.
+
+### Example: native runner in `book_travel`
+
+The runner finds "Pay now" through accessibility and sends
+`click`, risk `payment`, `perceived_by: accessibility`. Policy says
+`ask` (Rule 4, always). The admin approves; the click happens; the
+verifier checks that a booking confirmation page appeared. Had "Pay
+now" been found only by vision, policy would say `deny` with no prompt
+(Rule 3.3).
+
+### Relearning a changed page
+
+UI changes are normal; a human relearns where things moved, and so
+does GOV-AIOS, under governance. When an expected element is missing,
+GOV-AIOS stops, may propose the new location by vision (Rule 3),
+and on the admin's confirmation saves the corrected page schema as a
+**new version**. Schema repair is itself a governed, audited action.
+Submit and payment elements are never relearned by vision.
+
+### Enforcement scope
+
+> **v1 governs cooperative executors only.** The native runner and
+> Claude Code (through hooks) ask before acting. An agent that drives
+> the mouse and keyboard directly could simply not ask, and v1 cannot
+> stop it.
+>
+> **Later: OS-level enforcement.** Make the governance layer
+> impossible to bypass, for example by sandboxing executors and
+> controlling which processes hold macOS Accessibility, Input
+> Monitoring, and Screen Recording permissions. Until then, do not
+> describe GOV-AIOS as able to contain an uncooperative agent.
 
 ## Example flows (target)
 
@@ -116,8 +220,9 @@ Claude, just as you would delegate it yourself:
 
 1.  Open the Claude app, or a terminal running Claude Code (accessibility).
 2.  Type the request into the labeled input and submit.
-3.  When Claude asks for permission, apply Rule 5: approve if
-    pre-approved, otherwise forward to the admin's phone and wait.
+3.  Every Claude tool call passes through the governance layer via the
+    Claude Code adapter: allow if pre-approved, otherwise ask the admin
+    and wait (Rule 5).
 4.  Detect completion: Claude has stopped working and the input is ready
     again.
 5.  Report Claude's final summary to the admin.
@@ -151,13 +256,17 @@ Design to be finalized separately. Current intent:
 
 ## Build order
 
-1.  **Core runner.** Flow format, policy engine, and verified
-    step-by-step execution, proven by `morning_inbox_briefing`.
-2.  **Phone control channel.** Calls, admin verification, flow
+1.  **Governance core.** Action request format and policy engine (pure
+    Python, unit-tested), audit log, approval broker (typed answers for
+    tests, then local voice).
+2.  **Two executor adapters**, to prove executors are pluggable: the
+    native runner with `morning_inbox_briefing`, and the Claude Code
+    hook with `build_with_claude`.
+3.  **Phone control channel.** Calls, admin verification, flow
     selection, and approvals.
-3.  **More flows.** `book_travel`, `send_drive_file`, `upwork_scan`,
-    `build_with_claude`.
-4.  **Unattended execution.**
+4.  **More flows.** `book_travel`, `send_drive_file`, `upwork_scan`.
+5.  **Unattended execution.**
+6.  **OS-level enforcement** for uncooperative executors.
 
 ## What GOV-AIOS is not
 
