@@ -96,3 +96,12 @@ def test_unreadable_subdir_reported(tmp_path, capsys):
         assert "./sub" in capsys.readouterr().err
     finally:
         (d / "sub").chmod(0o700)
+
+
+def test_walk_leaks_no_fds(tmp_path):
+    d = make(tmp_path)
+    for i in range(20):
+        (d / f"d{i}").mkdir()
+    before = len(os.listdir("/dev/fd"))
+    assert run(tmp_path) == 0
+    assert len(os.listdir("/dev/fd")) == before

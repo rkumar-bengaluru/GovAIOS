@@ -17,8 +17,7 @@ def _same(a, b):
 
 def walk(dfd, rel, owner_uid, uid, gid, left):
     """Hand-written no-follow walk: nothing is opened without O_NOFOLLOW|O_NONBLOCK, nothing skipped silently."""
-    with os.scandir(os.dup(dfd)) as it:  # scandir closes the dup
-        names = [e.name for e in it]
+    names = os.listdir(dfd)  # listdir(fd) does not close dfd
     for name in names:
         path = os.path.join(rel, name)
         try:
@@ -90,6 +89,9 @@ def main(home, user, owner_uid=0):
         if os.fstat(data_fd).st_uid == owner_uid:
             os.fchown(data_fd, uid, gid)
         walk(data_fd, ".", owner_uid, uid, gid, left)
+    except OSError as e:
+        print(f"refusing: cannot walk the data home: {e}", file=sys.stderr)
+        return 1
     finally:
         for f in fds:
             os.close(f)
