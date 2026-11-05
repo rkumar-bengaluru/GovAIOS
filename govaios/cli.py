@@ -1,5 +1,6 @@
 import argparse
 import os
+import stat
 import time
 
 import sys
@@ -10,21 +11,27 @@ PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE}   # every other subc
 
 
 def _doctor(args) -> int:
-    from . import auth, hook, powers, runstate
+    from . import auth, executor, hook, powers, runstate
     from .home import data_home
 
     home = data_home()
     c = identity.check()
     try:
-        managed = hook.MANAGED_SETTINGS.stat().st_uid == 0
+        st = hook.MANAGED_SETTINGS.stat()   # follows a link: who can change the content is what counts
+        managed = st.st_uid == 0 and st.st_mode & 0o022 == 0
     except OSError:
         managed = False
+    try:   # row 32: the hook's own comparison
+        current = hook.drift(hook.MANAGED_SETTINGS, executor.load(home)[0]) is None
+    except Exception:   # no or bad policy: not current
+        current = False
     ts = powers.last(home)
-    c.update(guard=runstate.guard_alive(home), managed_settings=managed,
+    c.update(guard=runstate.guard_alive(home), managed_settings=managed, managed_settings_current=current,
              powers_review=ts.date().isoformat() if ts else "missing", screen_locked=auth.screen_locked())
     for k, v in c.items():
         print(f"{k}: {v}")
-    ok = not identity.failing(c) and c["guard"] and managed and powers.fresh(home) and not c["screen_locked"]
+    ok = (not identity.failing(c) and c["guard"] and managed and current and powers.fresh(home)
+          and not c["screen_locked"])
     return 0 if ok else 1
 
 
@@ -91,7 +98,7 @@ def _audit_ui(args) -> int:
 
     home = data_home()
     ok, how = auth.prove("open the audit log", home)
-    AuditLog(home).append("ui_login", channel="touch_id", auth=how, outcome="ok" if ok else "denied")
+    AuditLog(home).append("ui_login", decision="allow" if ok else "deny", approver="admin", channel="touch_id", auth=how)
     if not ok:
         print("not proven; audit UI not started", file=sys.stderr)
         return 1
@@ -108,17 +115,27 @@ def _audit_ui(args) -> int:
 
 def _dump(args) -> int:
     # Read-only: no navigation, keystrokes or app launch (only sets Chrome's AX-enable flags); page content to stdout only.
-    import time
-
-    from . import auth
-    from .audit.log import AuditLog
-    from .desktop import get_desktop
     from .home import data_home
+    from .runstate import register_run, unregister_run
 
     packaged = identity.require_app(args.dev)
     from .netguard import block_all_network
     block_all_network()  # dump reads page content; nothing it does needs the network
     home = data_home()
+    register_run(home)   # as _run: before the STOPPED check, so a stop pressed in between finds it
+    try:
+        return _dump_registered(home, packaged)
+    finally:
+        unregister_run(home)
+
+
+def _dump_registered(home, packaged) -> int:
+    import time
+
+    from . import auth
+    from .audit.log import AuditLog
+    from .desktop import get_desktop
+
     preflight(home, dev=not packaged)
     ok, how = auth.prove("print the open Chrome page", home)   # row 29: else a confused deputy for AX
     AuditLog(home).append("request", action="dump", decision="allow" if ok else "deny", approver="admin",
@@ -203,7 +220,11 @@ def _claude_settings(args) -> int:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.write_text(executor.default_policy(*(os.path.realpath(r) for r in args.root)))
     raw = path.read_bytes()   # shown and approved bytes must be the hashed bytes (Rule 11)
-    pol, digest = executor.load(home)
+    try:
+        pol, digest = executor.load(home)
+    except ValueError as e:   # our own message: field names only
+        print(f"refused: {path}: {e}", file=sys.stderr)
+        return 1
     if hashlib.sha256(raw).hexdigest() != digest:
         print("refused: policy changed while reading; try again", file=sys.stderr)
         return 1
@@ -280,10 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     rp = sub.add_parser("review-powers")
     rp.add_argument("kept", nargs="*", metavar="KEPT")   # the apps the admin keeps in the three panes
     rp.set_defaults(fn=_review_powers)
-    pf = os.environ.get("GOVAIOS_PID_FILE")  # lets the shim stop this run on Ctrl-C
-    if pf:
-        with open(pf, "w") as fh:
-            fh.write(str(os.getpid()))
+    _write_shim_file("GOVAIOS_PID_FILE", os.getpid())  # lets the shim stop this run on Ctrl-C
     code = 1
     try:
         args = p.parse_args(argv)
@@ -313,10 +331,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _write_exit(code: int) -> None:
-    f = os.environ.get("GOVAIOS_EXIT_FILE")
-    if f:
-        with open(f, "w") as fh:
-            fh.write(str(code))
+    _write_shim_file("GOVAIOS_EXIT_FILE", code)
+
+
+def _write_shim_file(var: str, value) -> None:
+    """Only into an existing empty regular file (the shim's mktemp), never through a link: the hook's env may be
+    shaped by Claude (M-6). Anything else is skipped silently; the shim then just lacks the value."""
+    f = os.environ.get(var)
+    if not f:
+        return
+    try:
+        fd = os.open(f, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)   # no O_CREAT; NONBLOCK: a FIFO cannot hang us
+    except OSError:
+        return
+    with os.fdopen(fd, "w") as fh:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode) and st.st_size == 0:
+            fh.write(str(value))
 
 
 if __name__ == "__main__":

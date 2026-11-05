@@ -435,3 +435,33 @@ def test_stopped_file_mid_run_stops_without_signal(tmp_path, at):
     assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
     acts = [x for x in e if x["kind"] in ("action", "request")]
     assert acts[-1]["kind"] == "action" and acts[-1]["action"] == at   # nothing gated or done after it
+
+
+def test_destination_remembered_only_after_audit(tmp_path, monkeypatch):
+    """M-14: approve_destination happens after the request entry is on record."""
+    from govaios.audit.log import AuditLog
+    real = AuditLog.append
+
+    def boom(self, kind, **f):
+        if kind == "request" and f.get("approver") == "admin" and f.get("destination"):
+            raise OSError("disk full")
+        return real(self, kind, **f)
+    monkeypatch.setattr(AuditLog, "append", boom)
+    seen = []
+    real_init = Runner.__init__
+    monkeypatch.setattr(Runner, "__init__", lambda self, *a, **k: (real_init(self, *a, **k), seen.append(self))[0])
+    with pytest.raises(OSError):
+        run(tmp_path, [True] * 10, preapprove=True)
+    assert seen[0].approvals.snapshot()["destinations"] == {}
+
+
+def test_resume_reason_names_unknown_page(tmp_path, monkeypatch):
+    """M-19: no "resume None" in the prompt reason."""
+    reasons = []
+    monkeypatch.setattr(engine.auth, "approve", lambda q, reason, home, channel="touch_id": (reasons.append(reason), (False, "failed"))[1])
+    r, e, err = run(tmp_path, [], preapprove=True)
+    r.ctx, r.step = {}, "x"
+    monkeypatch.setattr(r, "wait_for_page", lambda c, t: (None, None))
+    with pytest.raises(Stop):
+        r.do_classify_page({"on_match": {"a": "continue", "unknown": "stop_and_request_user"}})
+    assert reasons[-1].endswith("resume unknown page")

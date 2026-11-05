@@ -57,7 +57,7 @@ def test_stop_terms_then_kills(home, exe):
     assert runstate.stopped(home)
     e = entries(home)
     assert [(x["kind"], x["outcome"]) for x in e] == [("emergency_stop", "stopped"), ("emergency_stop", "killed")]
-    assert all(x["reason"] == "claude commands already running are not stopped" for x in e)
+    assert all(x["reason"] == "runs stopped; new Claude tool calls denied; running Claude commands not stopped" for x in e)
 
 
 def test_stop_skips_non_govaios_pid(home, exe):

@@ -41,15 +41,23 @@ def _check(home: Path, managed: Path):
     approvals = Approvals(home / "approvals.json")
     if not approvals.flow_ok(ID, digest):
         raise Block("Claude Code executor policy not approved: run `gov-aios claude-settings`")
+    why = drift(managed, pol)
+    if why:
+        raise Block(why)
+    return pol, digest, approvals
+
+
+def drift(managed: Path, pol) -> str | None:
+    """Row 32: why the managed allowedDomains differ from the policy's destinations, or None. Also used by doctor."""
     try:
         domains = json.loads(managed.read_text())["sandbox"]["network"]["allowedDomains"]
     except (OSError, ValueError, KeyError, TypeError):
-        raise Block("managed settings missing or unreadable") from None
+        return "managed settings missing or unreadable"
     if not isinstance(domains, list) or not all(isinstance(d, str) for d in domains):
-        raise Block("managed settings allowedDomains is not a list of host names")
+        return "managed settings allowedDomains is not a list of host names"
     if _hosts(domains) != _hosts(pol.get("destinations", [])):
-        raise Block("managed settings out of date: run `gov-aios claude-settings` and reinstall (admin, sudo)")
-    return pol, digest, approvals
+        return "managed settings out of date: run `gov-aios claude-settings` and reinstall (admin, sudo)"
+    return None
 
 
 def _decide(payload, home: Path, managed: Path):
@@ -73,6 +81,8 @@ def _decide(payload, home: Path, managed: Path):
         from . import auth   # lazy: pyobjc import only when a prompt is needed
         q = f"Claude Code wants to use {tool}" + (f" on {target}" if target else "") + "."
         q += f"\nCommand: {cmd}" if cmd else ""
+        if req["category"] == "fetch" and not approvals.destination_ok(ID, origin(url).lower()):
+            q += f"\nApproving also allows later fetches to {origin(url).lower()}."
         ok, how = auth.approve(q + "\nApprove?", f"Claude Code: {tool}", home)
         verdict = "allow" if ok else "deny"
         if ok and req["category"] == "fetch" and not approvals.destination_ok(ID, origin(url).lower()):

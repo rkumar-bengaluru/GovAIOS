@@ -45,21 +45,21 @@ def _seq(e):
 
 
 def _runs(entries):
-    """Entries from each flow_start (valid int seq) through its flow_end or stop. Returns (runs, orphan count)."""
-    runs, cur, used = [], None, 0
+    """Entries from each flow_start (valid int seq) through its flow_end or stop. Returns (runs, anomaly count)."""
+    runs, cur, odd = [], None, 0
     for e, _ in entries:
         if e is None:
-            continue
-        if e.get("kind") == "flow_start" and _seq(e) is not None:
+            odd += 1
+        elif e.get("kind") == "flow_start" and _seq(e) is not None:
             cur = [e]
             runs.append(cur)
-            used += 1
         elif cur is not None:
             cur.append(e)
-            used += 1
             if e.get("kind") in ("flow_end", "stop"):
                 cur = None
-    return runs, len(entries) - used
+        elif e.get("kind") in ("action", "request") and e.get("flow") not in (None, "claude_code"):
+            odd += 1   # a flow step outside a run; hook, stop, login, revoke and dump entries are normal here
+    return runs, odd
 
 
 def _td(v):
@@ -238,16 +238,25 @@ def make_server(home: Path, port: int = 0, now=time.time):
                 return self._send(403)
             kind, flow, dest = f.get("kind"), f.get("flow", ""), f.get("destination", "")
             ap = Approvals(approvals_path)
+            if kind == "flow" and flow:
+                fields, apply = {"flow": flow}, lambda: ap.revoke_flow(flow)
+            elif kind == "destination" and flow and dest:
+                fields, apply = {"flow": flow, "destination": dest}, lambda: ap.revoke_destination(flow, dest)
+            elif kind == "all":
+                fields, apply = {"reason": "all"}, ap.revoke_all
+            else:
+                return self._send(400)
             try:
-                if kind == "flow" and flow:
-                    log.append("revoke", flow=flow); ap.revoke_flow(flow)  # audit first, then apply
-                elif kind == "destination" and flow and dest:
-                    log.append("revoke", flow=flow, destination=dest); ap.revoke_destination(flow, dest)
-                elif kind == "all":
-                    log.append("revoke", reason="all"); ap.revoke_all()
-                else:
-                    return self._send(400)
+                log.append("revoke", **fields)   # audit first, then apply
             except Exception:
+                return self._send(500, "internal error")
+            try:
+                apply()
+            except Exception:   # the log must not be left saying "revoked" while the approval stands
+                try:
+                    log.append("revoke", outcome="error", **fields)
+                except Exception:
+                    pass   # already answering 500; nothing more can be recorded
                 return self._send(500, "internal error")
             self.send_response(303)
             for k, v in (("Location", "/approvals"), ("Content-Length", "0"), *SEC):

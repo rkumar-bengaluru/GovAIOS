@@ -255,6 +255,20 @@ def test_click_point_in_other_window_of_target_refuses(env):
 
 def test_locked_screen_refuses_input(env, monkeypatch):
     monkeypatch.setattr(macos.auth, "screen_locked", lambda: True)
-    with pytest.raises(RuntimeError, match="screen locked"):
+    with pytest.raises(Stop, match="^screen_locked$"):   # row 9: audited as screen_locked, not RuntimeError
         env.d.press("enter")
     assert env.posted == []
+
+
+def test_launch_handoff_stop_during_wait_kills_child(env, monkeypatch):
+    """M-11: the run's SIGTERM Stop during the wait must not leave the handoff child (own session) alive."""
+    class StoppedProc(Proc):
+        def wait(self, timeout=None):
+            if not self.killed:
+                raise Stop("emergency stop")
+            return super().wait(timeout)
+    proc = StoppedProc()
+    _handoff(env, monkeypatch, proc)
+    with pytest.raises(Stop, match="^emergency stop$"):
+        env.d.launch_application("chrome", "Profile 2")
+    assert proc.killed

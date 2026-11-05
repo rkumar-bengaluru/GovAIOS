@@ -66,7 +66,7 @@ class MacDesktop:
     def _require_focus(self):
         """Synthetic input goes to whatever has focus: refuse unless it is the flow's app (and pinned window)."""
         if auth.screen_locked():
-            raise RuntimeError("input refused: screen locked")
+            raise Stop("screen_locked")   # row 9: recorded as screen_locked, not as a RuntimeError
         pid = self._target_pid()
         fpid, win = self._focused()
         if fpid is None or fpid != pid:
@@ -107,13 +107,15 @@ class MacDesktop:
                 raise Stop("chrome handoff failed") from None
             try:
                 code = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:   # it became a browser of its own: not a handoff
+            except BaseException as e:   # timeout (it became a browser of its own) or the run's own stop
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)   # own session: kill its whole group
+                    os.killpg(proc.pid, signal.SIGKILL)   # own session: the run's SIGKILL would miss it
                 except ProcessLookupError:
                     proc.kill()
                 proc.wait()
-                raise Stop("chrome handoff failed") from None
+                if isinstance(e, subprocess.TimeoutExpired):
+                    raise Stop("chrome handoff failed") from None
+                raise
             if code != 0:
                 raise Stop("chrome handoff failed")
         elif not self._app(app):

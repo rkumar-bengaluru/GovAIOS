@@ -54,6 +54,11 @@ def default_policy(*roots):
 def load(home):
     raw = (Path(home) / POLICY_PATH).read_bytes()
     pol = yaml.safe_load(raw)
+    if not isinstance(pol, dict):
+        raise ValueError("executor policy is not a mapping")
+    for k in ("tools", "allow_commands", "destinations", "project_roots"):   # a scalar would match as a substring
+        if not (isinstance(pol.get(k, []), list) and all(isinstance(v, str) for v in pol.get(k, []))):
+            raise ValueError(f"executor policy {k} must be a list of strings")
     pol["project_roots"] = [os.path.realpath(r) for r in pol.get("project_roots", [])]  # requests are realpathed
     return pol, hashlib.sha256(raw).hexdigest()
 

@@ -105,3 +105,14 @@ def test_walk_leaks_no_fds(tmp_path):
     before = len(os.listdir("/dev/fd"))
     assert run(tmp_path) == 0
     assert len(os.listdir("/dev/fd")) == before
+
+
+def test_uninstall_hardened_like_install():
+    """M-7: static checks only (the script is never run by tests)."""
+    from pathlib import Path
+    s = (Path(__file__).parent.parent / "packaging" / "uninstall.sh").read_text()
+    assert s.startswith("#!/bin/bash\n") and "set -euo pipefail" in s
+    assert "export PATH=/usr/bin:/bin:/usr/sbin:/sbin" in s and "dscl" not in s
+    assert "/usr/bin/python3 -I -c 'import pwd" in s
+    assert 'sudo -u "$SUDO_USER" rm -f "$UHOME/Library/LaunchAgents/com.govaios.guard.plist"' in s
+    assert "\nrm -f \"$UHOME" not in s

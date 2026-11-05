@@ -179,3 +179,17 @@ def test_load_realpaths_roots(tmp_path):
     (tmp_path / "executors/claude_code.yaml").write_text(default_policy(link))
     pol, _ = load(tmp_path)
     assert pol["project_roots"] == [os.path.realpath(real)]
+
+
+@pytest.mark.parametrize("field,value", [("tools", "Bash"), ("allow_commands", "git status"), ("destinations", "github.com"),
+                                         ("project_roots", "/tmp"), ("tools", ["Bash", 7]), ("tools", None)])
+def test_load_rejects_non_list_fields(tmp_path, field, value):
+    """M-10: a scalar would turn `in` into a substring test or iterate by character."""
+    import yaml
+    from govaios.executor import POLICY_PATH, default_policy, load
+    pol = yaml.safe_load(default_policy(tmp_path))
+    pol[field] = value
+    (tmp_path / "executors").mkdir()
+    (tmp_path / POLICY_PATH).write_text(yaml.safe_dump(pol))
+    with pytest.raises(ValueError):
+        load(tmp_path)

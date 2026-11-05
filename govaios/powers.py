@@ -18,14 +18,14 @@ def review(home: Path, kept: list[str], audit) -> bool:
         subprocess.run(["/usr/bin/open", f"x-apple.systempreferences:com.apple.preference.security?{pane}"], check=False)
     names = ", ".join(kept) or "(none)"
     ok, how = auth.approve(f"{STATEMENT}.\n\nApps you keep: {names}", "confirm the OS powers review", home)
+    audit.append("powers_review", target=names, decision="allow" if ok else "deny", approver="admin",
+                 channel="touch_id", auth=how)   # first: a review is never on file without its record
     if ok:
         Path(home).mkdir(parents=True, exist_ok=True, mode=0o700)
         p = Path(home) / FILE
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "kept": list(kept)}))
         os.replace(tmp, p)
-    audit.append("powers_review", target=names, decision="allow" if ok else "deny", approver="admin",
-                 channel="touch_id", auth=how)
     return ok
 
 

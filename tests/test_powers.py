@@ -52,3 +52,18 @@ def test_review_records_kept_apps(monkeypatch, govaios_home):
     assert "Zoom" in asked[-1] and "1Password" in asked[-1]
     kind, f = a.entries[-1]
     assert kind == "powers_review" and f["auth"] == "biometric" and f["decision"] == "allow" and "1Password" in f["target"]
+
+
+def test_review_audited_before_file(monkeypatch, govaios_home):
+    """M-14: a failed audit append leaves no fresh review behind."""
+    monkeypatch.setattr(powers.subprocess, "run", lambda cmd, **k: None)
+    monkeypatch.setattr(auth, "approve", lambda q, r, h: (True, "biometric"))
+
+    class Broken:
+        def append(self, kind, **f):
+            raise OSError("disk full")
+    try:
+        powers.review(govaios_home, [], Broken())
+    except OSError:
+        pass
+    assert not (govaios_home / "powers_review.json").exists()

@@ -274,7 +274,7 @@ def test_malformed_approvals_notice(tmp_path):
 
 
 def test_orphans_visible(tmp_path):
-    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"action","outcome":"ORPHANOUT"}', "garbage<i>",
+    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"action","flow":"f","outcome":"ORPHANOUT"}', "garbage<i>",
                                       '{"seq":2,"kind":"flow_start","flow":"f"}'])
     assert "2 entries outside any run" in get("/")[1]
     body = get("/log")[1]
@@ -330,3 +330,25 @@ def test_command_and_auth_columns_escaped(tmp_path):
     assert "<b>hi" not in body and "echo &lt;b&gt;hi&lt;/b&gt;" in body
     assert "colspan=13 " in body   # seq, ts and every COLS column
     srv.shutdown(); srv.server_close()
+
+
+def test_normal_entries_outside_runs_not_flagged(tmp_path):
+    """M-13: hook requests, stops, logins, revocations and dump are expected outside runs."""
+    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"request","flow":"claude_code","action":"Bash"}',
+                                      '{"seq":2,"kind":"emergency_stop"}', '{"seq":3,"kind":"ui_login"}',
+                                      '{"seq":4,"kind":"request","action":"dump"}', '{"seq":5,"kind":"revoke"}'])
+    assert "outside any run" not in get("/")[1]
+    srv.shutdown(); srv.server_close()
+
+
+def test_revoke_failure_audited_as_error(web, monkeypatch):
+    """M-16: the log never says revoked while the approval stands."""
+    home, _, get = web
+
+    def boom(self, flow):
+        raise OSError("disk")
+    monkeypatch.setattr(Approvals, "revoke_flow", boom)
+    s = get.req("/revoke", "POST", cookie=get.sid, body={"csrf": _csrf(get), "kind": "flow", "flow": "demo_flow"})[0]
+    assert s == 500 and Approvals(home / "approvals.json").flow_ok("demo_flow", "abc123")
+    e = _revokes(home)
+    assert [x.get("outcome") for x in e] == [None, "error"] and e[1]["flow"] == "demo_flow"

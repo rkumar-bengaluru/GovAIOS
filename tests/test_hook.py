@@ -252,3 +252,9 @@ def test_managed_settings_lock_project_mcp(env):
     """C-1: key names from code.claude.com/docs/en/settings-reference (MCP and Plugins sections)."""
     s = hook.managed_settings(load(env["home"])[0], env["home"])
     assert s["enableAllProjectMcpServers"] is False and s["strictPluginOnlyCustomization"] == ["mcp"]
+
+
+def test_webfetch_question_says_origin_is_remembered(env):
+    """M-17: approving a first contact allows later fetches to the whole origin; the question says so."""
+    call(env, tool(env, "WebFetch", url="https://github.com/x/y", prompt="p"))
+    assert "Approving also allows later fetches to https://github.com." in env["asks"][0]

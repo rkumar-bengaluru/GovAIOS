@@ -48,7 +48,7 @@ operations:
   type_text:          { macos: "CGEvent unicode string",        windows: "SendInput KEYEVENTF_UNICODE" }
   scroll_into_view:   { macos: "AXScrollToVisible action",      windows: "UIA ScrollItemPattern.ScrollIntoView" }
   current_url:        { macos: "AXWebArea.AXURL",               windows: "UIA address bar ValuePattern" }
-  ask_admin:          { macos: "osascript display dialog",      windows: "MessageBox (timeout = deny)" }
+  admin_proof:        { macos: "auth.dialog (osascript) then Touch ID / device owner (LocalAuthentication)", windows: "MessageBox (timeout = deny) then Windows Hello" }
 
 # Logical keys flows may press, per OS.
 keys:

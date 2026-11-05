@@ -80,8 +80,14 @@ Do these steps yourself. GOV-AIOS and its helpers never toggle them.
 1. Open System Settings › Privacy & Security › Accessibility. Choose
    `+` and add `/Applications/gov-aios.app`.
 2. Do the same under Screen Recording.
-3. Run `bin/gov-aios doctor`. Every line should say `True`, and the exit
-   code should be 0.
+3. Run `bin/gov-aios doctor`. Expected lines: `bundle_id: com.govaios.cli`,
+   `frozen: True`, `accessibility: True`, `screen_recording: True`,
+   `guard: True`, `powers_review: <date>` (`missing` until you run
+   `bin/gov-aios review-powers`) and `screen_locked: False`.
+   `managed_settings` and `managed_settings_current` stay `False`, and
+   the exit code stays 1, until Claude Code is governed (managed settings
+   installed with `install.sh <managed-settings.json>`). After that every
+   check passes and the exit code is 0.
 
 With an ad-hoc build, repeat these steps after every rebuild. If an old
 entry no longer applies, remove it and add the app again.
@@ -134,6 +140,10 @@ again (re-grant the permissions if the new build needs it).
 - `install.sh`, `handback.py` and `dist/` come from the checkout: run
   `sudo` only on a checkout you trust.
 - `/Applications` is writable by admins, so the installed bundle can be
-  replaced afterwards. The TCC designated requirement and
-  `gov-aios doctor` are what pin its identity.
+  replaced afterwards. The TCC designated requirement pins its identity
+  only for the OS powers (Accessibility, Screen Recording), and
+  `gov-aios doctor` checks it only when you run it. The Claude Code hook
+  needs no TCC grant, and the stop and run checks (`is_govaios`) trust the
+  path alone: a replaced bundle at that path is a working hook. This risk
+  is accepted for now.
 - A signed pkg is future work.

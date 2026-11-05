@@ -144,19 +144,16 @@ class Runner:
             destination = None
         dest = url_for_audit(destination) if destination else None
         verdict = decide({"action": action, "risk": risk, "destination": destination}, self.flow, self.approvals)
-        asked, how = verdict == "ask", None
+        asked, how, remember = verdict == "ask", None, False
         if asked:
             q = f"Flow '{self.flow['id']}' wants to {action}"
             q += f" and reach {origin(destination)} for the first time." if destination else "."
             ok, how = self.ask(q + " Approve?", f"{self.flow['id']}: {action} {origin(destination) if destination else ''}".strip())
-            if ok:
-                if destination:
-                    self.approvals.approve_destination(self.flow["id"], origin(destination))
-                verdict = "allow"
-            else:
-                verdict = "deny"
+            verdict, remember = ("allow", bool(destination)) if ok else ("deny", False)
         self._audit("request", action=action, risk=risk, target=target, destination=dest, decision=verdict,
                     approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how)
+        if remember:   # only once the approval is on record
+            self.approvals.approve_destination(self.flow["id"], origin(destination))
         if verdict != "allow":
             raise Stop(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
 
@@ -288,7 +285,7 @@ class Runner:
                 raise Stop("unexpected page")
             # stop_and_request_user (Rule 6)
             ok, how = self.ask(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
-                               f"then click Approve to continue.", f"{self.flow['id']}: resume {page}")
+                               f"then click Approve to continue.", f"{self.flow['id']}: resume {page or 'unknown page'}")
             self._audit("request", action="resume", risk="read", target=page, decision="allow" if ok else "deny",
                         approver="admin", channel="touch_id", auth=how)
             if not ok:

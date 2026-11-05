@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 APP_EXE = "/Applications/gov-aios.app/Contents/MacOS/gov-aios"
-STOP_REASON = "claude commands already running are not stopped"   # row 30: the stop claims no more than it does
+STOP_REASON = "runs stopped; new Claude tool calls denied; running Claude commands not stopped"   # row 30, verbatim
 KILL_AFTER_S = 3
 
 class Stop(Exception):

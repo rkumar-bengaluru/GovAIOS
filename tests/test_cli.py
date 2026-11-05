@@ -41,10 +41,17 @@ def test_run_dev_blocks_network(tmp_path):
     assert "ERROR: PermissionError" in r.stderr and "DEV MODE" in r.stderr
 
 
-def _doctor_env(monkeypatch, tmp_path, root_owned=True):
+def _doctor_env(monkeypatch, tmp_path, root_owned=True, domains=None):
+    import json
     from govaios import auth, hook, runstate
+    from govaios.executor import DESTINATIONS, POLICY_PATH, default_policy
+    from govaios.home import data_home
+    pol = data_home() / POLICY_PATH
+    pol.parent.mkdir(parents=True, exist_ok=True)
+    pol.write_text(default_policy(tmp_path))
     managed = tmp_path / "managed-settings.json"   # never the real /Library file
-    managed.write_text("{}")
+    managed.write_text(json.dumps({"sandbox": {"network": {"allowedDomains": DESTINATIONS if domains is None else domains}}}))
+    managed.chmod(0o644)
     real_stat = type(managed).stat
     monkeypatch.setattr(identity, "check", lambda: OK)
     monkeypatch.setattr(hook, "MANAGED_SETTINGS", managed)
@@ -93,6 +100,7 @@ def test_doctor_wrong_bundle(monkeypatch):
 
 def test_selftest_requires_dev(tmp_path, monkeypatch):
     f = tmp_path / "exit"
+    f.write_text("")   # the shim's mktemp file
     monkeypatch.setenv("GOVAIOS_EXIT_FILE", str(f))
     with pytest.raises(SystemExit):
         main(["selftest", "lines", "1"])
@@ -236,7 +244,7 @@ def test_dev_requires_tmp_home(monkeypatch, tmp_path):
             monkeypatch.delenv("GOVAIOS_HOME")
         else:
             monkeypatch.setenv("GOVAIOS_HOME", env)
-        f.unlink(missing_ok=True)
+        f.write_text("")   # the shim's mktemp file
         with pytest.raises(SystemExit):
             main(["run", "x.yaml", "--dev"])
         assert f.read_text() == "1" and "executor" not in seen
@@ -278,16 +286,36 @@ def test_dump_needs_proof(monkeypatch, capsys, govaios_home):
     assert reasons == []   # preflight refuses before the proof
 
 
-@pytest.mark.parametrize("argv,profile", [(["run", "x.yaml", "--dev"], "RUN_PROFILE"), (["hook"], "RUN_PROFILE"),
-                                          (["audit-ui"], "UI_PROFILE"), (["doctor"], None),
-                                          (["review-powers", "Zoom"], "RUN_PROFILE")])
-def test_sandbox_applied_per_subcommand(monkeypatch, sandbox_calls, argv, profile):
+def _subcommands():
+    """Every subparser name, read from main()'s own usage line."""
+    import contextlib
+    import io
+    import re
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+        main(["-h"])
+    return re.search(r"\{([a-z,-]+)\}", buf.getvalue())[1].split(",")
+
+
+SUBCOMMANDS = ["doctor", "selftest", "run", "verify-audit", "audit-ui", "dump", "guard", "resume", "hook",
+               "claude-settings", "review-powers"]
+ARGV = {"selftest": ["selftest", "lines", "1"], "run": ["run", "x.yaml"], "claude-settings": ["claude-settings", "--root", "/x"],
+        "review-powers": ["review-powers", "Zoom"]}
+
+
+def test_sandbox_table_covers_every_subcommand():
+    assert _subcommands() == SUBCOMMANDS
+
+
+@pytest.mark.parametrize("cmd", SUBCOMMANDS)
+def test_sandbox_applied_per_subcommand(monkeypatch, sandbox_calls, cmd):
+    """The Global Constraints table: doctor none, audit-ui UI_PROFILE, every other subcommand RUN_PROFILE."""
     from govaios import cli, sandbox
-    fn = {"run": "_run", "hook": "_hook", "audit-ui": "_audit_ui", "doctor": "_doctor", "review-powers": "_review_powers"}
+    profile = {"doctor": None, "audit-ui": "UI_PROFILE"}.get(cmd, "RUN_PROFILE")
     order = []
     monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
-    monkeypatch.setattr(cli, fn[argv[0]], lambda args: order.append(("handler", None)) or 0)
-    assert main(argv) == 0
+    monkeypatch.setattr(cli, "_" + cmd.replace("-", "_"), lambda args: order.append(("handler", None)) or 0)
+    assert main(ARGV.get(cmd, [cmd])) == 0
     assert order == ([("apply", getattr(sandbox, profile))] if profile else []) + [("handler", None)]
 
 
@@ -431,7 +459,8 @@ def test_claude_settings_refuses_non_host_destination(monkeypatch, capsys, tmp_p
     asked = _settings(monkeypatch, (True, "biometric"))
     assert main(["claude-settings", "--root", str(root)]) == 1
     out = capsys.readouterr()
-    assert asked == [] and out.out == "" and "bare host names" in out.err
+    want = "destinations must be a list of strings" if dest == 7 else "bare host names"   # 7: refused by load (M-10)
+    assert asked == [] and out.out == "" and want in out.err
 
 
 def test_claude_settings_notes_existing_policy(monkeypatch, capsys, tmp_path, govaios_home):
@@ -464,6 +493,7 @@ def test_audit_ui_deny_and_allow(monkeypatch, capsys, govaios_home):
     assert main(["audit-ui"]) == 1
     e = json.loads(AuditLog(govaios_home).path.read_text().splitlines()[-1])
     assert e["kind"] == "ui_login" and e["channel"] == "touch_id" and e["auth"] == "failed"
+    assert (e["decision"], e["approver"]) == ("deny", "admin") and "outcome" not in e
 
     class Srv:
         server_address = ("127.0.0.1", 1234)
@@ -472,3 +502,49 @@ def test_audit_ui_deny_and_allow(monkeypatch, capsys, govaios_home):
     monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
     assert main(["audit-ui"]) == 0
     assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+
+
+def test_doctor_reports_drift_and_mode(monkeypatch, tmp_path, capsys):
+    """M-3: row 32's drift check (the hook's comparison) and a group/other-writable managed file."""
+    _doctor_env(monkeypatch, tmp_path)
+    assert main(["doctor"]) == 0
+    assert "managed_settings_current: True" in capsys.readouterr().out.splitlines()
+    _doctor_env(monkeypatch, tmp_path, domains=["github.com"])
+    assert main(["doctor"]) == 1
+    assert "managed_settings_current: False" in capsys.readouterr().out.splitlines()
+    _doctor_env(monkeypatch, tmp_path)
+    from govaios import hook
+    hook.MANAGED_SETTINGS.chmod(0o664)
+    assert main(["doctor"]) == 1
+    assert "managed_settings: False" in capsys.readouterr().out.splitlines()
+
+
+def test_dump_is_a_registered_run(monkeypatch, govaios_home):
+    """M-12: registered before preflight, unregistered afterwards (a stop finds it)."""
+    import os
+    from govaios import auth, cli
+    _fake_run(monkeypatch, None)
+    me = govaios_home / "runs" / str(os.getpid())
+    seen = []
+    monkeypatch.setattr(cli, "preflight", lambda home, dev: seen.append(("preflight", me.exists())))
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
+    assert main(["dump", "--dev"]) == 1
+    assert seen == [("preflight", True)] and not me.exists()
+
+
+@pytest.mark.parametrize("var", ["GOVAIOS_PID_FILE", "GOVAIOS_EXIT_FILE"])
+def test_shim_files_never_follow_links_or_truncate(monkeypatch, tmp_path, var):
+    """M-6: only an existing empty regular file (the shim's mktemp) is written."""
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    link = tmp_path / "link"
+    link.symlink_to(victim)
+    for target in (link, victim, tmp_path / "missing"):
+        monkeypatch.setenv(var, str(target))
+        assert main(["selftest", "lines", "1", "--dev"]) == 0
+    assert victim.read_text() == "keep" and not (tmp_path / "missing").exists()
+    empty = tmp_path / "empty"
+    empty.write_text("")
+    monkeypatch.setenv(var, str(empty))
+    assert main(["selftest", "lines", "1", "--dev"]) == 0
+    assert empty.read_text() != ""
