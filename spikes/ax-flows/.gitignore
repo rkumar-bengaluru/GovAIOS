@@ -1,6 +1,0 @@
-.venv/
-__pycache__/
-approvals.json
-# job data and page dumps hold personal/third-party content (Himalayas cl. 30A: no republishing)
-jd_selected/
-captures/

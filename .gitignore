@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GOV-AIOS local data (spike admin data holds personal/third-party content)
+spikes/ax-flows/.venv/
+spikes/ax-flows/captures/
+spikes/ax-flows/jd_selected/
+spikes/ax-flows/approvals.json
+.superpowers/

@@ -1,6 +1,6 @@
 """OS-agnostic flow engine: page identification, element location, step execution.
 Every OS side effect goes through the desktop adapter, and every action is
-decided by governance.decide() first."""
+decided by policy.decide() first."""
 import json
 import re
 import time
@@ -9,9 +9,10 @@ from pathlib import Path
 
 import yaml
 
-from governance import Approvals, decide, flow_hash, origin
+from .approvals import Approvals, flow_hash
+from .policy import decide, origin
 
-HERE = Path(__file__).parent
+REPO = Path(__file__).parent.parent
 
 
 class Stop(Exception):
@@ -73,13 +74,13 @@ def identify(page, root):
 # ---------- executor ----------
 
 class Runner:
-    def __init__(self, flow_path, desktop, approvals_path=HERE / "approvals.json"):
+    def __init__(self, flow_path, desktop, approvals_path=REPO / "approvals.json"):
         self.flow_path = Path(flow_path)
         self.flow = yaml.safe_load(self.flow_path.read_text())["workflow"]
         self.d = desktop
         self.app = self.flow["browser"]["application"]
         self.approvals = Approvals(approvals_path)
-        self.page_files = sorted((HERE / "pages").glob("*.yaml"))
+        self.page_files = sorted((REPO / "pages").glob("*.yaml"))
         self.pages = {}
         for p in self.page_files:
             pg = yaml.safe_load(p.read_text())["page"]
@@ -275,7 +276,7 @@ class Runner:
 
     def do_write_json(self, s):
         self.gate("write_file", "modify")
-        out = HERE / s["directory"]
+        out = REPO / s["directory"]
         out.mkdir(exist_ok=True)
         rec = {**self.ctx["record"], "list_item": self.ctx["item"],
                "captured_at": datetime.now().isoformat(timespec="seconds"),
@@ -283,7 +284,7 @@ class Runner:
         slug = re.sub(r"[^a-z0-9]+", "-", (rec.get("job_title") or rec.get("title") or "item").lower()).strip("-")[:60]
         path = out / f"{datetime.now():%Y%m%d}-{slug}.json"
         path.write_text(json.dumps(rec, indent=2, ensure_ascii=False))
-        self.log(f"wrote {path.relative_to(HERE)}")
+        self.log(f"wrote {path.relative_to(REPO)}")
 
     def do_report(self, s):
         rec = self.ctx.get("record", {})
