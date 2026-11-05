@@ -156,3 +156,7 @@ def _write_exit(code: int) -> None:
     if f:
         with open(f, "w") as fh:
             fh.write(str(code))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
