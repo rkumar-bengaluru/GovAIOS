@@ -142,6 +142,11 @@ row 25).
 - `auth` values recorded in the audit: `biometric`, `device_owner`,
   `failed`, `none` (a policy decision with no prompt).
 - Adds `pyobjc-framework-LocalAuthentication` and its hidden import.
+- **Channel interface (row 35, admin).** `prove` and `approve` take a
+  `channel`; plan 2 implements only `touch_id`. The admin's direction is
+  a paired mobile app that triggers approved flows remotely, so the
+  phone must later slot in as another channel without changing callers.
+  No phone code in plan 2.
 
 ### 4.2 Locked screen (rows 8–9)
 
@@ -338,7 +343,15 @@ dialog and Touch ID wording within the rules above; HTML of the new UI
 controls (same no-JavaScript, inline-CSS style as plan 1); test
 structure; the redaction regexes' exact form within row 17's list.
 
-## 8. Decisions the admin may most want to revisit
+## 8. Future direction (admin, row 35)
+
+Approved flows triggered remotely from a paired mobile app. Plan 2 only
+keeps the door open (channel interface above). The later plan must
+resolve one hard conflict: UI automation needs an unlocked, logged-in
+screen, while plan 2 stops runs on a locked screen to protect an
+unattended laptop.
+
+## 9. Decisions the admin may most want to revisit
 
 From the architect's own notes, in order (also: row 34, this Claude
 session becomes governed once the managed settings are installed):
