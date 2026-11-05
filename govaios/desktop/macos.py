@@ -207,17 +207,22 @@ class MacDesktop:
         if w <= 0 or h <= 0:
             raise RuntimeError("element not visible")
         pt = (x + min(w / 2, 20), y + h / 2)   # near the left edge: link text, not trailing whitespace
-        pid = self._require_focus()   # again after the settle wait
-        err, hit = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), pt[0], pt[1], None)
-        hit_pid = AXUIElementGetPid(hit, None) if err == 0 and hit is not None else (1, None)
-        if hit_pid[0] != 0 or hit_pid[1] != pid:   # something else (dialog, other window) is on top of the point
-            raise RuntimeError("input refused: click point is not in the target app")
         for t in (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
+            if t != Q.kCGEventLeftMouseUp:   # re-check after the pointer pause; never strand a pressed button
+                self._require_point(pt)
             ev = Q.CGEventCreateMouseEvent(None, t, pt, Q.kCGMouseButtonLeft)
             Q.CGEventSetFlags(ev, 0)   # else a prior cmd shortcut leaks in: cmd+click = background tab
             Q.CGEventPost(Q.kCGHIDEventTap, ev)
             time.sleep(PACE["pointer"] if t == Q.kCGEventMouseMoved else 0.08)
         time.sleep(PACE["after_action"])
+
+    def _require_point(self, pt):
+        """Focus check, plus: the element under the point belongs to the target pid (not a dialog or other app)."""
+        pid = self._require_focus()
+        err, hit = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), pt[0], pt[1], None)
+        hit_pid = AXUIElementGetPid(hit, None) if err == 0 and hit is not None else (1, None)
+        if hit_pid[0] != 0 or hit_pid[1] != pid:
+            raise RuntimeError("input refused: click point is not in the target app")
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.

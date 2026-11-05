@@ -177,3 +177,13 @@ def test_permission_error_names_the_app(monkeypatch):
     monkeypatch.setattr(macos, "AXIsProcessTrusted", lambda: False)
     with pytest.raises(PermissionError, match="gov-aios.app"):
         macos.MacDesktop()
+
+
+def test_click_rechecks_before_button_down(env, monkeypatch):
+    def move_then_steal(tap, ev):   # a dialog takes the point right after the pointer moves
+        env.posted.append(("hid", ev))
+        env.ax.hit_pid = OTHER
+    monkeypatch.setattr(macos.Q, "CGEventPost", move_then_steal)
+    with pytest.raises(RuntimeError, match="click point"):
+        env.d.click(Node("link", "SECRET"))
+    assert [ev[1] for _, ev in env.posted] == [5]   # mouse moved only; no down/up
