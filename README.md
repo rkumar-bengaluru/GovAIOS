@@ -297,6 +297,15 @@ Design to be finalized separately. Current intent:
 5.  **Unattended execution.**
 6.  **OS-level enforcement** for uncooperative executors.
 
+### Run gov-aios
+
+1. Build and sign the app: `packaging/build.sh` (see `packaging/README.md`).
+2. Grant `dist/gov-aios.app` Accessibility and Screen Recording yourself. Never grant them to Terminal or Python.
+3. Check the identity and permissions: `bin/gov-aios doctor`. All lines should be `True`.
+4. Run a flow: `bin/gov-aios run flows/himalayas_job_vetting.yaml`. The first run asks for approval, and the network is blocked.
+5. Review the audit: `bin/gov-aios audit-ui`, then open the printed `127.0.0.1` URL.
+6. Verify the signed audit: `bin/gov-aios verify-audit` should print `OK <n> entries`.
+
 ## What GOV-AIOS is not
 
 -   Not a cloud agent that looks at screenshots and guesses where to
