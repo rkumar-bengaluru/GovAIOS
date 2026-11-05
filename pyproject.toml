@@ -10,6 +10,7 @@ dependencies = [
   "pyobjc-framework-ApplicationServices",
   "pyobjc-framework-Quartz",
   "pyobjc-framework-Cocoa",
+  "pyobjc-framework-LocalAuthentication",
   "pyyaml",
   "cryptography",
 ]

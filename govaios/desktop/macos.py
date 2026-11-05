@@ -12,6 +12,7 @@ from ApplicationServices import (
 from CoreFoundation import CFEqual
 
 from . import Node, ROLES, native_to_neutral
+from .. import auth
 
 BUNDLES = {"chrome": ("com.google.Chrome", "Google Chrome")}
 # Fixed human pace (spec 5.8): reliability and fair site load, never bot-detection evasion (no jitter).
@@ -136,11 +137,7 @@ class MacDesktop:
 
     def ask_admin(self, question, timeout_s=60):
         """Native dialog; anything but an explicit Approve (incl. timeout) is a deny."""
-        q = question.replace("\\", "\\\\").replace('"', '\\"')
-        script = (f'display dialog "{q}" with title "GOV-AIOS approval" '
-                  f'buttons {{"Deny", "Approve"}} default button "Deny" giving up after {timeout_s}')
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-        return "button returned:Approve" in r.stdout and "gave up:true" not in r.stdout
+        return auth.dialog(question, timeout_s)
 
     # --- perception ---
     def web_root(self, app):
