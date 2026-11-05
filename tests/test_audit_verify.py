@@ -45,7 +45,7 @@ def test_rehashed_edit_bad_signature(tmp_path):
         h = hashlib.sha256(_canon(e).encode()).hexdigest()
         e["hash"] = h
         e["sig"] = json.loads(ls[1])["sig"]
-        return [ls[0], json.dumps(e), ls[2]]
+        return [ls[0], json.dumps(e, separators=(",", ":"), ensure_ascii=False), ls[2]]
 
     _rewrite(p, edit)
     assert _r(verify(p, k)) == ("bad signature", 2)
@@ -71,3 +71,50 @@ def test_cli_exit_codes(tmp_path, capsys):
     _rewrite(p, lambda ls: [ls[0], ls[2]])
     assert main([str(p), str(k)]) == 1
     assert capsys.readouterr().out.strip() == "FAIL line 2: broken chain"
+
+
+def test_empty_log_fails(tmp_path):
+    p, k = _mk(tmp_path)
+    p.write_bytes(b"")
+    assert _r(verify(p, k)) == ("empty log", 1)
+
+
+def test_spacing_is_bad_hash(tmp_path):
+    p, k = _mk(tmp_path)
+    _rewrite(p, lambda ls: [json.dumps(json.loads(ls[0]), separators=(", ", ": ")), *ls[1:]])
+    assert _r(verify(p, k)) == ("bad hash", 1)
+
+
+def test_crlf_is_bad_hash(tmp_path):
+    p, k = _mk(tmp_path)
+    p.write_bytes(p.read_bytes().replace(b"\n", b"\r\n"))
+    assert _r(verify(p, k)) == ("bad hash", 1)
+
+
+def test_key_swap_bad_signature(tmp_path):
+    p, _ = _mk(tmp_path / "a")
+    _, other = _mk(tmp_path / "b")
+    assert _r(verify(p, other)) == ("bad signature", 1)
+
+
+def test_non_json_line_bad_hash(tmp_path):
+    p, k = _mk(tmp_path)
+    _rewrite(p, lambda ls: [ls[0], "not json", ls[2]])
+    assert _r(verify(p, k)) == ("bad hash", 2)
+
+
+def test_seq_gap(tmp_path):
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    import base64
+    log = AuditLog(tmp_path)
+    log.append("action", step=0)
+    os.chflags(log.path, 0)
+    first = json.loads(log.path.read_text().splitlines()[0])
+    e = {"seq": 3, "ts": first["ts"], "kind": "action", "prev": first["hash"]}
+    e["hash"] = hashlib.sha256(_canon(e).encode()).hexdigest()
+    key = serialization.load_pem_private_key(log.key_path.read_bytes(), None)
+    e["sig"] = base64.b64encode(key.sign(e["hash"].encode(), ec.ECDSA(hashes.SHA256()))).decode()
+    with open(log.path, "a") as f:
+        f.write(json.dumps(e, separators=(",", ":"), ensure_ascii=False) + "\n")
+    assert _r(verify(log.path, log.pub_path)) == ("seq gap", 2)

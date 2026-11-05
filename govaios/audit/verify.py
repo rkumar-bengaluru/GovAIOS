@@ -32,29 +32,35 @@ def verify(log_path: Path, pubkey_path: Path) -> VerifyResult:
     def fail(problem, line):
         return VerifyResult(False, n, problem, line)
 
+    # shortcut: whole trailing lines removed at a line boundary are undetectable without an external anchor (last hash/count); add with the plan-2 sealed checkpoint.
     for i, raw in enumerate(lines, 1):
         try:
             e = json.loads(raw)
+            # log.py writes insertion order, compact, ensure_ascii=False; this rejects whitespace, CRLF and duplicate keys
+            if json.dumps(e, separators=(",", ":"), ensure_ascii=False).encode() != raw:
+                return fail("bad hash", i)
             seq, h, sig, p = e["seq"], e.pop("hash"), e.pop("sig"), e["prev"]
-            if not isinstance(e, dict) or not all(isinstance(x, str) for x in (h, sig, p)):
+            if not all(isinstance(x, str) for x in (h, sig, p)) or type(seq) is not int:
                 raise ValueError
-        except (ValueError, KeyError, TypeError):
-            return fail("bad hash", i)  # unparseable complete line is tampering, not a crash tail
-        # shortcut: prev is checked before seq (brief's deleted-line test expects "broken chain"); a seq-only gap still reports "seq gap".
+            canon = json.dumps(e, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return fail("bad hash", i)  # malformed complete line is tampering, not a crash tail
+        # shortcut: prev is checked before seq (a deleted line must read "broken chain"); "seq gap" fires only when prev is intact.
         if p != prev:
             return fail("broken chain", i)
         if seq != n + 1:
             return fail("seq gap", i)
-        canon = json.dumps(e, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        if hashlib.sha256(canon.encode()).hexdigest() != h:
+        if hashlib.sha256(canon).hexdigest() != h:
             return fail("bad hash", i)
         try:
             pub.verify(base64.b64decode(sig, validate=True), h.encode(), ec.ECDSA(hashes.SHA256()))
-        except (InvalidSignature, ValueError):
+        except (InvalidSignature, ValueError, TypeError):
             return fail("bad signature", i)
         prev, n = h, i
     if tail:
         return fail("truncated tail", len(lines) + 1)
+    if n == 0:
+        return fail("empty log", 1)  # an emptied audit is tampering
     return VerifyResult(True, n, None, None)
 
 
