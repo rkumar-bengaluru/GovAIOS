@@ -19,7 +19,7 @@ def web(tmp_path):
     log.append("flow_end", flow="demo_flow", outcome="done")
     Approvals(home / "approvals.json").approve_flow("demo_flow", "abc123")
     srv, token = make_server(home)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
 
     def get(path, method="GET", tok=True):
         c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
@@ -92,7 +92,7 @@ def test_no_store_headers(web):
 
 def test_missing_log_no_crash(tmp_path):
     srv, token = make_server(tmp_path / "empty")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
     c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
     c.request("GET", f"/?t={token}")
     r = c.getresponse()
@@ -111,7 +111,7 @@ def _raw_server(tmp_path, lines, approvals=None):
     if approvals is not None:
         (home / "approvals.json").write_text(approvals)
     srv, token = make_server(home)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
 
     def get(path):
         c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
@@ -131,7 +131,7 @@ def test_missing_seq_and_hostile_seq(tmp_path):
 
 
 def test_malformed_approvals_notice(tmp_path):
-    for bad in ('{"flows":[1]}', "not json", '{"destinations":{"f":"x"}}'):
+    for bad in ('{"flows":[1]}', "not json", '{"destinations":{"f":"x"}}', "[1]", '"x"'):
         srv, get = _raw_server(tmp_path, [], bad)
         s, body, _ = get("/approvals")
         srv.shutdown(); srv.server_close()

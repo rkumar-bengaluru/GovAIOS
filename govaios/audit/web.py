@@ -27,7 +27,7 @@ def _entries(log: AuditLog):
     for raw in lines:
         try:
             e = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             e = None
         out.append((e if isinstance(e, dict) else None, raw.decode("utf-8", "replace")[:200]))
     return out
@@ -113,6 +113,8 @@ def make_server(home: Path, port: int = 0):
         except FileNotFoundError:
             d = {}
         except (OSError, ValueError):
+            d = None
+        if not isinstance(d, dict):
             d = None
         flows, dests = (d or {}).get("flows", {}), (d or {}).get("destinations", {})
         if not (isinstance(d, dict) and isinstance(flows, dict) and isinstance(dests, dict)
