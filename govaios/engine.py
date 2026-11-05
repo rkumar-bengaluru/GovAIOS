@@ -2,16 +2,17 @@
 Every OS side effect goes through the desktop adapter, and every action is
 decided by policy.decide() first."""
 import json
+import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 from .audit.log import AuditLog, url_for_audit
-from .approvals import Approvals, flow_hash, pages_used
+from .approvals import Approvals, pages_used, read_bound
 from .policy import decide, origin
 
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
@@ -79,32 +80,32 @@ def identify(page, root):
 # ---------- executor ----------
 
 class Runner:
-    def __init__(self, flow_path, desktop, home):
+    def __init__(self, flow_path, desktop, home, executor="gov_runner_dev"):
         self.home = Path(home)
+        self.executor = executor   # "gov_runner" only when cli runs inside com.govaios.cli
         self.flow_path = Path(flow_path)
         self.pages_dir = self.flow_path.parent.parent / "pages"   # flows/ and pages/ are siblings
         try:
-            self.digest = flow_hash(self.flow_path, self.pages_dir)   # hashed once, before parsing; approval binds to this
+            self.digest, raw = read_bound(self.flow_path, self.pages_dir)   # approval binds to these bytes
         except KeyError as e:
             raise Stop(f"unknown page: {e.args[0]}") from None
-        self.flow = yaml.safe_load(self.flow_path.read_text())["workflow"]
+        self.flow = yaml.safe_load(raw[self.flow_path])["workflow"]
         self.d = desktop
+        self.launched = False
+        self.report_path = None
         self.app = self.flow["browser"]["application"]
         self.approvals = Approvals(self.home / "approvals.json")
         self.audit = AuditLog(self.home)
         self.step = None
         self.pages = {}
         for pid in sorted(pages_used(self.flow)):
-            try:
-                self.pages[pid] = yaml.safe_load((self.pages_dir / f"{pid}.yaml").read_text())["page"]
-            except FileNotFoundError:
-                raise Stop(f"unknown page: {pid}") from None
+            self.pages[pid] = yaml.safe_load(raw[self.pages_dir / f"{pid}.yaml"])["page"]
         self.ctx = {}
 
     def _audit(self, kind, **f):
         """One signed entry; console shows only kind, step and decision (no content)."""
         self.audit.append(kind, flow=self.flow["id"], flow_version=self.flow["version"],
-                          executor="gov_runner", step=self.step, **f)
+                          executor=self.executor, step=self.step, **f)
         print(f"[{datetime.now():%H:%M:%S}] {kind} {self.step or ''} {f.get('decision') or ''}".rstrip(), flush=True)
 
     def _act(self, name, fn, *args, target=None):
@@ -116,6 +117,13 @@ class Runner:
             raise
         self._audit("action", action=name, target=target, outcome="done")
         return out
+
+    def ask(self, question, timeout_s):
+        """Admin dialog; afterwards (any answer) the flow's app is brought back before any further input."""
+        ok = self.d.ask_admin(question, timeout_s=timeout_s) is True   # only an explicit approve
+        if self.launched:
+            self._act("activate", self.d.activate, self.app)
+        return ok
 
     # governance gate for every side effect
     def gate(self, action, risk, target=None, destination=NO_DEST):
@@ -131,7 +139,7 @@ class Runner:
         if asked:
             q = f"Flow '{self.flow['id']}' wants to {action}"
             q += f" and reach {origin(destination)} for the first time." if destination else "."
-            if self.d.ask_admin(q + " Approve?", timeout_s=180) is True:   # only an explicit approve
+            if self.ask(q + " Approve?", 180):
                 if destination:
                     self.approvals.approve_destination(self.flow["id"], origin(destination))
                 verdict = "allow"
@@ -150,7 +158,7 @@ class Runner:
         q = (f"First run of flow '{f['id']}' (v{f['version']}). It may: {', '.join(f['permissions']['allow'])}; "
              f"max element risk {f['permissions']['max_element_risk']}; destinations "
              f"{', '.join(f['destinations'])}. Approve this flow?")
-        ok = self.d.ask_admin(q, timeout_s=180) is True
+        ok = self.ask(q, 180)
         self._audit("flow_approval", flow_hash=digest, decision="allow" if ok else "deny",
                     approver="admin", channel="desktop_dialog")
         if not ok:
@@ -181,6 +189,14 @@ class Runner:
                 return page, root
             time.sleep(1)
 
+    def page_element(self, ref):
+        """Element by schema ref, only after its page is identified (never on an unknown page)."""
+        page_id = ref.split(".")[0]
+        page, root = self.wait_for_page([page_id], 10)
+        if not page:
+            raise Stop(f"not on {page_id}")
+        return self.element(ref, root)
+
     def element(self, ref, root):
         page_id, el_id = ref.split(".")
         page = self.pages[page_id]
@@ -210,13 +226,17 @@ class Runner:
     def do_launch_application(self, s):
         self.gate("launch_application", "navigate")
         self._act("launch_application", self.d.launch_application, self.app, self.flow["browser"].get("profile_directory"))
+        self.launched = True
 
     def do_verify_account(self, s):
-        """Profile display names can repeat; the signed-in account shown on the page is the proof."""
-        node, _ = self.element(s["target"], self.snapshot())
+        """Profile display names can repeat; the signed-in account shown on the page is the proof.
+        The window it was read from is pinned: later input is refused in any other window."""
+        window = self.d.focused_window_id(self.app)
+        node, _ = self.page_element(s["target"])
         want = self.flow["browser"]["account"]
         if f"({want})" not in node.name:
             raise Stop("wrong browser profile: account on page does not match the flow")
+        self.d.pin_window(window)   # refuses if focus left that window during the check
 
     def do_navigate(self, s):
         self.gate("navigate", "navigate", destination=s["value"])
@@ -239,8 +259,8 @@ class Runner:
             if what == "stop_and_report":
                 raise Stop("unexpected page")
             # stop_and_request_user (Rule 6)
-            ok = self.d.ask_admin(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
-                                  f"then click Approve to continue.", timeout_s=300) is True
+            ok = self.ask(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
+                          f"then click Approve to continue.", 300)
             self._audit("request", action="resume", risk="read", target=page, decision="allow" if ok else "deny",
                         approver="admin", channel="desktop_dialog")
             if not ok:
@@ -289,7 +309,7 @@ class Runner:
         if tgt.startswith("current_item."):
             node, spec = self._current_item_node(tgt.split(".", 1)[1])
         else:
-            node, spec = self.element(tgt, self.snapshot())
+            node, spec = self.page_element(tgt)
         if tgt.startswith("current_item."):
             ref = "{}.{}[{}].{}".format(*self.ctx["item_spec"], self.ctx["n"], tgt.split(".", 1)[1])
         else:
@@ -299,7 +319,7 @@ class Runner:
         for attempt in range(2):                         # one bounded retry (Rule 10)
             self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
             node, spec = (self._current_item_node(tgt.split(".", 1)[1]) if tgt.startswith("current_item.")
-                          else self.element(tgt, self.snapshot()))   # positions changed after scrolling
+                          else self.page_element(tgt))   # positions changed after scrolling
             self._act("click", self.d.click, node, target=ref)
             if "verify_page" not in s:
                 return
@@ -312,7 +332,7 @@ class Runner:
         raise Stop(f"after click expected {s['verify_page']}")
 
     def do_extract(self, s):
-        self.gate("extract_visible_text", "read", target=s["page"])
+        self.gate("extract_visible_text", "read", target=s["page"], destination=self.d.current_url(self.app))
         page = self.pages[s["page"]]
         root = self.snapshot()
         rec = {}
@@ -339,8 +359,22 @@ class Runner:
         self._act("write_file", path.write_text, json.dumps(rec, indent=2, ensure_ascii=False))
 
     def do_report(self, s):
+        """Page content goes to a 0600 file under the data home, never to stdout/stderr."""
+        self.gate("report", "read")
         rec = self.ctx.get("record", {})
-        print(f"  #{self.ctx.get('n')}: " + " | ".join(str(rec.get(f) or "")[:80] for f in s["fields"]))
+        line = f"#{self.ctx.get('n')}: " + " | ".join(str(rec.get(f) or "")[:80] for f in s["fields"]) + "\n"
+        if self.report_path is None:
+            (self.home / "reports").mkdir(mode=0o700, exist_ok=True)
+            self.report_path = self.home / "reports" / f"{self.flow['id']}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.txt"
+            self.report_items = 0
+        self._act("report", self._append_report, line)
+        self.report_items += 1
+        print(f"report: {self.report_items} items -> {self.report_path}", flush=True)
+
+    def _append_report(self, line):
+        fd = os.open(self.report_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line)
 
     def do_browser_back(self, s):
         self.gate("navigate", "navigate")

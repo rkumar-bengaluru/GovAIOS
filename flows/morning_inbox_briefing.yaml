@@ -9,7 +9,7 @@ workflow:
     account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
 
   permissions:
-    allow: [launch_application, navigate, read_page, click, extract_visible_text]
+    allow: [launch_application, navigate, read_page, click, extract_visible_text, report]
     max_element_risk: navigate          # Compose / Reply / Forward are submit
   destinations: ["https://www.google.com", "https://mail.google.com"]
 

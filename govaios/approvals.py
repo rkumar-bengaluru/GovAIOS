@@ -23,16 +23,25 @@ def pages_used(flow):
     return ids
 
 
-def flow_hash(flow_path, pages_dir):
-    """Approval covers the flow and only the page schemas it uses (Rule 11)."""
-    flow = yaml.safe_load(Path(flow_path).read_text())["workflow"]
-    h = hashlib.sha256(Path(flow_path).read_bytes())
-    for pid in sorted(pages_used(flow)):
+def read_bound(flow_path, pages_dir):
+    """Read the flow and the page schemas it uses once: (digest, {path: bytes}).
+    Callers parse these same bytes, so the approval binds to exactly what runs (Rule 11)."""
+    flow_path = Path(flow_path)
+    raw = {flow_path: flow_path.read_bytes()}
+    h = hashlib.sha256(raw[flow_path])
+    for pid in sorted(pages_used(yaml.safe_load(raw[flow_path])["workflow"])):
+        p = Path(pages_dir) / f"{pid}.yaml"
         try:
-            h.update((Path(pages_dir) / f"{pid}.yaml").read_bytes())
+            raw[p] = p.read_bytes()
         except FileNotFoundError:
             raise KeyError(pid) from None
-    return h.hexdigest()
+        h.update(raw[p])
+    return h.hexdigest(), raw
+
+
+def flow_hash(flow_path, pages_dir):
+    """Approval covers the flow and only the page schemas it uses (Rule 11)."""
+    return read_bound(flow_path, pages_dir)[0]
 
 
 class Approvals:
