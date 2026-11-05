@@ -3,7 +3,7 @@ import subprocess
 import time
 
 import Quartz as Q
-from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
+from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps, NSWorkspace
 from ApplicationServices import (
     AXIsProcessTrusted, AXUIElementCreateApplication, AXUIElementCopyAttributeValue,
     AXUIElementCopyMultipleAttributeValues, AXUIElementSetAttributeValue,
@@ -40,6 +40,14 @@ class MacDesktop:
         if not AXIsProcessTrusted():
             raise PermissionError("Grant Accessibility to this terminal: System Settings > Privacy & Security > Accessibility")
         self.keys = {k: v["macos"] for k, v in ROLES["keys"].items()}
+        self._target = None   # bundle id that input may go to; set by launch/activate
+
+    def _require_focus(self):
+        """Synthetic input goes to whatever app is frontmost: refuse unless it is the flow's app."""
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        fid = front.bundleIdentifier() if front is not None else None
+        if self._target is None or fid != self._target:
+            raise RuntimeError("input refused: target app is not frontmost")
 
     # --- application and window ---
     def _app(self, app):
@@ -59,13 +67,18 @@ class MacDesktop:
         elif not self._app(app):
             subprocess.run(["open", "-a", BUNDLES[app][1]], check=True)
             time.sleep(3)
-        if not profile_directory:
-            self.activate(app)   # with a profile, the new window is already key; activate() could raise another profile's
+        self.activate(app)   # brings Chrome's key window (the profile window just opened) to the front
         time.sleep(PACE["after_action"])
 
     def activate(self, app):
+        self._target = BUNDLES[app][0]
         self._app(app).activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
-        time.sleep(0.5)
+        for _ in range(20):   # activation is async; wait until it is really frontmost
+            time.sleep(0.25)
+            front = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if front is not None and front.bundleIdentifier() == self._target:
+                return
+        raise RuntimeError("could not bring the target app to the front")
 
     def _ax_app(self, app):
         ax = AXUIElementCreateApplication(self._app(app).processIdentifier())
@@ -145,6 +158,7 @@ class MacDesktop:
         return p.x, p.y, s.width, s.height
 
     def click(self, node):
+        self._require_focus()
         # wait for layout to settle (ads, hydration) so the click hits the element, max ~3s
         x, y, w, h = self._bounds(node)
         for _ in range(10):
@@ -156,6 +170,7 @@ class MacDesktop:
         if w <= 0 or h <= 0:
             raise RuntimeError(f"element not visible: {node.name!r}")
         pt = (x + min(w / 2, 20), y + h / 2)   # near the left edge: link text, not trailing whitespace
+        self._require_focus()   # again after the settle wait
         for t in (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
             ev = Q.CGEventCreateMouseEvent(None, t, pt, Q.kCGMouseButtonLeft)
             Q.CGEventSetFlags(ev, 0)   # else a prior cmd shortcut leaks in: cmd+click = background tab
@@ -170,6 +185,7 @@ class MacDesktop:
         time.sleep(PACE["after_action"])
 
     def press(self, logical_key):
+        self._require_focus()
         *mods, key = self.keys[logical_key]
         flags = 0
         for m in mods:
@@ -183,6 +199,7 @@ class MacDesktop:
 
     def type_text(self, text):
         for ch in text:
+            self._require_focus()   # per character: focus can move mid-word
             for down in (True, False):
                 ev = Q.CGEventCreateKeyboardEvent(None, 0, down)
                 Q.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
