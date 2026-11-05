@@ -99,3 +99,60 @@ def test_missing_log_no_crash(tmp_path):
     body = r.read().decode()
     srv.shutdown(); srv.server_close()
     assert r.status == 200 and "No runs yet" in body and "FAIL" in body
+
+
+def _raw_server(tmp_path, lines, approvals=None):
+    import json as _j
+    home = tmp_path / "h2"
+    AuditLog(home).append("action", step=1)  # creates keys/home
+    p = home / "audit.jsonl"
+    os.chflags(p, 0)
+    p.write_text("".join(l + "\n" for l in lines))
+    if approvals is not None:
+        (home / "approvals.json").write_text(approvals)
+    srv, token = make_server(home)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def get(path):
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        c.request("GET", f"{path}?t={token}")
+        r = c.getresponse()
+        return r.status, r.read().decode(), r
+    return srv, get
+
+
+def test_missing_seq_and_hostile_seq(tmp_path):
+    srv, get = _raw_server(tmp_path, ['{"kind":"flow_start","flow":"f"}',
+                                      '{"seq":"\\"><b>x","kind":"flow_start","flow":"g"}'])
+    for path in ("/", "/log"):
+        s, body, _ = get(path)
+        assert s == 200 and "FAIL" in body and "<b>x" not in body
+    srv.shutdown(); srv.server_close()
+
+
+def test_malformed_approvals_notice(tmp_path):
+    for bad in ('{"flows":[1]}', "not json", '{"destinations":{"f":"x"}}'):
+        srv, get = _raw_server(tmp_path, [], bad)
+        s, body, _ = get("/approvals")
+        srv.shutdown(); srv.server_close()
+        assert s == 200 and "approvals.json unreadable" in body
+
+
+def test_orphans_visible(tmp_path):
+    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"action","outcome":"ORPHANOUT"}', "garbage<i>",
+                                      '{"seq":2,"kind":"flow_start","flow":"f"}'])
+    assert "2 entries outside any run" in get("/")[1]
+    body = get("/log")[1]
+    assert "ORPHANOUT" in body and "unparsed: garbage&lt;i&gt;" in body
+    srv.shutdown(); srv.server_close()
+
+
+def test_render_exception_500(web, monkeypatch):
+    import govaios.audit.web as w
+
+    def boom(*a):
+        raise RuntimeError("secret")
+    monkeypatch.setattr(w, "_page", boom)
+    s, body, r = web[2]("/")
+    assert s == 500 and body == "internal error" and "secret" not in body
+    assert r.getheader("Cache-Control") == "no-store"
