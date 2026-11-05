@@ -225,3 +225,6 @@ spikes/ax-flows/captures/
 spikes/ax-flows/jd_selected/
 spikes/ax-flows/approvals.json
 .superpowers/
+/approvals.json
+/jd_selected/
+/captures/
