@@ -31,7 +31,11 @@ class AuditError(Exception):
 
 def url_for_audit(url: str) -> str:
     u = urlsplit(url)
-    return f"{u.scheme}://{u.netloc}{u.path}"
+    host = u.hostname or ""  # drops userinfo
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{u.port}" if u.port is not None else ""
+    return f"{u.scheme}://{host}{port}{u.path}"
 
 
 def _canon(d: dict) -> str:
@@ -48,7 +52,10 @@ class AuditLog:
     def _key(self):
         # shortcut: key on disk (0600), not Secure Enclave; move to Secure Enclave in the deployment plan.
         if self.key_path.exists():
-            return serialization.load_pem_private_key(self.key_path.read_bytes(), None)
+            try:
+                return serialization.load_pem_private_key(self.key_path.read_bytes(), None)
+            except (ValueError, TypeError) as e:
+                raise AuditError(f"audit key unreadable: {e}")
         if self.path.exists() and self.path.stat().st_size > 0:
             raise AuditError("audit key missing but audit log exists; refusing to start a new chain")
         key = ec.generate_private_key(ec.SECP256R1())
@@ -56,8 +63,18 @@ class AuditLog:
         with os.fdopen(fd, "wb") as f:
             f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                       serialization.NoEncryption()))
-        self.pub_path.write_bytes(key.public_key().public_bytes(
-            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+            f.flush()
+            os.fsync(f.fileno())
+        with open(self.pub_path, "wb") as f:
+            f.write(key.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+            f.flush()
+            os.fsync(f.fileno())
+        dfd = os.open(self.home, os.O_RDONLY)  # make the new directory entries durable before any log write
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
         return key
 
     def _last(self):
@@ -89,6 +106,9 @@ class AuditLog:
         bad = set(fields) - FIELDS
         if bad:
             raise AuditError(f"audit field(s) not allowed: {sorted(bad)}")
+        for k, v in fields.items():
+            if not (v is None or isinstance(v, (str, int))):
+                raise AuditError(f"audit field {k} must be str, int, bool or None")
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(self.home / "audit.lock", "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -96,14 +116,18 @@ class AuditLog:
             seq, prev = self._last()
             entry = {"seq": seq + 1, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                      "kind": kind, **fields, "prev": prev}
-            entry["hash"] = hashlib.sha256(_canon(entry).encode()).hexdigest()
+            try:
+                entry["hash"] = hashlib.sha256(_canon(entry).encode()).hexdigest()
+                line = (_canon_line(entry) + "\n").encode()
+            except (UnicodeEncodeError, TypeError, ValueError) as e:
+                raise AuditError(f"audit entry not encodable: {e}")
             entry["sig"] = base64.b64encode(key.sign(entry["hash"].encode(), ec.ECDSA(hashes.SHA256()))).decode()
-            new = not self.path.exists()
+            line = (_canon_line(entry) + "\n").encode()
             with open(self.path, "ab") as f:
-                f.write((_canon_line(entry) + "\n").encode())
+                f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
-            if new:
+            if not os.stat(self.path).st_flags & stat.UF_APPEND:  # also re-arms after admin recovery
                 os.chflags(self.path, stat.UF_APPEND)
         return entry
 

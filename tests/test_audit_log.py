@@ -89,3 +89,29 @@ def test_concurrent_appends_stay_chained(home):
 def test_file_is_append_only_flag(home):
     AuditLog(home).append("flow_start", flow="f")
     assert os.stat(home / "audit.jsonl").st_flags & stat.UF_APPEND
+
+
+def test_url_for_audit_drops_userinfo():
+    assert url_for_audit("https://alice:hunter2@mail.google.com:443/mail/?q=x#y") == "https://mail.google.com:443/mail/"
+
+
+@pytest.mark.parametrize("v", [{"body": "secret"}, 1.5, float("nan"), "\ud800", b"x", ["a"]])
+def test_bad_values_rejected(home, v):
+    with pytest.raises(AuditError):
+        AuditLog(home).append("action", target=v)
+    assert not (home / "audit.jsonl").exists()
+
+
+def test_corrupt_key_raises_audit_error(home):
+    AuditLog(home).append("flow_start", flow="f")
+    (home / "audit_key.pem").write_text("")
+    with pytest.raises(AuditError):
+        AuditLog(home).append("action", flow="f")
+
+
+def test_append_only_flag_rearmed(home):
+    log = AuditLog(home)
+    log.append("flow_start", flow="f")
+    os.chflags(home / "audit.jsonl", 0)
+    log.append("action", flow="f")
+    assert os.stat(home / "audit.jsonl").st_flags & stat.UF_APPEND
