@@ -1,30 +1,33 @@
-import os
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from govaios.approvals import Approvals
+from govaios import executor
 from govaios.executor import (ALLOW_COMMANDS, DESTINATIONS, build_request, category, default_policy,
                               load, protected_paths)
 from govaios.policy import decide_tool
 
 
 @pytest.fixture
-def env(tmp_path, govaios_home):
+def env(tmp_path, govaios_home, monkeypatch):
     govaios_home.mkdir()
     user = tmp_path / "user"
     root = tmp_path / "proj"
     mem = user / ".claude/projects/p/memory"
     mem.mkdir(parents=True)
     root.mkdir()
+    monkeypatch.setattr(executor.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(user)))
     pol = yaml.safe_load(default_policy(root))
     pol["tools"] += ["mcp__x__y"]
     return dict(user=user, root=root, mem=mem, pol=pol, appr=Approvals(tmp_path / "approvals.json"),
-                prot=protected_paths(user), home=govaios_home)
+                prot=protected_paths(govaios_home), home=govaios_home)
 
 
 def run(env, tool, **inp):
-    return decide_tool(build_request(tool, inp, env["home"]), env["pol"], env["appr"], env["prot"])
+    inp = {k: v for k, v in inp.items()}
+    return decide_tool(build_request(tool, inp, env["home"], env["root"]), env["pol"], env["appr"], env["prot"])
 
 
 def test_table(env):
@@ -95,3 +98,41 @@ def test_load_hashes_bytes(tmp_path):
     import hashlib
     assert pol["project_roots"] == [str(tmp_path)]
     assert digest == hashlib.sha256((tmp_path / "executors/claude_code.yaml").read_bytes()).hexdigest()
+
+
+def test_default_tools_match_row_33(tmp_path):
+    assert yaml.safe_load(default_policy(tmp_path))["tools"] == [
+        "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "Bash", "WebFetch", "TodoWrite", "ToolSearch",
+        "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "Agent", "Skill"]
+    assert category("TaskStop") == "internal" and category("PowerShell") == "shell"
+
+
+@pytest.mark.parametrize("url,want", [
+    ("https://evil.com\\@github.com/x", "deny"), ("https://github.com:8443/x", "deny"),
+    ("https://u@github.com/x", "deny"), ("https://GITHUB.com/x", "ask"), ("http://github.com/x", "deny"),
+    ("https://[::1/x", "deny"), ("https://github.com/a b", "deny"), ("https://github.com/\t", "deny"),
+    ("", "deny")])
+def test_webfetch_parser_differential(env, url, want):
+    assert run(env, "WebFetch", url=url) == want
+
+
+def test_tilde_and_relative_paths_deny(env):
+    for p in ("~/.claude/settings.json", "relative/x", "./x"):
+        assert run(env, "Read", file_path=p) == "deny"
+        assert run(env, "Write", file_path=p) == "deny"
+    assert run(env, "Glob", pattern="*.py") == "allow"       # cwd (inside root) fills the missing path
+    assert run(env, "Grep", pattern="x") == "allow"
+
+
+def test_case_insensitive_protected(env):
+    u = env["user"]
+    for p in (".CLAUDE/settings.json", ".Claude.json", ".claude/Projects/p/MEMORY/a.txt"):
+        assert run(env, "Read", file_path=str(u / p)) == "deny"
+    assert run(env, "Read", file_path=str(env["home"]).upper() + "/x") == "deny"
+
+
+def test_glob_pattern_escape(env):
+    r = str(env["root"])
+    for pat in (str(env["user"] / ".claude/**"), "~/.claude/*", "../*", "a/../../*"):
+        assert run(env, "Glob", path=r, pattern=pat) == "deny"
+    assert run(env, "Glob", path=r, pattern="**/*.py") == "allow"

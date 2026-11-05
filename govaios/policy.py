@@ -30,16 +30,34 @@ def decide(request, flow, approvals):
 
 
 _META = set(";&|$`<>()\n")
+CLAUDE_IDX = 4  # position of ~/.claude in executor.protected_paths()
 
 
-def _inside(p, d):
+def _inside(p, d, fold=False):
+    if fold:
+        p, d = p.casefold(), d.casefold()    # APFS is case-insensitive: protection must be too
     return p == d or p.startswith(d.rstrip("/") + "/")
 
 
 def _memory_md(p, claude):
     """~/.claude/projects/<name>/memory/**/*.md (row 16 carve-out); p is already a realpath."""
+    p, claude = p.casefold(), claude.casefold()
     parts = p[len(claude) + 1:].split("/") if p.startswith(claude + "/") else []
     return len(parts) >= 4 and parts[0] == "projects" and parts[2] == "memory" and p.endswith(".md")
+
+
+def _fetch_host(url):
+    """Host of a plain https URL, or None. Strict, so every URL parser agrees on the host."""
+    if not url or "\\" in url or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return None
+    try:
+        u = urlsplit(url)
+        host = u.netloc.lower()
+        if u.scheme != "https" or not host or (u.hostname or "").lower() != host:
+            return None                                       # userinfo or port
+    except ValueError:
+        return None
+    return host
 
 
 def decide_tool(request, policy, approvals, protected):
@@ -47,9 +65,8 @@ def decide_tool(request, policy, approvals, protected):
     cat, tool, path = request.get("category"), request.get("tool"), request.get("path")
     memory = False
     if path is not None:
-        memory = request["tool"] in ("Read", "Edit", "Write") and any(
-            _memory_md(path, q) for q in protected if q.endswith("/.claude"))
-        if not memory and any(_inside(path, q) for q in protected):
+        memory = tool in ("Read", "Edit", "Write") and _memory_md(path, protected[CLAUDE_IDX])
+        if not memory and any(_inside(path, q, True) for q in protected):
             return "deny"
     if cat is None or tool not in policy.get("tools", []):
         return "deny"                                     # Rule 9
@@ -59,6 +76,9 @@ def decide_tool(request, policy, approvals, protected):
         return "ask"
     if cat in ("read", "write"):
         if path is None:
+            return "deny"
+        pat = request.get("pattern") or ""
+        if tool == "Glob" and (pat.startswith(("/", "~")) or ".." in pat.split("/")):
             return "deny"
         if memory or any(_inside(path, r) for r in policy.get("project_roots", [])):
             return "allow"
@@ -72,9 +92,8 @@ def decide_tool(request, policy, approvals, protected):
             return "allow"
         return "ask"
     if cat == "fetch":
-        u = urlsplit(request.get("url") or "")
-        host = (u.hostname or "").lower()
-        if u.scheme != "https" or host not in {d.lower() for d in policy.get("destinations", [])}:
+        host = _fetch_host(request.get("url"))
+        if host is None or host not in {d.lower() for d in policy.get("destinations", [])}:
             return "deny"
         return "allow" if approvals.destination_ok("claude_code", f"https://{host}") else "ask"
     return "deny"
