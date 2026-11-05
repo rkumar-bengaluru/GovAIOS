@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -143,3 +144,38 @@ def test_shell_args_touching_protected_paths_ask(env):
               "ls ~", f"git diff --output={u}/.claude.json", "ls $HOME/.claude"):
         assert run(env, "Bash", command=c) == "ask", c
     assert run(env, "Bash", command="git status") == "allow"
+
+
+def test_shell_protected_paths_with_spaces_and_given_form(env, tmp_path):
+    u, h = env["user"], env["home"]
+    for c in ('ls "/Library/Application Support/GOV-AIOS"', 'ls "/Library/Application Support/ClaudeCode"',
+              f'ls "{u}/Library/Application Support/GOV-AIOS"'):
+        assert run(env, "Bash", command=c) == "ask", c
+    given = tmp_path / "link"
+    given.symlink_to(h)
+    prot = protected_paths(given)
+    pol = {"tools": ["Bash"], "project_roots": [], "allow_commands": ["ls"]}
+    req = {"tool": "Bash", "category": "shell", "command": f"ls {given}"}
+    assert decide_tool(req, pol, env["appr"], prot) == "ask"
+    spaced = tmp_path / "Application Support/GOV-AIOS"
+    spaced.mkdir(parents=True)
+    req["command"] = f'ls "{spaced}"'
+    assert decide_tool(req, pol, env["appr"], protected_paths(spaced)) == "ask"
+    assert run(env, "Bash", command="git status") == "allow"
+
+
+def test_glob_brace_escape(env):
+    for pat in ("{/etc,x}/*", "{x,/etc}/*", "{~,x}/*", "a/{b,~}"):
+        assert run(env, "Glob", path=str(env["root"]), pattern=pat) == "deny"
+    assert run(env, "Glob", path=str(env["root"]), pattern="{a,b}/*.py") == "allow"
+
+
+def test_load_realpaths_roots(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    (tmp_path / "executors").mkdir()
+    (tmp_path / "executors/claude_code.yaml").write_text(default_policy(link))
+    pol, _ = load(tmp_path)
+    assert pol["project_roots"] == [os.path.realpath(real)]

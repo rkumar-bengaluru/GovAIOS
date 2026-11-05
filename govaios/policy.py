@@ -78,7 +78,8 @@ def decide_tool(request, policy, approvals, protected):
         if path is None:
             return "deny"
         pat = request.get("pattern") or ""
-        if tool == "Glob" and (pat.startswith(("/", "~")) or ".." in pat.split("/")):
+        if tool == "Glob" and (pat.startswith(("/", "~")) or ".." in pat.split("/")
+                              or any(b in pat for b in ("{/", ",/", "{~", ",~"))):
             return "deny"
         if memory or any(_inside(path, r) for r in policy.get("project_roots", [])):
             return "allow"
@@ -87,8 +88,8 @@ def decide_tool(request, policy, approvals, protected):
         cmd = request.get("command")
         if cmd is None:
             return "deny"
-        args = cmd.casefold().split()
-        touchy = any("~" in a or ".." in a.split("/") or any(q.casefold() in a for q in protected) for a in args)
+        low = cmd.casefold()
+        touchy = any("~" in a or ".." in a.split("/") for a in low.split()) or any(q.casefold() in low for q in protected)
         if not touchy and not _META.intersection(cmd) and any(
                 cmd == c or cmd.startswith(c + " ") for c in policy.get("allow_commands", [])):
             return "allow"

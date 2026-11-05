@@ -35,7 +35,8 @@ def protected_paths(home):
     user = Path(pwd.getpwuid(os.getuid()).pw_dir)
     raw = [home, "/Library/Application Support/GOV-AIOS", "/Library/Application Support/ClaudeCode",
            "/Applications/gov-aios.app", user / ".claude", user / ".claude.json", user / "Library/LaunchAgents"]
-    return tuple(os.path.realpath(p) for p in raw)
+    # realpathed forms first (CLAUDE_IDX), then the as-given forms, for textual matching in commands
+    return tuple(os.path.realpath(p) for p in raw) + tuple(str(p) for p in raw)
 
 
 def default_policy(root):
@@ -45,7 +46,9 @@ def default_policy(root):
 
 def load(home):
     raw = (Path(home) / POLICY_PATH).read_bytes()
-    return yaml.safe_load(raw), hashlib.sha256(raw).hexdigest()
+    pol = yaml.safe_load(raw)
+    pol["project_roots"] = [os.path.realpath(r) for r in pol.get("project_roots", [])]  # requests are realpathed
+    return pol, hashlib.sha256(raw).hexdigest()
 
 
 def build_request(tool_name, tool_input, home, cwd):
