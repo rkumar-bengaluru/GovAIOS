@@ -18,6 +18,13 @@
 - Hook command: `/Applications/gov-aios.app/Contents/MacOS/gov-aios hook` (row 14).
 - Guard LaunchAgent: label `com.govaios.guard`, `~/Library/LaunchAgents/com.govaios.guard.plist`, `KeepAlive` and `RunAtLoad` true (row 10).
 - Hotkey: `ctrl+option+cmd+.` (row 10).
+- Sandbox profile per subcommand, applied once in `main()` right after argument parsing (rows 22, 28):
+
+  | Subcommand | Profile |
+  | :--- | :--- |
+  | `doctor` | none |
+  | `audit-ui` | `UI_PROFILE` |
+  | `run`, `dump`, `hook`, `guard`, `resume`, `review-powers`, `claude-settings`, `verify-audit`, `selftest` | `RUN_PROFILE` |
 - Presence proof: 60 s overall; anything but success is deny; a new `LAContext` per prompt; `touchIDAuthenticationAllowableReuseDuration` 0; biometrics when available, else device-owner, else deny (rows 4, 6).
 - `auth` values: `biometric`, `device_owner`, `failed`, `none`. Channel value for Touch ID proofs: `touch_id` (rows 7, 35).
 - Audit `KINDS` add `emergency_stop`, `revoke`, `ui_login`, `powers_review`, `resume`; `FIELDS` add `auth`, `command` (row 25).
@@ -34,7 +41,7 @@
 
 - The Touch ID sheet never calls back (lid closed mid-prompt, biometric lockout, sheet dismissed by the system). `approve`/`prove` must return deny when 60 s pass, never hang (Task 3 test `test_no_reply_is_deny_after_timeout`).
 - Claude passes a path that is a symlink into the data home, or `..` segments out of a project root. Decide on the `realpath`, so it is denied (Task 7 test `test_symlink_into_data_home_denied`).
-- Two Claude sessions, or a Claude session and a run, ask at the same moment. Only one dialog is on screen at a time; the second waits for `ask.lock` within its own 60 s or is denied (Task 3 test `test_second_prompt_waits_for_lock`).
+- Two Claude sessions, or a Claude session and a run, ask at the same moment. Only one dialog is on screen at a time; the second tries `ask.lock` for 2 s, then is denied with reason `busy` (row 36; Task 3 test `test_second_prompt_denied_when_busy`).
 - `guard.pid` is stale: the guard crashed and the pid was reused by another process. Treat as no guard (Task 5 test `test_reused_guard_pid_is_not_alive`).
 - The admin presses the hotkey while an approval dialog is open. That prompt resolves as deny within 1 s (Task 5 test `test_stop_cancels_pending_prompt`).
 
@@ -86,7 +93,7 @@ Throwaway probes in `spikes/plan2/` (no tests, no production code). Each result 
 - [ ] **Step 6:** `probe_hook.sh` and a project-level `.claude/settings.local.json` in a scratch directory (rows 13, 14, 27; no root needed): a `PreToolUse` command hook that logs its stdin and timing. Confirm: matcher `*` fires for Bash, Read, an MCP tool and a subagent's tool call; the hook process is not inside Claude Code's sandbox (it can read a path in `sandbox.filesystem.denyRead`); exit 2 blocks; a crash and a timeout block when `onFailure: "block"` is set; Claude's sandboxed Bash can or cannot run `open /Applications/…app` (row 29). Then time 20 runs of `dist/gov-aios.app/Contents/MacOS/gov-aios selftest lines 1 --dev`; median must be under 1 s (row 13).
 - [ ] **Step 7:** Check managed-settings key names against the Claude Code settings docs for the installed version (`claude --version`): every key in row 14. Record the exact JSON that Task 8 will emit.
 - [ ] **Step 8 (admin):** `sudo ditto dist/gov-aios.app /Applications/gov-aios.app && sudo chown -R root:wheel /Applications/gov-aios.app`, then run its `doctor` through `open -W`. Record whether Accessibility and Screen Recording still read True or need a fresh grant (row 18). Leave it installed for later tasks only if the admin agrees.
-- [ ] **Step 9:** Append one log row per probe (rows 36+). If any expectation failed, stop and send it to the architect; continue only after the affected row is updated.
+- [ ] **Step 9:** Append one log row per probe (rows 38+). If any expectation failed, stop and send it to the architect; continue only after the affected row is updated.
 - [ ] **Step 10:** Commit: `git commit -m "Plan 2 spike: confirm platform facts"`.
 
 ### Task 2: Leftovers and revocations that stick
@@ -119,10 +126,10 @@ Rows 4–8, 35.
 
 **Interfaces:**
 - Produces:
-  - `screen_locked() -> bool`: true if `CGSessionCopyCurrentDictionary()` is missing, `CGSSessionScreenIsLocked` is true, or `kCGSessionOnConsoleKey` is false (key names as confirmed in Task 1).
+  - `screen_locked() -> bool`: reads the session through the seam `_cg_session_dict() -> dict | None` (the only place that calls `CGSessionCopyCurrentDictionary()`; tests patch the seam, never Quartz); true if it is missing, `CGSSessionScreenIsLocked` is true, or `kCGSessionOnConsoleKey` is false (key names as confirmed in Task 1).
   - `prove(reason: str, home: Path, channel: str = "touch_id") -> tuple[bool, str]`: no dialog; returns `(ok, auth)`.
   - `approve(question: str, reason: str, home: Path, channel: str = "touch_id") -> tuple[bool, str]`: dialog with the full question, then on Approve a fresh `LAContext` with `reason`.
-  - Both: if `screen_locked()` → `(False, "none")` with no prompt; hold `flock` on `home / "ask.lock"` for the whole prompt; one 60 s deadline covers waiting for the lock, the dialog and the Touch ID reply; any channel other than `touch_id` raises `ValueError`.
+  - Both: if `screen_locked()` → `(False, "none")` with no prompt; try a non-blocking `flock` on `home / "ask.lock"` for up to 2 s, else return `(False, "none")` with deny reason `busy` and no prompt (row 36); hold it for the whole prompt; one 60 s deadline covers the dialog and the Touch ID reply; any channel other than `touch_id` raises `ValueError`.
   - `dialog(question: str, timeout_s: int) -> bool`: the osascript dialog moved from `MacDesktop.ask_admin` (same text escaping, Deny default, `giving up after`).
   - Module-level seams for tests: `_la_evaluate(reason: str, deadline: float) -> str` returning `biometric`, `device_owner` or `failed`, and `_now()`.
 - Produces: audit `KINDS` and `FIELDS` as in Global Constraints.
@@ -134,7 +141,7 @@ Rows 4–8, 35.
   - `test_prove_has_no_dialog`: `prove` calls `_la_evaluate` with the given reason and never `dialog`.
   - `test_no_reply_is_deny_after_timeout`: a fake LAContext whose `evaluatePolicy` never calls its reply block; with `_now` advanced past 60 s, `_la_evaluate` returns `failed` and `invalidate` was called.
   - `test_policy_choice`: `canEvaluatePolicy` true for biometrics → biometric policy with `localizedFallbackTitle == ""`; false for biometrics, true for device owner → device-owner policy; both false → `failed` without evaluating.
-  - `test_second_prompt_waits_for_lock`: hold `ask.lock` in the test; `approve` in a thread with the deadline mocked to expire returns `(False, "none")` and `dialog` was never called.
+  - `test_second_prompt_denied_when_busy`: hold `ask.lock` in the test; `approve` returns `(False, "none")` after about 2 s (clock seam), reports reason `busy`, and `dialog` was never called. Release the lock: the next `approve` prompts.
   - `test_unknown_channel_rejected`: `approve(..., channel="phone")` raises `ValueError`.
   - `test_audit_accepts_new_kinds_and_fields`: `AuditLog.append("resume", auth="biometric")` and `append("request", command="git status")` succeed; an unknown field still raises.
 - [ ] **Step 2:** Run `pytest tests/test_auth.py -v`. Expected: FAIL.
@@ -174,7 +181,7 @@ Rows 10–12, 29 (`resume` proof), 30.
 - Produces in `runstate.py` (all take `home: Path`):
   - `is_govaios(pid: int) -> bool`: the process's executable path (`proc_pidpath` via `ctypes`) is `/Applications/gov-aios.app/Contents/MacOS/gov-aios`; seam `_exe_path(pid)` for tests.
   - `guard_alive(home) -> bool`: `guard.pid` exists, the pid is alive and `is_govaios`.
-  - `stopped(home) -> bool`; `register_run(home) -> Path` (writes `runs/<os.getpid()>`), `unregister_run(home)`.
+  - `stopped(home) -> bool`; `register_run(home) -> Path` (first removes every `runs/` entry whose pid is not alive or not `is_govaios`, then writes `runs/<os.getpid()>`), `unregister_run(home)`.
   - `emergency_stop(home, audit: AuditLog, kill=os.kill, sleep=time.sleep) -> list[tuple[int, str]]`: writes `STOPPED`, SIGTERMs each live `is_govaios` pid in `runs/`, SIGKILLs any still alive after 3 s, appends kind `emergency_stop` with `outcome` per run (`stopped` or `killed`) and `reason="claude commands already running are not stopped"`; returns the list.
   - `resume(home, audit) -> bool`: `auth.prove("resume gov-aios", home)`; on success removes `STOPPED`; audits kind `resume` with `auth` either way.
 - Produces in `guard.py`: `main(home) -> int` registers the hotkey (code from Task 1 Step 3), writes `guard.pid` only after registration succeeds, calls `emergency_stop` on each press; registration failure → message on stderr, exit 1.
@@ -185,6 +192,7 @@ Rows 10–12, 29 (`resume` proof), 30.
 - [ ] **Step 1: Write the failing tests** (`_exe_path`, `kill`, `sleep` faked):
   - `test_stop_terms_then_kills`: two run files; pid A dies after SIGTERM, pid B does not; result `[(A, "stopped"), (B, "killed")]`; `STOPPED` exists; one `emergency_stop` entry per run.
   - `test_stop_skips_non_govaios_pid`: a `runs/` pid whose exe is not gov-aios is never signalled (pid reuse).
+  - `test_register_run_collects_stale_entries`: `runs/` holds a dead pid and a live non-gov-aios pid; after `register_run` only `runs/<own pid>` remains.
   - `test_reused_guard_pid_is_not_alive`: `guard.pid` names a live pid with another exe → `guard_alive` is False; missing file → False.
   - `test_resume_needs_proof`: `prove` fails → `STOPPED` remains, `resume` entry `auth="failed"`; succeeds → removed.
   - `test_stop_cancels_pending_prompt` (`test_auth.py`): `dialog` blocks until killed; writing `STOPPED` from another thread makes `approve` return `(False, "none")` within 1 s.
@@ -273,7 +281,7 @@ Rows 19–21.
 
 **Interfaces:**
 - Consumes: `auth.prove`, `auth.screen_locked`; `Approvals.snapshot`, `revoke_flow`, `revoke_destination`, `revoke_all` (Task 2).
-- Produces: `make_server(home: Path, port: int = 0, now=time.time) -> tuple[server, code]` (the caller has already proven presence); `gov-aios audit-ui` (already under `UI_PROFILE`, Task 10) calls `auth.prove("open the audit log", home)` first (deny → exit 1, audited `ui_login` with `auth`), and prints `http://127.0.0.1:<port>/login?c=<code>`. `GET /login?c=` with a valid unused code under 60 s old sets cookie `s=<session>; HttpOnly; SameSite=Strict; Path=/` and returns 303 to `/`. All other routes need the cookie. Every request needs `Host == 127.0.0.1:<port>`, else 403. After 1 hour, or when `screen_locked()` is true at a request, the response is 403 and the server shuts down. `POST /revoke` with form fields `csrf`, `kind` (`flow`, `destination`, `all`), `flow`, `destination`; needs the session's CSRF token and `Origin == http://127.0.0.1:<port>`; then 303 to `/approvals`; audited kind `revoke` with `flow`, `destination`, or `reason="all"`. Any other POST → 405. Plan-1 headers stay.
+- Produces: `make_server(home: Path, port: int = 0, now=time.time) -> tuple[server, code]` (the caller has already proven presence); `gov-aios audit-ui` (already under `UI_PROFILE`, Task 10) calls `auth.prove("open the audit log", home)` first (deny → exit 1, audited `ui_login` with `auth`), and prints `http://127.0.0.1:<port>/login?c=<code>`. `GET /login?c=` with a valid unused code under 60 s old sets cookie `s=<session>; HttpOnly; SameSite=Strict; Path=/` and returns 303 to `/`. All other routes need the cookie. Every request needs `Host == 127.0.0.1:<port>`, else 403. After 1 hour, or when `screen_locked()` is true at a request, the response is 403 and the server shuts down. `POST /revoke` with form fields `csrf`, `kind` (`flow`, `destination`, `all`), `flow`, `destination`; needs the session's CSRF token (and the Host check above); an `Origin` header, when present, must equal `http://127.0.0.1:<port>`, but its absence is not a rejection (row 37); then 303 to `/approvals`; audited kind `revoke` with `flow`, `destination`, or `reason="all"`. Any other POST → 405. Plan-1 headers stay.
 
 - [ ] **Step 1: Write the failing tests** (replace the plan-1 token tests):
   - `test_login_code_single_use_and_expiry`: first `/login?c=` → 303 with the cookie flags above; second use → 403; a fresh server with `now` advanced 61 s → 403.
@@ -281,7 +289,7 @@ Rows 19–21.
   - `test_host_header_checked`: `Host: evil.example` with a valid cookie → 403.
   - `test_session_expires_and_lock_ends_server`: `now` + 3601 s → 403; `screen_locked` True → 403 and `server.shutdown` called.
   - `test_revoke_flow`: valid POST → 303, `Approvals.flow_ok` false, one `revoke` entry.
-  - `test_revoke_rejects_bad_csrf_or_origin`: wrong token, missing token, `Origin: http://evil` each → 403 and nothing changes.
+  - `test_revoke_rejects_bad_csrf_or_origin`: wrong token, missing token, `Origin: http://evil` each → 403 and nothing changes; a valid token with no `Origin` header → 303 (row 37).
   - `test_revoke_all`: empties both lists; entry has `reason == "all"`.
   - `test_values_still_escaped`: a flow id containing `<script>` renders escaped on the Approvals page, including in the hidden form field.
 - [ ] **Step 2:** Run `pytest tests/test_audit_web.py -v`. Expected: FAIL.
@@ -319,7 +327,7 @@ Rows 18, 26, 34.
 
 **Files:** Create `packaging/install.sh`, `packaging/uninstall.sh`; Modify `bin/gov-aios` (use `/Applications/gov-aios.app`; if absent, exit 1 with "not installed: run packaging/install.sh"), `packaging/README.md`.
 
-- [ ] **Step 1:** `install.sh` (refuses unless run as root via sudo, and `dist/gov-aios.app` passes `codesign --verify --strict`): `ditto` the app to `/Applications/gov-aios.app`, `chown -R root:wheel`; write the managed settings from `gov-aios claude-settings` output given as a file argument (root:wheel 0644); install the LaunchAgent plist for `$SUDO_USER` and `launchctl bootstrap gui/<uid>`; print the System Settings steps (grant Accessibility and Screen Recording to `/Applications/gov-aios.app`). Optional `--no-claude` skips the managed settings so the app and guard can be installed and checked before Claude Code is governed. `uninstall.sh`: `launchctl bootout`, remove the plist, the managed settings and the app; never the data home or audit.
+- [ ] **Step 1:** `install.sh` (refuses unless run as root via sudo, and `dist/gov-aios.app` passes `codesign --verify --strict`): `ditto` the app to `/Applications/gov-aios.app`, `chown -R root:wheel`; write the managed settings from `gov-aios claude-settings` output given as a file argument (root:wheel 0644); install the LaunchAgent plist for `$SUDO_USER`; never run `gov-aios` as root, and create nothing in the data home; if the data home exists, `find <data home> -user 0 -exec chown -h "$SUDO_USER" {} +` hands back any root-owned file there (only those: a blanket `chown -R` would hit the `UF_APPEND` audit log needlessly), and the script ends by asserting no root-owned file remains; and `launchctl bootstrap gui/<uid>`; print the System Settings steps (grant Accessibility and Screen Recording to `/Applications/gov-aios.app`). Optional `--no-claude` skips the managed settings so the app and guard can be installed and checked before Claude Code is governed. `uninstall.sh`: `launchctl bootout`, remove the plist, the managed settings and the app; never the data home or audit.
 - [ ] **Step 2:** `packaging/README.md` adds: install and uninstall; rebuild flow (build, then `sudo packaging/install.sh --no-claude` again; re-grant if Task 1 Step 8 showed it is needed); recovery: guard not running (`launchctl kickstart -k gui/$UID/com.govaios.guard`), after an emergency stop (`gov-aios resume`), hook locking Claude Code out (`sudo rm "/Library/Application Support/ClaudeCode/managed-settings.json"`).
 - [ ] **Step 3:** Run `bash -n packaging/install.sh packaging/uninstall.sh && GOVAIOS_SIGN_ID="GOV-AIOS Dev" packaging/build.sh && pytest -W error`. Expected: no syntax errors; build OK; all pass. Commit: `git commit -m "Install/uninstall scripts and recovery docs"`.
 - [ ] **Step 4 (admin):** `sudo packaging/install.sh --no-claude`; grant Accessibility and Screen Recording to the installed app; `bin/gov-aios review-powers <kept apps>` (dialog + Touch ID); `bin/gov-aios doctor`. Expected: every line OK except `managed_settings`.
