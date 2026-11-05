@@ -26,7 +26,7 @@
   | `audit-ui` | `UI_PROFILE` |
   | `run`, `dump`, `hook`, `guard`, `resume`, `review-powers`, `claude-settings`, `verify-audit`, `selftest` | `RUN_PROFILE` |
 - Presence proof: 60 s overall; anything but success is deny; a new `LAContext` per prompt; `touchIDAuthenticationAllowableReuseDuration` 0; biometrics when available, else device-owner, else deny (rows 4, 6).
-- `auth` values: `biometric`, `device_owner`, `failed`, `none`. Channel value for Touch ID proofs: `touch_id` (rows 7, 35).
+- `auth` values: `biometric`, `device_owner`, `failed`, `none` (a prompt was due but no proof completed; no prompt shown or none completed), `busy` (another prompt held `ask.lock`, R2). Policy-only entries carry `auth: null` (R9). Channel value for Touch ID proofs: `touch_id` (rows 7, 35). Amended (final review).
 - Audit `KINDS` add `emergency_stop`, `revoke`, `ui_login`, `powers_review`, `resume`; `FIELDS` add `auth`, `command` (row 25).
 - Data-home files: `STOPPED`, `guard.pid`, `runs/<pid>`, `ask.lock`, `approvals.lock`, `powers_review.json`, `executors/claude_code.yaml`.
 - Protected paths (always deny, after `realpath`): the data home, `/Library/Application Support/GOV-AIOS`, `/Library/Application Support/ClaudeCode`, `/Applications/gov-aios.app`, `~/.claude`, `~/Library/LaunchAgents` (row 16).
