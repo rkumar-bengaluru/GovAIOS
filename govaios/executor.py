@@ -77,4 +77,6 @@ def build_request(tool_name, tool_input, home, cwd):
             req[k] = tool_input[k]
     if tool_name == "Glob":
         req["pattern"] = tool_input.get("pattern", "")
+    elif tool_name == "Grep" and isinstance(tool_input.get("glob"), str):
+        req["pattern"] = tool_input["glob"]   # Grep's file filter; its `pattern` is content, not paths
     return req

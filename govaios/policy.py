@@ -1,4 +1,5 @@
 """Pure policy decisions (no screen or OS access, so unit-testable)."""
+import re
 from urllib.parse import urlsplit
 
 RISK_ORDER = ["read", "navigate", "modify", "submit", "payment"]
@@ -31,6 +32,8 @@ def decide(request, flow, approvals):
 
 _META = set(";&|$`<>()\n")
 CLAUDE_IDX = 4  # position of ~/.claude in executor.protected_paths()
+# a `.claude` path segment or `.mcp.json` in casefolded command or pattern text: Claude Code config at any depth
+_CONFIG_TEXT = re.compile(r"(?:^|[\s/'\"=])\.claude(?:$|[\s/'\"])|\.mcp\.json")
 
 
 def _inside(p, d, fold=False):
@@ -44,6 +47,19 @@ def _memory_md(p, claude):
     p, claude = p.casefold(), claude.casefold()
     parts = p[len(claude) + 1:].split("/") if p.startswith(claude + "/") else []
     return len(parts) >= 4 and parts[0] == "projects" and parts[2] == "memory" and p.endswith(".md")
+
+
+def _nested_config(path, roots):
+    """A realpath under a root with a `.claude` component, or ending in `.mcp.json`, at any depth (casefolded):
+    a session started in that subfolder would load it."""
+    p = path.casefold()
+    for r in roots:
+        r = r.casefold().rstrip("/")
+        if p.startswith(r + "/"):
+            parts = p[len(r) + 1:].split("/")
+            if ".claude" in parts or parts[-1] == ".mcp.json":
+                return True
+    return False
 
 
 def _fetch_host(url):
@@ -64,9 +80,14 @@ def decide_tool(request, policy, approvals, protected, config=()):
     """Return 'allow', 'deny' or 'ask' for one Claude tool call. Pure: paths arrive realpathed.
     `config`: project Claude Code config paths, denied for every tool and in any command (no carve-out, no ask)."""
     cat, tool, path = request.get("category"), request.get("tool"), request.get("path")
-    if path is not None and any(_inside(path, q, True) for q in config):
+    if path is not None and (any(_inside(path, q, True) for q in config)
+                             or _nested_config(path, policy.get("project_roots", []))):
         return "deny"
-    if cat == "shell" and any(q.casefold() in (request.get("command") or "").casefold() for q in config):
+    if cat == "shell":
+        low = (request.get("command") or "").casefold()
+        if any(q.casefold() in low for q in config) or _CONFIG_TEXT.search(low):
+            return "deny"
+    if _CONFIG_TEXT.search((request.get("pattern") or "").casefold()):   # Glob pattern, Grep file filter
         return "deny"
     memory = False
     if path is not None:

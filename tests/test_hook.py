@@ -258,3 +258,44 @@ def test_webfetch_question_says_origin_is_remembered(env):
     """M-17: approving a first contact allows later fetches to the whole origin; the question says so."""
     call(env, tool(env, "WebFetch", url="https://github.com/x/y", prompt="p"))
     assert "Approving also allows later fetches to https://github.com." in env["asks"][0]
+
+
+def _nested_paths(env):
+    return [str(env["root"] / "sub" / ".claude" / "settings.json"), str(env["root"] / "a" / "b" / ".MCP.json")]
+
+
+@pytest.mark.parametrize("which", [0, 1])
+@pytest.mark.parametrize("make", [
+    lambda p: ("Write", {"file_path": p, "content": "{}"}),
+    lambda p: ("Edit", {"file_path": p, "old_string": "a", "new_string": "b"}),
+    lambda p: ("Bash", {"command": f"ls {p}"}),
+    lambda p: ("Bash", {"command": "cat " + p[p.index("/proj/") + 6:]}),   # relative mention
+])
+def test_nested_project_claude_config_denied(env, which, make):
+    """I-N1: a later session started in <root>/<sub> would load these."""
+    name, inp = make(_nested_paths(env)[which])
+    code, out, _ = call(env, tool(env, name, **inp))
+    assert code == 0 and env["asks"] == []
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny", inp
+
+
+@pytest.mark.parametrize("pat", [".claude/**", "**/.mcp.json", "sub/.CLAUDE/*.json", "**/.claude"])
+def test_glob_and_grep_config_patterns_denied(env, pat):
+    """m-2: a pattern that names project Claude config is denied (Grep's file filter is `glob`)."""
+    for name, inp in (("Glob", {"pattern": pat, "path": str(env["root"])}),
+                      ("Grep", {"pattern": "x", "glob": pat, "path": str(env["root"])})):
+        code, out, _ = call(env, tool(env, name, **inp))
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny", (name, pat)
+
+
+def test_config_like_names_still_allowed(env):
+    for p in ("sub/.claude.json", "sub/claude/x", "sub/my.claude/x", "sub/x.mcp.json.bak"):
+        code, out, _ = call(env, tool(env, "Read", file_path=str(env["root"] / p)))
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow", p
+
+
+def test_managed_settings_deny_nested_config(env):
+    deny = hook.managed_settings(load(env["home"])[0], env["home"])["permissions"]["deny"]
+    r = os.path.realpath(env["root"])
+    for rule in (f"Edit(/{r}/**/.claude/**)", f"Edit(/{r}/**/.mcp.json)", f"Edit(/{r}/.claude)"):
+        assert rule in deny and rule.startswith("Edit(//")

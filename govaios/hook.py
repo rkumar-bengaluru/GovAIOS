@@ -121,7 +121,8 @@ def managed_settings(pol, home: Path) -> dict:
     """Row 14 (amended): Read/Edit deny rules only, `//` absolute paths, host-name allowedDomains."""
     prot = executor.protected_paths(home)
     deny = [f"{k}(/{prot[i]}/**)" for i in DENY_RULE_IDX for k in ("Read", "Edit")] + ["Edit(~/.claude.json)"]
-    deny += [f"Edit(/{r}/{n})" for r in pol.get("project_roots", []) for n in (".claude/**", ".mcp.json")]   # C-1
+    deny += [f"Edit(/{r}/{n})" for r in pol.get("project_roots", [])   # C-1, I-N1: any depth, and the dir entry itself
+             for n in (".claude", ".claude/**", ".mcp.json", "**/.claude/**", "**/.mcp.json")]
     return {
         "allowManagedHooksOnly": True,
         # project .mcp.json servers run unsandboxed; key names from the settings reference (final review C-1)

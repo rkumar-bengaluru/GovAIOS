@@ -140,9 +140,11 @@ def test_glob_pattern_escape(env):
 
 def test_shell_args_touching_protected_paths_ask(env):
     u, h = env["user"], env["home"]
-    for c in ("git diff --no-index ~/.claude.json /dev/null", f"ls {u}/.CLAUDE", f"ls {h}", "git log ../other",
-              "ls ~", f"git diff --output={u}/.claude.json", "ls $HOME/.claude"):
+    for c in ("git diff --no-index ~/.claude.json /dev/null", f"ls {h}", "git log ../other",
+              "ls ~", f"git diff --output={u}/.claude.json"):
         assert run(env, "Bash", command=c) == "ask", c
+    for c in (f"ls {u}/.CLAUDE", "ls $HOME/.claude"):   # a `.claude` segment anywhere is denied, not asked (I-N1)
+        assert run(env, "Bash", command=c) == "deny", c
     assert run(env, "Bash", command="git status") == "allow"
 
 
