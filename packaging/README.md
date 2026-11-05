@@ -78,7 +78,7 @@ Developer ID, notarization, and a Secure Enclave key (design §9.1).
 Do these steps yourself. GOV-AIOS and its helpers never toggle them.
 
 1. Open System Settings › Privacy & Security › Accessibility. Choose
-   `+` and add `dist/gov-aios.app`.
+   `+` and add `/Applications/gov-aios.app`.
 2. Do the same under Screen Recording.
 3. Run `bin/gov-aios doctor`. Every line should say `True`, and the exit
    code should be 0.
@@ -113,7 +113,7 @@ sudo packaging/uninstall.sh                # app, guard plist, managed settings;
 ```
 
 `install.sh` copies `dist/gov-aios.app` to `/Applications/gov-aios.app`
-(root:wheel), installs the guard LaunchAgent for the sudo user and loads
+(root:wheel, signer pinned to `GOV-AIOS Dev`), installs the guard LaunchAgent (written as the user) for the sudo user and loads
 it. It changes no TCC setting: afterwards, grant Accessibility and
 Screen Recording to `/Applications/gov-aios.app` in System Settings.
 `bin/gov-aios` runs only the installed app.
@@ -123,7 +123,8 @@ again (re-grant the permissions if the new build needs it).
 
 ## Recovery (admin)
 
-- Guard not running: `launchctl kickstart -k gui/$UID/com.govaios.guard`
-- After an emergency stop: `gov-aios resume` (Touch ID)
+- Guard not running: `launchctl kickstart -k gui/$UID/com.govaios.guard`; if it is not loaded at all:
+  `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.govaios.guard.plist`
+- After an emergency stop: `bin/gov-aios resume` (Touch ID)
 - Hook locks Claude Code out:
   `sudo rm "/Library/Application Support/ClaudeCode/managed-settings.json"`, then restart Claude Code
