@@ -1,0 +1,57 @@
+# Neutral role vocabulary used by page schemas, mapped to each OS's
+# accessibility API. Schemas never name a platform role directly.
+#   macos:   AXRole[/AXSubrole]       (NSAccessibility)
+#   windows: UIA ControlType[/LocalizedControlType or landmark]  (UI Automation)
+roles:
+  document:     { macos: AXWebArea,                      windows: Document }
+  heading:      { macos: AXHeading,                      windows: Text/heading }
+  link:         { macos: AXLink,                         windows: Hyperlink }
+  button:       { macos: AXButton,                       windows: Button }
+  text:         { macos: AXStaticText,                   windows: Text }
+  text_field:   { macos: AXTextField,                    windows: Edit }
+  combo_box:    { macos: AXComboBox,                     windows: ComboBox }
+  popup_button: { macos: AXPopUpButton,                  windows: Button/menu }
+  checkbox:     { macos: AXCheckBox,                     windows: CheckBox }
+  image:        { macos: AXImage,                        windows: Image }
+  list:         { macos: AXList,                         windows: List }
+  table:        { macos: AXTable,                        windows: Table }
+  grid:         { macos: AXGrid,                         windows: DataGrid }
+  row:          { macos: AXRow,                          windows: DataItem }
+  cell:         { macos: AXCell,                         windows: DataItem/cell }
+  article:      { macos: AXGroup/AXDocumentArticle,      windows: Group/article }
+  time:         { macos: AXGroup/AXTimeGroup,            windows: Group/time }
+  main:         { macos: AXGroup/AXLandmarkMain,         windows: Group/main }
+  navigation:   { macos: AXGroup/AXLandmarkNavigation,   windows: Group/navigation }
+  banner:       { macos: AXGroup/AXLandmarkBanner,       windows: Group/banner }
+  region:       { macos: AXGroup/AXLandmarkRegion,       windows: Group/region }
+  group:        { macos: AXGroup,                        windows: Group }
+  tab_list:     { macos: AXTabGroup,                     windows: Tab }
+  tab:          { macos: AXRadioButton,                  windows: TabItem }   # Chrome maps role=tab to AXRadioButton
+
+# Element attributes schemas may match on, per OS.
+attributes:
+  name:      { macos: "AXTitle or AXDescription", windows: "UIA Name" }
+  value:     { macos: AXValue,                    windows: "UIA ValuePattern.Value" }
+  dom_id:    { macos: AXDOMIdentifier,            windows: "UIA AutomationId" }
+  dom_class: { macos: AXDOMClassList,             windows: "UIA ClassName" }
+
+# OS operations the desktop adapter must provide. Flows use only these.
+#   operation          macos                                   windows
+operations:
+  launch_application: { macos: "open -a <app> --args --profile-directory=<dir>", windows: "Start-Process chrome.exe --profile-directory=<dir>" }
+  activate_window:    { macos: "NSRunningApplication.activate", windows: "SetForegroundWindow" }
+  window_title:       { macos: "AXFocusedWindow.AXTitle",       windows: "UIA FocusedElement window Name" }
+  enable_web_tree:    { macos: "AXEnhancedUserInterface + AXManualAccessibility", windows: "UIA client presence (Chrome enables on first query)" }
+  read_tree:          { macos: "AXUIElement children/attributes", windows: "UIA TreeWalker / FindAll" }
+  click:              { macos: "CGEvent mouse at element center", windows: "SendInput mouse at BoundingRectangle center" }
+  key_combo:          { macos: "CGEvent keyboard (cmd)",        windows: "SendInput keyboard (ctrl)" }
+  type_text:          { macos: "CGEvent unicode string",        windows: "SendInput KEYEVENTF_UNICODE" }
+  scroll_into_view:   { macos: "AXScrollToVisible action",      windows: "UIA ScrollItemPattern.ScrollIntoView" }
+  current_url:        { macos: "AXWebArea.AXURL",               windows: "UIA address bar ValuePattern" }
+  ask_admin:          { macos: "osascript display dialog",      windows: "MessageBox (timeout = deny)" }
+
+# Logical keys flows may press, per OS.
+keys:
+  focus_address_bar: { macos: [cmd, l],   windows: [ctrl, l] }
+  browser_back:      { macos: [cmd, "["], windows: [alt, left] }
+  enter:             { macos: [return],   windows: [enter] }

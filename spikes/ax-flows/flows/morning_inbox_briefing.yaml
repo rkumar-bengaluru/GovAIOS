@@ -1,0 +1,35 @@
+workflow:
+  id: morning_inbox_briefing
+  name: "Morning Inbox Briefing (spike: printed, no TTS)"
+  version: 1
+
+  browser:
+    application: chrome
+    profile_directory: "Profile 2"     # same Chrome profile for both flows
+    account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
+
+  permissions:
+    allow: [launch_application, navigate, read_page, click, extract_visible_text]
+    max_element_risk: navigate          # Compose / Reply / Forward are submit
+  destinations: ["https://www.google.com", "https://mail.google.com"]
+
+  steps:
+    - { id: launch_chrome, action: launch_application }
+    - { id: open_google, action: navigate, value: "https://www.google.com" }
+    - { id: on_google, action: classify_page, on_match: { google_home: continue, unknown: stop_and_report } }
+    - { id: verify_account, action: verify_account, target: google_home.account_button }
+    - { id: open_gmail, action: click, target: google_home.gmail_link }
+    - id: authentication_guard
+      action: classify_page
+      on_match:
+        gmail_inbox: continue
+        google_sign_in: stop_and_request_user
+        unknown: stop_and_report
+    - { id: select_messages, action: select_items, target: gmail_inbox.message_rows, count: 5 }
+    - id: each_message
+      action: for_each_item
+      steps:
+        - { id: open_message, action: click, target: current_item.subject, verify_page: gmail_message }
+        - { id: extract_message, action: extract, page: gmail_message, fields: [sender, subject, body], required: [subject, body] }
+        - { id: read, action: report, fields: [sender, subject] }
+        - { id: back, action: click, target: gmail_message.back_to_inbox }

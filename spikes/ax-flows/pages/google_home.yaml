@@ -1,0 +1,9 @@
+# Captured 2026-11-05.
+page:
+  id: google_home
+  identification:
+    title_matches: '^Google$'
+    anchors: [gmail_link]
+  elements:
+    gmail_link: { role: link, name: "Gmail", risk: navigate }
+    account_button: { role: popup_button, name_matches: '^Google Account: ', risk: read }

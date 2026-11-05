@@ -1,0 +1,7 @@
+# Classify only (Rule 6). UNVERIFIED: anchors from Google's sign-in page title.
+page:
+  id: google_sign_in
+  identification:
+    title_matches: '^Sign in'
+    anchors: []
+  elements: {}

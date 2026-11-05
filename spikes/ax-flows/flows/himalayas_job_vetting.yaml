@@ -1,0 +1,41 @@
+workflow:
+  id: himalayas_job_vetting
+  name: "Himalayas Job Vetting (spike: JSON to jd_selected/ instead of the vetting service)"
+  version: 1
+  site_terms: { reviewed: 2026-11-05, basis: "Himalayas Terms cl. 30A (Personal Agent)" }
+
+  browser:
+    application: chrome
+    profile_directory: "Profile 2"     # same Chrome profile for both flows
+    account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
+
+  permissions:                          # Rule 9: unlisted = denied
+    allow: [launch_application, navigate, read_page, click, extract_visible_text, write_file]
+    max_element_risk: navigate          # Save job / Apply now are submit
+  destinations: ["https://www.google.com", "https://himalayas.app"]   # Rule 11
+
+  steps:
+    - { id: launch_chrome, action: launch_application }
+    - { id: open_google, action: navigate, value: "https://www.google.com" }
+    - { id: on_google, action: classify_page, on_match: { google_home: continue, unknown: stop_and_report } }
+    - { id: verify_account, action: verify_account, target: google_home.account_button }
+    - { id: open_matches, action: navigate, value: "https://himalayas.app/jobs/matches" }
+    - id: authentication_guard
+      action: classify_page
+      on_match:
+        himalayas_matches: continue
+        himalayas_logged_out: stop_and_request_user
+        unknown: stop_and_report
+    - { id: select_jobs, action: select_items, target: himalayas_matches.job_cards, count: 5 }
+    - id: each_job
+      action: for_each_item
+      steps:
+        - { id: open_job, action: click, target: current_item.title, verify_page: himalayas_job_detail }
+        - id: extract_job
+          action: extract
+          page: himalayas_job_detail
+          fields: [job_title, company, description]
+          required: [job_title, description]
+        - { id: save_jd, action: write_json, directory: jd_selected }
+        - { id: report, action: report, fields: [job_title, company] }
+        - { id: back, action: browser_back }

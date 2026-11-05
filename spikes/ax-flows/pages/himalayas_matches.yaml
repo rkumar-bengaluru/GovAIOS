@@ -1,0 +1,21 @@
+# Captured 2026-11-05 (spikes/ax-himalayas, logged in). Neutral roles: roles.yaml.
+page:
+  id: himalayas_matches
+  identification:
+    title_matches: '^Your matches \| Himalayas$'
+    anchors: [page_heading, job_cards]
+    absent: [login_link]              # logged-out version has the same URL and title
+  elements:
+    page_heading: { role: heading, name: "Your matches", risk: read }
+    login_link:   { role: link, name: "Log in", within: banner, risk: navigate }
+    banner:       { role: banner, risk: read }
+    results:      { role: group, dom_id: job-search-results, risk: read }
+    job_cards:
+      role: article                   # ads are embedded documents, never articles
+      within: results
+      risk: read
+      fields:                         # tag links vary 0-4 per card: address by index among named links
+        title:   { role: link, exclude_names: ["View job"], index: 0, risk: navigate }
+        company: { role: link, exclude_names: ["View job"], index: 1, strip_suffix: [" Verified"], risk: navigate }
+        posted:  { role: time, text: true, risk: read }
+    save_job:     { role: button, name: "Save job", risk: submit }
