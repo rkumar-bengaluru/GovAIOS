@@ -46,3 +46,9 @@ def test_block_all_network_twice_still_blocks():
     )
     r = run_py(code)
     assert r.returncode == 0, r.stderr
+
+
+def test_dns_lookup_blocked():
+    r = run_py(PRELUDE + "import socket\nsocket.gethostbyname('example.com')\n")
+    assert r.returncode != 0
+    assert "network blocked" in r.stderr
