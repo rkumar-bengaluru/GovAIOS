@@ -418,3 +418,20 @@ def test_sigterm_during_touch_id_records_emergency_stop(tmp_path, monkeypatch):
     r, e, err = run(tmp_path, [], preapprove=True)
     assert isinstance(err, Stop) and str(err) == "emergency stop"
     assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
+
+
+@pytest.mark.parametrize("at", ["launch_application", "click"])
+def test_stopped_file_mid_run_stops_without_signal(tmp_path, at):
+    """Row 28 / I-1: STOPPED written (no SIGTERM, e.g. the guard died after writing it) stops the run."""
+    class StopsOn(FakeDesktop):
+        pass
+
+    def write_stopped(self, *a, **k):
+        (tmp_path / "STOPPED").touch()
+        return getattr(FakeDesktop, at)(self, *a, **k)
+    setattr(StopsOn, at, write_stopped)
+    r, e, err = run(tmp_path, [True] * 10, StopsOn)
+    assert isinstance(err, Stop) and str(err) == "emergency stop"
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
+    acts = [x for x in e if x["kind"] in ("action", "request")]
+    assert acts[-1]["kind"] == "action" and acts[-1]["action"] == at   # nothing gated or done after it

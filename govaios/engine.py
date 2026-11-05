@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from . import auth
+from . import auth, runstate
 from .audit.log import AuditLog, url_for_audit
 from .approvals import Approvals, pages_used, read_bound
 from .policy import decide, origin
@@ -132,6 +132,8 @@ class Runner:
 
     # governance gate for every side effect
     def gate(self, action, risk, target=None, destination=NO_DEST):
+        if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
+            raise Stop("emergency stop")
         if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked since approve_flow
             raise Stop("revoked")
         if destination is not NO_DEST and not destination:   # blank/None URL: fail closed
@@ -244,6 +246,8 @@ class Runner:
         for s in steps:
             if auth.screen_locked():
                 raise Stop("screen_locked")
+            if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
+                raise Stop("emergency stop")
             self.step = s["id"]
             getattr(self, "do_" + s["action"])(s)
 

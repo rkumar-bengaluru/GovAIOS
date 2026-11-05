@@ -320,3 +320,13 @@ def test_revoke_303_has_security_headers(web):
     assert r.status == 303 and r.getheader("Referrer-Policy") == "no-referrer"
     assert "default-src 'none'" in r.getheader("Content-Security-Policy")
     assert r.getheader("X-Content-Type-Options") == "nosniff"
+
+
+def test_command_and_auth_columns_escaped(tmp_path):
+    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"request","command":"echo <b>hi</b>","auth":"biometric"}',
+                                      "garbage"])
+    body = get("/log")[1]
+    assert "<th>auth</th>" in body and "<th>command</th>" in body and "biometric" in body
+    assert "<b>hi" not in body and "echo &lt;b&gt;hi&lt;/b&gt;" in body
+    assert "colspan=13 " in body   # seq, ts and every COLS column
+    srv.shutdown(); srv.server_close()

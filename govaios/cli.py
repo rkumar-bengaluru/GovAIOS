@@ -107,10 +107,11 @@ def _audit_ui(args) -> int:
 
 
 def _dump(args) -> int:
-    # Read-only: no navigation, keystrokes or app launch (only sets Chrome's AX-enable flags); stdout only, never the audit.
+    # Read-only: no navigation, keystrokes or app launch (only sets Chrome's AX-enable flags); page content to stdout only.
     import time
 
     from . import auth
+    from .audit.log import AuditLog
     from .desktop import get_desktop
     from .home import data_home
 
@@ -119,7 +120,10 @@ def _dump(args) -> int:
     block_all_network()  # dump reads page content; nothing it does needs the network
     home = data_home()
     preflight(home, dev=not packaged)
-    if not auth.prove("print the open Chrome page", home)[0]:   # row 29: else a confused deputy for AX
+    ok, how = auth.prove("print the open Chrome page", home)   # row 29: else a confused deputy for AX
+    AuditLog(home).append("request", action="dump", decision="allow" if ok else "deny", approver="admin",
+                          channel="touch_id", auth=how)   # metadata only: never page content
+    if not ok:
         print("not proven; nothing read", file=sys.stderr)
         return 1
     d = get_desktop()

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import textwrap
@@ -254,13 +255,27 @@ def test_dump_needs_proof(monkeypatch, capsys, govaios_home):
             reads.append(name)
 
     monkeypatch.setattr(desktop, "get_desktop", lambda: D())
-    monkeypatch.setattr(auth, "prove", lambda reason, home: (reasons.append(reason), (False, "failed"))[1])
+    answer = [(False, "failed")]
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (reasons.append(reason), answer[0])[1])
     assert main(["dump", "--dev"]) == 1
     assert reads == [] and reasons == ["print the open Chrome page"]
+    from govaios.audit.log import AuditLog
+    log = lambda: [json.loads(x) for x in AuditLog(govaios_home).path.read_text().splitlines()]  # noqa: E731
+    (e,) = log()
+    assert (e["kind"], e["action"], e["decision"], e["approver"], e["channel"], e["auth"]) == \
+        ("request", "dump", "deny", "admin", "touch_id", "failed")
+    answer[0] = (True, "biometric")
+    D._app = lambda self, name: False   # proven, then "chrome is not running": the proof is still on record
+    with pytest.raises(SystemExit):
+        main(["dump", "--dev"])
+    e = log()[-1]
+    assert (e["action"], e["decision"], e["auth"]) == ("dump", "allow", "biometric")
+    assert set(e) <= {"seq", "ts", "kind", "action", "decision", "approver", "channel", "auth", "prev", "hash", "sig"}
+    reasons.clear()
     _checks(monkeypatch, locked=True)
     with pytest.raises(SystemExit):
         main(["dump", "--dev"])
-    assert reasons == ["print the open Chrome page"]   # preflight refuses before the proof
+    assert reasons == []   # preflight refuses before the proof
 
 
 @pytest.mark.parametrize("argv,profile", [(["run", "x.yaml", "--dev"], "RUN_PROFILE"), (["hook"], "RUN_PROFILE"),

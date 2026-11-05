@@ -16,7 +16,7 @@ from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.audit.verify import verify
 
-COLS = ["kind", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason"]
+COLS = ["kind", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason", "auth", "command"]
 CSS = ("body{font:14px system-ui;margin:2em}table{border-collapse:collapse}td,th{border:1px solid #bbb;"
        "padding:3px 8px;text-align:left}.ok{background:#d8f5d8;padding:6px}.fail{background:#f8d0d0;padding:6px}")
 
@@ -113,7 +113,7 @@ def make_server(home: Path, port: int = 0, now=time.time):
         head = "".join(f"<th>{c}</th>" for c in ["seq", "ts", *COLS])
         rows = "".join(
             "<tr>" + "".join(_td(e.get(c)) for c in ["seq", "ts", *COLS]) + "</tr>" if e is not None
-            else f"<tr><td colspan=11 class=fail>unparsed: {escape(raw)}</td></tr>" for e, raw in _entries(log))
+            else f"<tr><td colspan={len(COLS) + 2} class=fail>unparsed: {escape(raw)}</td></tr>" for e, raw in _entries(log))
         return _page(f"<h1>Full log</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
                      f"<p><a href='/'>Runs</a></p>")
 
