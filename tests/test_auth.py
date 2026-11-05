@@ -311,3 +311,47 @@ def test_existing_stop_does_not_cancel_resume_proof(calls, home):
     (home / "STOPPED").touch()   # resume proves while STOPPED exists; only a new stop cancels
     assert auth.prove("resume gov-aios", home) == (True, "biometric")
     assert runstate.stopped(home)
+
+
+def test_stop_during_touch_id_invalidates_and_propagates(monkeypatch):
+    """A run's SIGTERM handler raises Stop inside the wait: the prompt is invalidated and Stop escapes."""
+    la = FakeLA(reply=None)
+    la.answer_on_invalidate = False
+    monkeypatch.setattr(auth, "LA", la)
+    monkeypatch.setattr(auth, "_now", lambda: 0.0)
+
+    class StopWait:
+        def __init__(self):
+            pass
+
+        def wait(self, t):
+            raise runstate.Stop("emergency stop")
+
+        def set(self):
+            pass
+    monkeypatch.setattr(auth.threading, "Event", StopWait)
+    with pytest.raises(runstate.Stop):
+        auth._la_evaluate("r", 60.0)
+    assert la.ctxs[0].invalidated
+
+
+def test_stop_propagates_through_screen_locked(monkeypatch):
+    def boom():
+        raise runstate.Stop("emergency stop")
+    monkeypatch.setattr(auth, "_cg_session_dict", boom)
+    with pytest.raises(runstate.Stop):
+        auth.screen_locked()
+
+
+def test_stop_during_dialog_kills_osascript(monkeypatch):
+    fake = FakeOsascript()
+
+    def communicate(timeout=None):
+        if fake.killed:
+            return "", ""
+        raise runstate.Stop("emergency stop")
+    fake.communicate = communicate
+    monkeypatch.setattr(auth.subprocess, "Popen", fake)
+    with pytest.raises(runstate.Stop):
+        auth.dialog("q", 60)
+    assert fake.killed

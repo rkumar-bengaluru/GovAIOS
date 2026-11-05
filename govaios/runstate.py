@@ -3,6 +3,7 @@
 Data-home files: STOPPED (persisted stop flag), guard.pid, runs/<pid> (one per live run).
 A pid counts only if its executable is the installed app, so a reused pid is never trusted or signalled.
 No import of auth at module level: auth imports this module (resume imports auth inside).
+Stop lives here (not in engine) so auth can let a run's emergency-stop Stop pass without an import cycle.
 """
 import ctypes
 import os
@@ -13,6 +14,10 @@ from pathlib import Path
 APP_EXE = "/Applications/gov-aios.app/Contents/MacOS/gov-aios"
 STOP_REASON = "claude commands already running are not stopped"   # row 30: the stop claims no more than it does
 KILL_AFTER_S = 3
+
+class Stop(Exception):
+    """Flow stopped: unexpected state, denial, or admin needed (Rule 2). Re-exported as engine.Stop."""
+
 
 _libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
 _libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
@@ -39,6 +44,7 @@ def _pid_in(path: Path) -> int | None:
 
 
 def guard_alive(home: Path) -> bool:
+    # shortcut: a dead guard's pid reused by another gov-aios process (e.g. a run) passes; plan-mandated check.
     pid = _pid_in(Path(home) / "guard.pid")
     return pid is not None and is_govaios(pid)
 
@@ -56,9 +62,8 @@ def live_runs(home: Path) -> list[int]:
 def register_run(home: Path) -> Path:
     runs = Path(home) / "runs"
     runs.mkdir(parents=True, exist_ok=True, mode=0o700)
-    live = {str(p) for p in live_runs(home)}
-    for n in os.listdir(runs):
-        if n not in live:
+    for n in os.listdir(runs):   # one decision per entry: a run registering meanwhile is never removed
+        if not (n.isdigit() and is_govaios(int(n))):
             (runs / n).unlink(missing_ok=True)
     me = runs / str(os.getpid())
     me.write_text("")
@@ -80,7 +85,7 @@ def emergency_stop(home: Path, audit, kill=os.kill, sleep=time.sleep) -> list[tu
     home = Path(home)
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     (home / "STOPPED").touch()   # first: from here on no run starts and the hook denies
-    pids = live_runs(home)
+    pids = [p for p in live_runs(home) if p != os.getpid()]   # never signal ourselves
     for p in pids:
         _send(kill, p, signal.SIGTERM)
     if pids:
@@ -92,6 +97,7 @@ def emergency_stop(home: Path, audit, kill=os.kill, sleep=time.sleep) -> list[tu
             out.append((p, "killed"))
         else:
             out.append((p, "stopped"))
+        (home / "runs" / str(p)).unlink(missing_ok=True)   # handled: a later press never signals a reused pid
     for p, outcome in out:
         audit.append("emergency_stop", target=str(p), outcome=outcome, reason=STOP_REASON)
     if not out:

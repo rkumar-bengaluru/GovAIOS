@@ -16,15 +16,12 @@ from . import auth
 from .audit.log import AuditLog, url_for_audit
 from .approvals import Approvals, pages_used, read_bound
 from .policy import decide, origin
+from .runstate import Stop
 
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
 
 
 NO_DEST = object()
-
-
-class Stop(Exception):
-    """Flow stopped: unexpected state, denial, or admin needed (Rule 2)."""
 
 
 def _emergency_stop(signum, frame):

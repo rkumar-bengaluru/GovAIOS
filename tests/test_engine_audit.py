@@ -372,3 +372,38 @@ def test_sigterm_stops_run(tmp_path):
     assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
     assert signal.getsignal(signal.SIGTERM) is before
     assert verify(r.audit.path, r.audit.pub_path).ok
+
+
+def test_sigterm_during_touch_id_records_emergency_stop(tmp_path, monkeypatch):
+    """The real auth path: SIGTERM lands while Touch ID waits; the run's last entry is the emergency stop."""
+    monkeypatch.undo()   # drop fake_auth: the real prove() and LAContext wait run
+    a = engine.auth
+
+    class Ctx:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+        def setTouchIDAuthenticationAllowableReuseDuration_(self, v):
+            pass
+
+        def setLocalizedFallbackTitle_(self, v):
+            pass
+
+        def canEvaluatePolicy_error_(self, p, _):
+            return True, None
+
+        def evaluatePolicy_localizedReason_reply_(self, p, reason, block):
+            os.kill(os.getpid(), signal.SIGTERM)   # the guard's stop arrives while the prompt is up
+
+        def invalidate(self):
+            pass
+    monkeypatch.setattr(a.LA, "LAContext", Ctx)
+    monkeypatch.setattr(a, "_cg_session_dict", lambda: {a.Quartz.kCGSessionOnConsoleKey: True})
+    monkeypatch.setattr(engine, "auth", a)
+    r, e, err = run(tmp_path, [], preapprove=True)
+    assert isinstance(err, Stop) and str(err) == "emergency stop"
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"

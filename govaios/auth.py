@@ -35,6 +35,8 @@ def screen_locked() -> bool:
     """Row 8 / 52: missing dict, locked flag set, or not on console -> locked (fail closed)."""
     try:
         d = _cg_session_dict()
+    except runstate.Stop:   # a run's emergency stop (SIGTERM) must end the run, not read as "locked"
+        raise
     except Exception:
         return True
     if d is None:
@@ -76,6 +78,8 @@ def _la_evaluate(reason: str, deadline: float, cancelled=_never) -> str:
     """One Touch ID (or device-owner) prompt on a fresh LAContext; 'failed' unless the reply is ok in time."""
     try:
         return _la_prompt(reason, deadline, cancelled)
+    except runstate.Stop:   # a run's emergency stop must not turn into a "failed" proof
+        raise
     except Exception:   # any pyobjc error is a failed proof, never a raise
         return "failed"
 
@@ -96,13 +100,17 @@ def _la_prompt(reason: str, deadline: float, cancelled=_never) -> str:
         res["ok"] = bool(success) and error is None
         done.set()
 
-    ctx.evaluatePolicy_localizedReason_reply_(policy, reason, reply)
-    while not done.wait(max(0.0, min(POLL_S, deadline - _now()))):
-        if not (cancelled() or _now() >= deadline):
-            continue
-        ctx.invalidate()   # row 51: the reply then arrives at once with -9; still bounded below
-        done.wait(2)
-        return "failed"
+    try:
+        ctx.evaluatePolicy_localizedReason_reply_(policy, reason, reply)
+        while not done.wait(max(0.0, min(POLL_S, deadline - _now()))):
+            if not (cancelled() or _now() >= deadline):
+                continue
+            ctx.invalidate()   # row 51: the reply then arrives at once with -9; still bounded below
+            done.wait(2)
+            return "failed"
+    except BaseException:   # e.g. a run's SIGTERM Stop: never leave the Touch ID prompt up (row 30)
+        ctx.invalidate()
+        raise
     return auth if res["ok"] else "failed"
 
 

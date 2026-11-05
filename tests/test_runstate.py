@@ -152,3 +152,31 @@ def test_guard_exits_on_sigterm_and_removes_pid(home):
         finally:
             if p.poll() is None:
                 p.kill()
+
+
+def test_register_run_keeps_entry_created_during_scan(home, monkeypatch):
+    """Fix 1: a run that registers while another run's GC scans is never deleted."""
+    (home / "runs" / str(A)).write_text("")   # dead entry the scan visits
+
+    def is_govaios(pid):
+        (home / "runs" / str(B)).write_text("")   # run B registers mid-scan
+        return pid == B
+    monkeypatch.setattr(runstate, "is_govaios", is_govaios)
+    runstate.register_run(home)
+    assert sorted(os.listdir(home / "runs")) == sorted([str(B), str(os.getpid())])
+
+
+def test_stop_never_signals_self_and_clears_handled_entries(home, exe):
+    me = os.getpid()
+    exe.update({A: APP, B: APP, me: APP})
+    for p in (A, B, me):
+        (home / "runs" / str(p)).write_text("")
+    sent = []
+
+    def kill(pid, sig):
+        sent.append((pid, sig))
+        if pid == A:
+            exe.pop(A)
+    out = runstate.emergency_stop(home, AuditLog(home), kill=kill, sleep=lambda s: None)
+    assert out == [(A, "stopped"), (B, "killed")] and all(p != me for p, _ in sent)
+    assert os.listdir(home / "runs") == [str(me)]   # a reused A or B is never signalled by a later press
