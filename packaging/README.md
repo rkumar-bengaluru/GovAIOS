@@ -36,9 +36,9 @@ The spec also lists the pyobjc hidden imports (`objc`, `AppKit`,
 `Foundation`, `ApplicationServices`, `Quartz`), together with `yaml` and
 `cryptography`. PyInstaller's import scan misses them.
 
-Nothing is ever written inside the bundle. All data lives in
-`$GOVAIOS_HOME`, which defaults to
-`~/Library/Application Support/GOV-AIOS/`.
+Nothing is ever written inside the bundle. The packaged app keeps all
+data in `~/Library/Application Support/GOV-AIOS/` and ignores
+`$GOVAIOS_HOME`, which only the unpackaged dev and test runs honour.
 
 ## Signing identity (`GOVAIOS_SIGN_ID`)
 

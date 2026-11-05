@@ -23,12 +23,16 @@ def _run(args) -> int:
     from .home import data_home
     from .netguard import block_all_network
 
-    identity.require_app(args.dev)
+    packaged = identity.require_app(args.dev)
     block_all_network()  # before Runner exists, so nothing it builds can open a socket
+    executor = "gov_runner" if packaged and not args.dev else "gov_runner_dev"
     try:
-        Runner(Path(args.flow).resolve(), get_desktop(), data_home()).run()
+        Runner(Path(args.flow).resolve(), get_desktop(), data_home(), executor).run()
     except Stop as e:
         print(f"STOPPED: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:   # type only: messages and tracebacks can carry page content
+        print(f"ERROR: {type(e).__name__}", file=sys.stderr)
         return 1
     return 0
 

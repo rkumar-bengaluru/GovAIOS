@@ -130,7 +130,7 @@ def test_no_content_in_audit(tmp_path):
     log = (tmp_path / "audit.jsonl").read_text()
     low = log.lower()
     assert "secret-description" not in low and "secret-co" not in low and "secret_" not in low
-    assert ACCT not in log and "utm" not in log
+    assert ACCT not in log and "?utm" not in log   # bare "utm" can occur in a base64 signature
 
 
 def test_denied_flow_approval_logged(tmp_path):
