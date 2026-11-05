@@ -64,7 +64,11 @@ def _dump(args) -> int:
     from .desktop import get_desktop
 
     identity.require_app(args.dev)
+    from .netguard import block_all_network
+    block_all_network()  # dump reads page content; nothing it does needs the network
     d = get_desktop()
+    if not d._app("chrome"):
+        sys.exit("chrome is not running")
     root = None
     for _ in range(10):
         root = d.web_root("chrome")
