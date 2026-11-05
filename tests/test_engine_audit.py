@@ -267,8 +267,16 @@ def test_flow_parsed_from_hashed_bytes(tmp_path, monkeypatch):
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
     f = src / "flows" / "himalayas_job_vetting.yaml"
-    real = type(f).read_text
-    monkeypatch.setattr(type(f), "read_text", lambda self, *a, **k: "workflow: {}" if self == f else real(self, *a, **k))
+    real = type(f).read_bytes
+    seen = []
+
+    def swapped(self, *a, **k):   # first read (the hashed one) is real; any later read sees the swap
+        if self == f and seen:
+            return b"workflow: {}"
+        seen.append(self) if self == f else None
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(type(f), "read_bytes", swapped)
     r = Runner(f, FakeDesktop([]), tmp_path)   # a second read of the flow would see the swapped text
     assert r.flow["id"] == "himalayas_job_vetting"
 
@@ -282,3 +290,17 @@ def test_invalid_flow_id_refused(tmp_path, bad):
     f.write_text(f.read_text().replace("id: himalayas_job_vetting", f"id: '{bad}'", 1))
     with pytest.raises(Stop, match="invalid flow id"):
         Runner(f, FakeDesktop([]), tmp_path)
+
+
+def test_revoked_flow_stops_at_next_gate(tmp_path):
+    from govaios.approvals import Approvals
+
+    class Revoker(FakeDesktop):
+        def click(self, node):
+            super().click(node)
+            Approvals(tmp_path / "approvals.json").revoke_flow("himalayas_job_vetting")
+
+    r, entries, err = run(tmp_path, [True] * 10, desk=Revoker)
+    assert isinstance(err, Stop)
+    assert entries[-1]["kind"] == "stop" and entries[-1]["reason"] == "revoked"
+    assert r.d.calls.count("click") == 1

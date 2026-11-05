@@ -129,6 +129,8 @@ class Runner:
 
     # governance gate for every side effect
     def gate(self, action, risk, target=None, destination=NO_DEST):
+        if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked since approve_flow
+            raise Stop("revoked")
         if destination is not NO_DEST and not destination:   # blank/None URL: fail closed
             self._audit("request", action=action, risk=risk, target=target, decision="deny",
                         approver="policy", channel=None, reason="no url")

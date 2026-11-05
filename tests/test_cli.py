@@ -68,7 +68,11 @@ def test_frozen_app_ignores_govaios_home(tmp_path, monkeypatch):
     monkeypatch.setenv("GOVAIOS_HOME", str(tmp_path / "elsewhere"))
     assert data_home() == tmp_path / "elsewhere"          # unpackaged (tests, --dev): honoured
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    assert data_home() == tmp_path / "Library/Application Support/GOV-AIOS"
+    import os
+    import pwd
+    from pathlib import Path
+    monkeypatch.setattr(Path, "mkdir", lambda *a, **k: None)   # the passwd home is the real one
+    assert data_home() == Path(pwd.getpwuid(os.getuid()).pw_dir) / "Library/Application Support/GOV-AIOS"
 
 
 def _fake_run(monkeypatch, exc, packaged=False):
