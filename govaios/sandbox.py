@@ -16,6 +16,6 @@ def apply(profile: str) -> None:
     lib.sandbox_free_error.argtypes = [ctypes.c_char_p]
     err = ctypes.c_char_p()
     if lib.sandbox_init(profile.encode(), 0, ctypes.byref(err)) != 0:
-        if err.value:
+        if err.value is not None:   # non-NULL buffer, even if empty
             lib.sandbox_free_error(err)
         raise RuntimeError("sandbox refused")

@@ -1,4 +1,5 @@
 """MacDesktop input guards with every pyobjc call mocked: no real input, focus, AX or app launch."""
+import signal
 import subprocess
 import types
 
@@ -171,7 +172,7 @@ CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 class Proc:
     def __init__(self, code=0, hang=False):
-        self.code, self.hang, self.killed, self.reaped = code, hang, False, False
+        self.code, self.hang, self.killed, self.reaped, self.pid = code, hang, False, False, 4242
 
     def wait(self, timeout=None):
         if self.hang and not self.killed:
@@ -186,6 +187,7 @@ class Proc:
 def _handoff(env, monkeypatch, proc):
     argv = []
     monkeypatch.setattr(macos.subprocess, "Popen", lambda a, **k: argv.append(a) or proc)
+    monkeypatch.setattr(macos.os, "killpg", lambda pid, sig: proc.kill() if pid == proc.pid and sig == signal.SIGKILL else None)
     monkeypatch.setattr(macos.subprocess, "TimeoutExpired", subprocess.TimeoutExpired, raising=False)
     return argv
 
@@ -202,6 +204,14 @@ def test_launch_handoff_timeout_kills_and_stops(env, monkeypatch):
     with pytest.raises(Stop, match="^chrome handoff failed$"):
         env.d.launch_application("chrome", "Profile 2")
     assert proc.killed and proc.reaped
+
+
+def test_launch_missing_binary_stops(env, monkeypatch):
+    def boom(a, **k):
+        raise FileNotFoundError(a[0])
+    monkeypatch.setattr(macos.subprocess, "Popen", boom)
+    with pytest.raises(Stop, match="^chrome handoff failed$"):
+        env.d.launch_application("chrome", "Profile 2")
 
 
 def test_launch_handoff_nonzero_exit_stops(env, monkeypatch):

@@ -1,4 +1,6 @@
 """macOS adapter: NSAccessibility for perception, CGEvent for real mouse/keyboard."""
+import os
+import signal
 import subprocess
 import time
 
@@ -98,12 +100,18 @@ class MacDesktop:
             raise Stop("start Chrome, then run the flow again")   # never launch: a child would inherit our sandbox and TCC identity
         if profile_directory:
             exe = f"/Applications/{BUNDLES[app][1]}.app/Contents/MacOS/{BUNDLES[app][1]}"
-            proc = subprocess.Popen([exe, f"--profile-directory={profile_directory}"],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                proc = subprocess.Popen([exe, f"--profile-directory={profile_directory}"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:   # binary missing or not executable
+                raise Stop("chrome handoff failed") from None
             try:
                 code = proc.wait(timeout=10)
             except subprocess.TimeoutExpired:   # it became a browser of its own: not a handoff
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)   # own session: kill its whole group
+                except ProcessLookupError:
+                    proc.kill()
                 proc.wait()
                 raise Stop("chrome handoff failed") from None
             if code != 0:
