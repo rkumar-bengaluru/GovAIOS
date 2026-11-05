@@ -1,0 +1,9 @@
+# Classify only. Captured 2026-11-05: matches URL returns 200 with sign-up content.
+page:
+  id: himalayas_logged_out
+  identification:
+    title_matches: '^Your matches \| Himalayas$'
+    anchors: [login_link]
+  elements:
+    banner:     { role: banner, risk: read }
+    login_link: { role: link, name: "Log in", within: banner, risk: navigate }

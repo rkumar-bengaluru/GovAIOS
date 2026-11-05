@@ -1,0 +1,19 @@
+# Captured 2026-11-05 logged out (public) and logged in.
+page:
+  id: himalayas_job_detail
+  identification:
+    title_matches: ' hiring .* \| Himalayas$'
+    anchors: [job_title, description, apply_heading]
+  elements:
+    main:          { role: main, risk: read }
+    job_title:     { role: heading, within: main, index: 0, risk: read }
+    company:       { role: link, within: main, exclude_names: ["Save"], index: 0, risk: navigate }
+    description:   { role: article, within: main, index: 0, text: true, risk: read }
+    apply_heading: { role: heading, name: "Apply now", risk: read }   # same in both states
+    # Save / Apply now are links when logged out and buttons when logged in.
+    # All listed so the guard blocks them (README §7).
+    save_link:     { role: link, name: "Save", within: main, risk: submit }
+    save_button:   { role: button, name: "Save", within: main, risk: submit }
+    apply_link:    { role: link, name: "Apply now", risk: submit }
+    apply_button:  { role: button, name: "Apply now", risk: submit }
+    job_expired:   { role: button, name: "Job expired?", risk: submit }

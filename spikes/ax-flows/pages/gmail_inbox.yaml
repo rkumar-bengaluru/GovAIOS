@@ -1,0 +1,23 @@
+# Captured 2026-11-05 (Profile 2, Primary tab).
+page:
+  id: gmail_inbox
+  title_note: "Inbox - <account> - Gmail"
+  identification:
+    title_matches: '^Inbox( \(\d+\))? - .+ - Gmail$'
+    anchors: [inbox_link, message_list, compose]
+    absent: [back_to_inbox]
+  elements:
+    inbox_link:    { role: link, name_matches: "^Inbox", risk: navigate }
+    compose:       { role: button, name: "Compose", risk: submit }
+    back_to_inbox: { role: button, name: "Back to Inbox", risk: navigate }
+    main:          { role: main, risk: read }
+    message_list:  { role: table, within: main, risk: read }
+    message_rows:
+      role: row
+      within: message_list
+      risk: read
+      fields:                          # row cells: [ , select, star, sender, subject, , date]; date omitted: relative times change between snapshots and break the identity check
+        sender:  { role: cell, index: 3, text: true, risk: read }
+        subject: { role: link, index: 0, risk: navigate }      # clicking opens the message
+    select_checkbox: { role: checkbox, within: message_list, risk: modify }
+    star:            { role: button, name_matches: "starred", within: message_list, risk: modify }

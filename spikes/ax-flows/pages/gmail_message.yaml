@@ -1,0 +1,20 @@
+# Captured 2026-11-05 (Profile 2).
+page:
+  id: gmail_message
+  title_note: "<subject> - <account> - Gmail"
+  identification:
+    title_matches: ' - Gmail$'
+    anchors: [subject, back_to_inbox, body]
+  elements:
+    main:          { role: main, risk: read }
+    subject:       { role: heading, within: main, index: 0, risk: read }
+    sender:        { role: heading, within: main, index: 1, risk: read }
+    body:          { role: group, dom_class: a3s, within: main, text: true, risk: read }   # no label or stable id
+    back_to_inbox: { role: button, name: "Back to Inbox", risk: navigate }
+    # listed so the guard blocks them (README §7)
+    reply:         { role: button, name: "Reply", risk: submit }
+    archive:       { role: button, name: "Archive", risk: modify }
+    delete:        { role: button, name: "Delete", risk: modify }
+    report_spam:   { role: button, name: "Report spam", risk: modify }
+    mark_unread:   { role: button, name: "Mark as unread", risk: modify }
+    download:      { role: button, name: "Download attachment", risk: modify }
