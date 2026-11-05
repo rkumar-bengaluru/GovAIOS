@@ -62,3 +62,37 @@ def test_symlinked_components_refused(tmp_path):
     (h3 / "Library/Application Support").mkdir(parents=True)
     os.symlink(real / "Application Support/GOV-AIOS", h3 / "Library/Application Support/GOV-AIOS")
     assert run(h3) == 1
+
+
+def test_symlink_to_dir_not_followed(tmp_path):
+    d = make(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "f").write_text("x")
+    os.link(target / "f", target / "g")  # would be reported if the walk followed the link
+    os.symlink(target, d / "l")
+    assert run(tmp_path) == 1  # the symlink itself is left over
+    assert sorted(os.listdir(target)) == ["f", "g"]
+
+
+def test_fifo_reported_not_opened(tmp_path, capsys):
+    import signal
+    d = make(tmp_path)
+    os.mkfifo(d / "p")
+    signal.alarm(5)  # a blocking open would hang here
+    try:
+        assert run(tmp_path) == 1
+    finally:
+        signal.alarm(0)
+    assert "./p" in capsys.readouterr().err
+
+
+def test_unreadable_subdir_reported(tmp_path, capsys):
+    d = make(tmp_path)
+    (d / "sub").mkdir()
+    (d / "sub").chmod(0)
+    try:
+        assert run(tmp_path) == 1
+        assert "./sub" in capsys.readouterr().err
+    finally:
+        (d / "sub").chmod(0o700)

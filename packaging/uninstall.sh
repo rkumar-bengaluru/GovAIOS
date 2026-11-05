@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Run by the admin: sudo packaging/uninstall.sh. Never touches the data home or the audit log.
 set -euo pipefail
 

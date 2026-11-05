@@ -128,3 +128,12 @@ again (re-grant the permissions if the new build needs it).
 - After an emergency stop: `bin/gov-aios resume` (Touch ID)
 - Hook locks Claude Code out:
   `sudo rm "/Library/Application Support/ClaudeCode/managed-settings.json"`, then restart Claude Code
+
+## Trust boundary
+
+- `install.sh`, `handback.py` and `dist/` come from the checkout: run
+  `sudo` only on a checkout you trust.
+- `/Applications` is writable by admins, so the installed bundle can be
+  replaced afterwards. The TCC designated requirement and
+  `gov-aios doctor` are what pin its identity.
+- A signed pkg is future work.

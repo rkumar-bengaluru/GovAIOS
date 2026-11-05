@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Run by the admin: sudo packaging/install.sh --no-claude | sudo packaging/install.sh <managed-settings.json>
 # Decision rows 18, 26, 34. Never runs gov-aios, never creates anything in the data home.
 # Root writes nothing under the user's home except the guarded chown of root-owned data-home files.
