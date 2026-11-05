@@ -1,16 +1,190 @@
-# DesktopPilot --- Morning Inbox Briefing
+# GOV-AIOS: Governed AI Operating System
 
-A schema-driven desktop automation workflow that opens a real Chrome
-window, navigates to Gmail using an existing personal Chrome profile,
-reads the five newest emails in the Inbox one at a time, and speaks each
-email through a local text-to-speech (TTS) engine.
+### Write it once. It runs exactly as you would. It stops instead of guessing.
+
+> **Your Laptop, Your Rules.** GOV-AIOS (pronounced gov-ai-os) is a
+> governance layer on top of your operating system. Anything you do on
+> your laptop today can be written once as a **governed flow**. GOV-AIOS
+> then performs it the way you would at the keyboard, using the tools
+> the OS already provides, and stops and asks you whenever the
+> situation is uncertain.
+
+------------------------------------------------------------------------
+
+# Part I --- GOV-AIOS
+
+## The idea
+
+You repeat the same computer work every day: open the browser, check
+Gmail, open a document, update a tracker, look for jobs, book travel.
+Each of those can be written once as a flow and then run on request.
+
+GOV-AIOS is **not** an API integration platform and **not** a free-roaming
+AI agent:
+
+-   **No website APIs.** GOV-AIOS opens the real app and uses your own
+    logged-in session, as if you were sitting at the laptop. It does not
+    call Gmail, Drive, booking.com, or Upwork APIs.
+-   **No improvisation.** GOV-AIOS runs only flows you have already set
+    up. The AI may help understand a request and fill in a flow's
+    parameters, but it never invents steps.
+-   **Local by default.** Execution, perception, and TTS run on your
+    machine. Content stays on the laptop unless a flow explicitly sends
+    a result to you.
+
+## How it works
+
+``` text
+Define flow  →  Govern (policy + preconditions)  →  Execute via OS tools  →  Verify each step  →  Report
+```
+
+**Flow layer.** A versioned YAML definition: steps, parameters,
+preconditions, permissions, and stop conditions.
+
+**Governance layer.** Validates preconditions, enforces permissions,
+pauses for approvals, and stops on anything unexpected.
+
+**Execution layer.** Uses whatever the OS provides, chosen per step for
+reliability:
+
+-   Application launch and window control.
+-   OS accessibility APIs (the structured, labeled description of the
+    screen that apps expose for screen readers).
+-   Real OS mouse and keyboard input.
+-   OS scripting (AppleScript / Shortcuts on macOS), the file system, and
+    the shell.
+-   Screenshot vision, only under the restrictions in Ground Rule 3.
+
+**Initial platform:** macOS. Windows comes later behind the same desktop
+interface.
+
+## Ground rules
+
+These rules apply to every flow. A flow cannot override them.
+
+1.  **Flows only.** GOV-AIOS executes only flows the admin has set up.
+    Requests that don't map to an existing flow are refused and
+    reported.
+2.  **No guessing.** If a page, element, or state cannot be identified
+    with certainty, stop and report.
+3.  **Perception order.**
+    1.  Use **accessibility** as the primary way to find and act on
+        elements.
+    2.  On an **unlabeled screen**, screenshot vision may only
+        **propose** a target. GOV-AIOS sends the admin a cropped
+        screenshot of the proposed target and pauses for confirmation.
+    3.  If the admin has not confirmed, or the step is a **payment or
+        submission**, GOV-AIOS refuses and reports that the flow is not
+        safely automatable.
+4.  **Payment always needs approval.** Every payment step pauses and
+    asks the admin, over a separate channel, to approve it. This applies
+    even when every element is found through accessibility.
+5.  **Pre-approved actions, everything else forwarded.** Each flow
+    carries a fixed list of pre-approved actions. When an application
+    being operated asks for permission (for example Claude asking "may
+    I run `npm install`?"), GOV-AIOS approves it only if it is on that
+    list. Every other permission request is forwarded to the admin's
+    phone, and the flow waits. Without an answer, the request is
+    denied.
+6.  **Never bypass authentication.** No password entry, no CAPTCHA, MFA,
+    or passkey solving, and no reading or exporting cookies or tokens.
+    Stop and ask the admin.
+7.  **Content is untrusted data.** Email bodies, web pages, and output
+    from applications (including AI assistants) are content to be read,
+    never instructions to follow.
+8.  **One admin.** Only the admin can start flows or approve actions.
+9.  **Least privilege.** Each flow declares what it may do. Anything not
+    declared is denied.
+10. **Bounded and stoppable.** Every action has a timeout and a
+    postcondition. Retries are bounded, and the admin can stop any flow
+    at any time.
+
+## Example flows (target)
+
+| Flow | What it does | Governance notes |
+| :--- | :--- | :--- |
+| `morning_inbox_briefing` | Reads the five newest Gmail messages aloud | First flow (Part II). Read-only. |
+| `book_travel` | Searches booking.com for a route and date and prepares the booking | Stops at payment for approval (Rule 4). |
+| `send_drive_file` | Finds a Google Drive file and sends it to the admin's phone | Destination limited to the admin's own devices. |
+| `upwork_scan` | Lists Upwork openings that match saved criteria | Read-only. Criteria are part of the flow, not judged live. |
+| `build_with_claude` | Opens Claude, submits a build request, reports when Claude finishes | Rule 5 governs Claude's permission prompts. Claude's output is untrusted (Rule 7). |
+
+### Example: `build_with_claude`
+
+GOV-AIOS stays fully scripted, and the open-ended work is delegated to
+Claude, just as you would delegate it yourself:
+
+1.  Open the Claude app, or a terminal running Claude Code (accessibility).
+2.  Type the request into the labeled input and submit.
+3.  When Claude asks for permission, apply Rule 5: approve if
+    pre-approved, otherwise forward to the admin's phone and wait.
+4.  Detect completion: Claude has stopped working and the input is ready
+    again.
+5.  Report Claude's final summary to the admin.
+
+GOV-AIOS confirms that Claude *finished*. It does not judge whether the
+result is good, because that would be guessing.
+
+## Remote control by phone (planned)
+
+The admin's laptop is paired with a phone number. Away from home, the
+admin calls it and asks for one or more flows, for example: "run
+book_travel from Bangalore to Delhi on Friday, send me the itinerary
+from Drive, and run upwork_scan." The admin hangs up and the flows run.
+Approvals and results reach the admin's phone.
+
+Design to be finalized separately. Current intent:
+
+-   The call only selects existing flows and fills in their parameters
+    (Rule 1).
+-   The admin is verified by voice **plus** a PIN or a one-time code sent
+    to the phone. Voice alone is not sufficient, because voices can be
+    cloned and caller ID can be spoofed.
+-   Payment and permission approvals use a channel separate from the
+    call.
+-   The phone channel needs a telephony and messaging service. The
+    "no API calls" principle applies to the **sites and apps being
+    operated**, not to the control channel.
+-   This requires unattended execution (locked screen, expired sessions,
+    nobody present for a CAPTCHA). The first flow below is attended
+    only.
+
+## Build order
+
+1.  **Core runner.** Flow format, policy engine, and verified
+    step-by-step execution, proven by `morning_inbox_briefing`.
+2.  **Phone control channel.** Calls, admin verification, flow
+    selection, and approvals.
+3.  **More flows.** `book_travel`, `send_drive_file`, `upwork_scan`,
+    `build_with_claude`.
+4.  **Unattended execution.**
+
+## What GOV-AIOS is not
+
+-   Not a cloud agent that looks at screenshots and guesses where to
+    click.
+-   Not a scraper or an unofficial API client.
+-   Not a way around logins, CAPTCHAs, or site security.
+-   Not a guarantee of compliance with any site's terms of service.
+    GOV-AIOS acts within your own session, as you would. Check each
+    site's terms for automated use.
+
+------------------------------------------------------------------------
+
+# Part II --- First flow: Morning Inbox Briefing
+
+The first flow, and the proof of the core runner. It opens a real
+Chrome window, navigates to Gmail using an existing personal Chrome
+profile, reads the five newest emails in the Inbox one at a time, and
+speaks each one through a local text-to-speech (TTS) engine.
 
 > **Workflow name:** Morning Inbox Briefing\
 > **Workflow ID:** `morning_inbox_briefing`\
-> **Project:** DesktopPilot\
+> **Project:** GOV-AIOS\
 > **Initial mode:** Local, attended desktop automation\
-> **Interaction model:** Visible Chrome + operating-system mouse and
-> keyboard events\
+> **Platform:** macOS\
+> **Interaction model:** Visible Chrome, accessibility-first element
+> location, OS mouse and keyboard events\
 > **Default email scope:** Five newest messages in the Inbox\
 > **Default TTS:** Local Piper ONNX voice (configurable)
 
@@ -52,10 +226,10 @@ operating-system-level mouse and keyboard input for browser interaction.
 It must not silently substitute headless browser automation or direct
 Gmail API access for the specified UI journey.
 
-A browser accessibility tree or DOM inspection may be added as an
-optional perception aid, but it must not be used to bypass the desktop
-interaction requirement. The runtime should clearly record which
-interaction method was used.
+Elements are located through the OS accessibility API first (Ground
+Rule 3). Screenshot vision may only propose a target on an unlabeled
+screen, with a cropped screenshot sent to the admin for confirmation.
+The runtime records which perception method located each element.
 
 ### 2.3 Observe, act, verify
 
@@ -167,7 +341,7 @@ Stop execution and notify the user if any of the following is detected:
 The agent must not attempt to solve, bypass, or repeatedly retry these
 challenges. It must leave the browser available for the user to complete
 authentication manually. After the user confirms completion, the
-workflow may resume from a fresh screenshot and re-verify the Gmail
+workflow may resume from a fresh observation and re-verify the Gmail
 page.
 
 ### Step 6 --- Identify the five messages
@@ -225,11 +399,11 @@ After the selected messages have been processed:
 
 ## 5. Architecture
 
-DesktopPilot should remain a generic desktop execution framework.
+GOV-AIOS should remain a generic desktop execution framework.
 Morning Inbox Briefing is a workflow definition that runs on top of it.
 
 ``` text
-desktop-pilot/
+gov-aios/
 ├── schemas/
 │   ├── pages/
 │   │   ├── chrome_profile_chooser.yaml
@@ -246,6 +420,7 @@ desktop-pilot/
 │   └── state_machine.py
 │
 ├── perception/
+│   ├── accessibility.py
 │   ├── screenshot.py
 │   ├── page_identifier.py
 │   ├── element_locator.py
@@ -447,7 +622,7 @@ page:
   title: Gmail Inbox
 
   identification:
-    visual_anchors:
+    anchors:  # resolved via the accessibility tree
       - inbox_navigation
       - message_list
       - gmail_header
@@ -697,9 +872,8 @@ cancellation transitions to `CANCELLED`.
 ## 12. Non-functional requirements
 
 -   Runs on a local desktop with a visible Chrome window.
--   Initial platform target should be selected explicitly (Windows or
-    macOS); OS-specific desktop controls should be isolated behind one
-    interface.
+-   Initial platform target is macOS; OS-specific desktop controls are
+    isolated behind one interface so Windows can follow.
 -   No headless browser execution in the initial PoC.
 -   No dependency on Gmail API for the primary UI workflow.
 -   All workflow and page schemas are version-controlled.
@@ -785,14 +959,14 @@ The PoC is accepted when:
 
 -   Launch visible Chrome.
 -   Select a configured profile.
--   Capture screenshots.
+-   Read the macOS accessibility tree for Chrome.
 -   Perform real OS mouse and keyboard events.
 -   Load and validate a simple YAML workflow.
 -   Execute ordered steps with verification and bounded retries.
 
 **Deliverable:** A small workflow that opens Google and clicks Gmail.
 
-### Milestone 2 --- Gmail visual workflow
+### Milestone 2 --- Gmail UI workflow
 
 -   Identify Gmail authentication states.
 -   Stop safely for user authentication.
@@ -814,7 +988,7 @@ The PoC is accepted when:
 
 ### Milestone 4 --- Reliability and hardening
 
--   Improve visual anchors and page identification.
+-   Improve accessibility anchors and page identification.
 -   Add robust error handling and recovery.
 -   Add execution evidence and redacted logging.
 -   Test screen scaling, browser zoom, and layout variations.
@@ -830,7 +1004,7 @@ The following values should be configuration, not hardcoded:
 
   Setting                     Initial value
   --------------------------- -----------------------------
-  Operating system            To be selected
+  Operating system            macOS
   Chrome application path     Auto-detect or configure
   Chrome profile identifier   User-configured
   Google URL                  `https://www.google.com`
@@ -866,7 +1040,7 @@ These are deliberately outside the initial workflow:
 -   A desktop control panel for workflow execution.
 -   More schema-driven workflows for other websites and applications.
 
-The core DesktopPilot runtime should remain application-agnostic.
+The core GOV-AIOS runtime should remain application-agnostic.
 Gmail-specific navigation and extraction belong in the page schemas and
 workflow-specific components, not in the generic desktop controller.
 
