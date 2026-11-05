@@ -26,7 +26,6 @@ def env(tmp_path, govaios_home, monkeypatch):
 
 
 def run(env, tool, **inp):
-    inp = {k: v for k, v in inp.items()}
     return decide_tool(build_request(tool, inp, env["home"], env["root"]), env["pol"], env["appr"], env["prot"])
 
 
