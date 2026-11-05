@@ -45,6 +45,8 @@ def _check(home: Path, managed: Path):
         domains = json.loads(managed.read_text())["sandbox"]["network"]["allowedDomains"]
     except (OSError, ValueError, KeyError, TypeError):
         raise Block("managed settings missing or unreadable") from None
+    if not isinstance(domains, list) or not all(isinstance(d, str) for d in domains):
+        raise Block("managed settings allowedDomains is not a list of host names")
     if _hosts(domains) != _hosts(pol.get("destinations", [])):
         raise Block("managed settings out of date: run `gov-aios claude-settings` and reinstall (admin, sudo)")
     return pol, digest, approvals
@@ -58,11 +60,14 @@ def _decide(payload, home: Path, managed: Path):
         raise Block(f"unknown tool: {tool[:80]!r}")
     pol, digest, approvals = _check(home, managed)
     req = executor.build_request(tool, inp, home, payload.get("cwd") or "")
-    cmd = redact_command(req["command"]) if isinstance(req.get("command"), str) else None
+    raw_cmd = req["command"] if isinstance(req.get("command"), str) else None
+    cmd = redact_command(raw_cmd) if raw_cmd is not None else None
     url = req.get("url") if isinstance(req.get("url"), str) else None
     target = req.get("path") or (url_for_audit(url) if url else None)
     verdict = decide_tool(req, pol, approvals, executor.protected_paths(home))
-    how, reason = None, None
+    how, reason, remember = None, None, None
+    if verdict == "ask" and cmd != raw_cmd:   # redaction could hide code from the admin: never offer it
+        verdict, reason = "deny", "denied by GOV-AIOS policy: command contains secret-like values; not offered for approval"
     if verdict == "ask":
         from . import auth   # lazy: pyobjc import only when a prompt is needed
         q = f"Claude Code wants to use {tool}" + (f" on {target}" if target else "") + "."
@@ -70,7 +75,7 @@ def _decide(payload, home: Path, managed: Path):
         ok, how = auth.approve(q + "\nApprove?", f"Claude Code: {tool}", home)
         verdict = "allow" if ok else "deny"
         if ok and req["category"] == "fetch" and not approvals.destination_ok(ID, origin(url).lower()):
-            approvals.approve_destination(ID, origin(url).lower())
+            remember = origin(url).lower()
         reason = "approved by admin" if ok else (
             "denied by GOV-AIOS policy: approval busy" if how == "busy" else "denied by GOV-AIOS policy: admin did not approve")
     reason = reason or ("allowed by GOV-AIOS policy" if verdict == "allow" else f"denied by GOV-AIOS policy: {tool}")
@@ -78,6 +83,8 @@ def _decide(payload, home: Path, managed: Path):
     AuditLog(home).append("request", flow=ID, flow_hash=digest, executor=ID, action=tool, target=target,
                           command=cmd, decision=verdict, approver="admin" if asked else "policy",
                           channel="touch_id" if asked else None, auth=how)
+    if remember:   # only once the approval is on record
+        approvals.approve_destination(ID, remember)
     return verdict, reason
 
 
@@ -116,6 +123,11 @@ def managed_settings(pol, home: Path) -> dict:
                         "allowAllUnixSockets": False, "allowLocalBinding": False},
         },
     }
+
+
+def bad_destination(d) -> bool:
+    """Row 31: destinations are bare host names (no scheme, slash, port or upper case)."""
+    return not (isinstance(d, str) and d and all(c.islower() or c.isdigit() or c in ".-" for c in d) and d.isascii())
 
 
 def bad_root(root, home: Path) -> bool:

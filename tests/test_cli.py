@@ -143,6 +143,9 @@ def _settings(monkeypatch, answer):
 
 
 ROW14_KEYS = {"allowManagedHooksOnly", "hooks", "permissions", "sandbox"}
+ROW14_SANDBOX = {"enabled", "failIfUnavailable", "allowUnsandboxedCommands", "enableWeakerNestedSandbox",
+                 "enableWeakerNetworkIsolation", "allowAppleEvents", "filesystem", "network"}
+ROW14_NETWORK = {"allowManagedDomainsOnly", "allowedDomains", "allowAllUnixSockets", "allowLocalBinding"}
 
 
 def test_claude_settings_output(monkeypatch, capsys, tmp_path, govaios_home):
@@ -155,6 +158,8 @@ def test_claude_settings_output(monkeypatch, capsys, tmp_path, govaios_home):
     asked = _settings(monkeypatch, (True, "biometric"))
     assert main(["claude-settings", "--root", str(root)]) == 0
     s = json.loads(capsys.readouterr().out)
+    assert ROW14_SANDBOX <= set(s["sandbox"]) and ROW14_NETWORK <= set(s["sandbox"]["network"])
+    assert set(s["permissions"]) == {"disableBypassPermissionsMode", "deny"} and "denyRead" in s["sandbox"]["filesystem"]
     assert ROW14_KEYS <= set(s) and s["sandbox"]["network"]["allowedDomains"] == DESTINATIONS
     pol, digest = load(govaios_home)
     assert Approvals(govaios_home / "approvals.json").flow_ok("claude_code", digest)
@@ -192,3 +197,40 @@ def test_claude_settings_refuses_hand_edited_root(monkeypatch, capsys, tmp_path,
     asked = _settings(monkeypatch, (True, "biometric"))
     assert main(["claude-settings", "--root", str(root)]) == 1
     assert asked == [] and capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("dest", ["https://github.com", "github.com/x", "github.com:443", "GitHub.com", "", 7])
+def test_claude_settings_refuses_non_host_destination(monkeypatch, capsys, tmp_path, govaios_home, dest):
+    import yaml
+
+    from govaios.executor import POLICY_PATH, default_policy
+    root = tmp_path / "proj"
+    root.mkdir()
+    pol = yaml.safe_load(default_policy(root))
+    pol["destinations"].append(dest)
+    (govaios_home / "executors").mkdir(parents=True)
+    (govaios_home / POLICY_PATH).write_text(yaml.safe_dump(pol))
+    asked = _settings(monkeypatch, (True, "biometric"))
+    assert main(["claude-settings", "--root", str(root)]) == 1
+    out = capsys.readouterr()
+    assert asked == [] and out.out == "" and "bare host names" in out.err
+
+
+def test_claude_settings_notes_existing_policy(monkeypatch, capsys, tmp_path, govaios_home):
+    from govaios.executor import POLICY_PATH, default_policy, load
+    root, other = tmp_path / "proj", tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    (govaios_home / "executors").mkdir(parents=True)
+    (govaios_home / POLICY_PATH).write_text(default_policy(root))
+    _settings(monkeypatch, (True, "biometric"))
+    assert main(["claude-settings", "--root", str(other)]) == 0
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and "project_roots are used" in err
+    assert load(govaios_home)[0]["project_roots"] == [str(root.resolve())]
+
+
+def test_cli_hook_passes_exit2(monkeypatch):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("{nope"))
+    assert main(["hook"]) == 2
