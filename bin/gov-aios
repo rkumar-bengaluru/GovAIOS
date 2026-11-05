@@ -1,22 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out=$(mktemp); err=$(mktemp); exitf=$(mktemp)
-trap 'rm -f "$out" "$err" "$exitf"; kill ${tpid:-} 2>/dev/null || true' EXIT
+out=$(mktemp); err=$(mktemp); exitf=$(mktemp); pidf=$(mktemp)
+opid=""
+cleanup() { rm -f "$out" "$err" "$exitf" "$pidf"; }
+# Ctrl-C/SIGTERM: stop the app this shim launched (pid written by the app), then exit.
+stop_app() {
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$pidf" ] && break; sleep 0.1; done
+  [ -s "$pidf" ] && kill -TERM "$(cat "$pidf")" 2>/dev/null || true
+  [ -n "$opid" ] && kill "$opid" 2>/dev/null || true
+  cleanup; exit "$1"
+}
+trap 'stop_app 130' INT
+trap 'stop_app 143' TERM
+trap cleanup EXIT
 args=()
+i=0
 for a in "$@"; do
-  # open starts the app with cwd "/", so pass existing paths as absolute
-  if [ -e "$a" ]; then a="$(cd "$(dirname "$a")" && pwd)/$(basename "$a")"; fi
-  args+=("$a")
+  # open starts the app with cwd "/": make file arguments absolute, but never the subcommand or options
+  if [ "$i" -gt 0 ] && [ "${a#-}" = "$a" ] && [ -e "$a" ]; then a="$(cd "$(dirname -- "$a")" && pwd)/$(basename -- "$a")"; fi
+  args+=("$a"); i=$((i+1))
 done
 open -W -n -a "$REPO/dist/gov-aios.app" --stdout "$out" --stderr "$err" \
-  --env GOVAIOS_EXIT_FILE="$exitf" --env GOVAIOS_HOME="${GOVAIOS_HOME:-}" \
+  --env GOVAIOS_EXIT_FILE="$exitf" --env GOVAIOS_PID_FILE="$pidf" --env GOVAIOS_HOME="${GOVAIOS_HOME:-}" \
   ${args[@]+--args "${args[@]}"} &
 opid=$!
-tail -f "$out" & tpid=$!
-tail -f "$err" >&2 & epid=$!
-trap 'rm -f "$out" "$err" "$exitf"; kill $tpid $epid 2>/dev/null || true' EXIT
+# Stream by byte offset; after open returns the app has exited, so one last pass is complete.
+o_off=0; e_off=0
+pump() { # file offset-var fd
+  local size; size=$(wc -c <"$1")
+  if [ "$size" -gt "${!2}" ]; then
+    tail -c +$((${!2}+1)) "$1" | head -c $((size-${!2})) >&"$3"
+    printf -v "$2" %s "$size"
+  fi
+}
+while kill -0 "$opid" 2>/dev/null; do pump "$out" o_off 1; pump "$err" e_off 2; sleep 0.05; done
 wait "$opid" || true
-sleep 0.3  # let tail flush the last lines
+pump "$out" o_off 1; pump "$err" e_off 2
 code=$(cat "$exitf")
 exit "${code:-70}"
