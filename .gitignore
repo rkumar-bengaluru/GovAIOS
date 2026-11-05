@@ -228,3 +228,4 @@ spikes/ax-flows/approvals.json
 /approvals.json
 /jd_selected/
 /captures/
+!packaging/gov-aios.spec

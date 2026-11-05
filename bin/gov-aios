@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+out=$(mktemp); err=$(mktemp); exitf=$(mktemp)
+trap 'rm -f "$out" "$err" "$exitf"; kill ${tpid:-} 2>/dev/null || true' EXIT
+args=()
+for a in "$@"; do
+  # open starts the app with cwd "/", so pass existing paths as absolute
+  if [ -e "$a" ]; then a="$(cd "$(dirname "$a")" && pwd)/$(basename "$a")"; fi
+  args+=("$a")
+done
+open -W -n -a "$REPO/dist/gov-aios.app" --stdout "$out" --stderr "$err" \
+  --env GOVAIOS_EXIT_FILE="$exitf" --env GOVAIOS_HOME="${GOVAIOS_HOME:-}" \
+  ${args[@]+--args "${args[@]}"} &
+opid=$!
+tail -f "$out" & tpid=$!
+tail -f "$err" >&2 & epid=$!
+trap 'rm -f "$out" "$err" "$exitf"; kill $tpid $epid 2>/dev/null || true' EXIT
+wait "$opid" || true
+sleep 0.3  # let tail flush the last lines
+code=$(cat "$exitf")
+exit "${code:-70}"

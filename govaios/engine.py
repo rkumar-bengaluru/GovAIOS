@@ -3,6 +3,7 @@ Every OS side effect goes through the desktop adapter, and every action is
 decided by policy.decide() first."""
 import json
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ import yaml
 from .approvals import Approvals, flow_hash
 from .policy import decide, origin
 
-REPO = Path(__file__).parent.parent
+REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
 
 
 class Stop(Exception):
