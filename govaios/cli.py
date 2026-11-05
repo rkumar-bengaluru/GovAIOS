@@ -50,8 +50,17 @@ def _audit_ui(args) -> int:
     from .audit.web import make_server
     from .home import data_home
 
-    server, token = make_server(data_home(), args.port)
-    print(f"http://127.0.0.1:{server.server_address[1]}/?t={token}", flush=True)
+    from . import auth
+    from .audit.log import AuditLog
+
+    home = data_home()
+    ok, how = auth.prove("open the audit log", home)
+    AuditLog(home).append("ui_login", channel="touch_id", auth=how, outcome="ok" if ok else "denied")
+    if not ok:
+        print("not proven; audit UI not started", file=sys.stderr)
+        return 1
+    server, code = make_server(home, args.port)
+    print(f"http://127.0.0.1:{server.server_address[1]}/login?c={code}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
