@@ -13,6 +13,9 @@ from ApplicationServices import (
 from . import Node, ROLES, native_to_neutral
 
 BUNDLES = {"chrome": ("com.google.Chrome", "Google Chrome")}
+# Fixed human pace (spec 5.8): reliability and fair site load, never bot-detection evasion (no jitter).
+# shortcut: fixed values, not the admin's learned pace; replaced by bootstrap-learned pace in plan 4.
+PACE = {"char": 0.12, "key": 0.15, "pointer": 0.25, "after_action": 1.0}
 KEYCODES = {"l": 37, "[": 33, "return": 36, "left": 123}
 FLAGS = {"cmd": Q.kCGEventFlagMaskCommand, "alt": Q.kCGEventFlagMaskAlternate,
          "ctrl": Q.kCGEventFlagMaskControl, "shift": Q.kCGEventFlagMaskShift}
@@ -46,11 +49,19 @@ class MacDesktop:
 
     def launch_application(self, app, profile_directory=None):
         """With a profile, Chrome opens (or focuses) a window in that profile even if already running."""
-        args = ["--args", f"--profile-directory={profile_directory}"] if profile_directory else []
-        if profile_directory or not self._app(app):
-            subprocess.run(["open", "-a", BUNDLES[app][1], *args], check=True)
+        if profile_directory:
+            # `open -a X --args` drops the args when X is already running; the binary hands
+            # them to the running instance, which opens (or focuses) that profile's window.
+            exe = f"/Applications/{BUNDLES[app][1]}.app/Contents/MacOS/{BUNDLES[app][1]}"
+            subprocess.Popen([exe, f"--profile-directory={profile_directory}"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             time.sleep(3)
-        self.activate(app)
+        elif not self._app(app):
+            subprocess.run(["open", "-a", BUNDLES[app][1]], check=True)
+            time.sleep(3)
+        if not profile_directory:
+            self.activate(app)   # with a profile, the new window is already key; activate() could raise another profile's
+        time.sleep(PACE["after_action"])
 
     def activate(self, app):
         self._app(app).activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
@@ -149,13 +160,14 @@ class MacDesktop:
             ev = Q.CGEventCreateMouseEvent(None, t, pt, Q.kCGMouseButtonLeft)
             Q.CGEventSetFlags(ev, 0)   # else a prior cmd shortcut leaks in: cmd+click = background tab
             Q.CGEventPost(Q.kCGHIDEventTap, ev)
-            time.sleep(0.05)
+            time.sleep(PACE["pointer"] if t == Q.kCGEventMouseMoved else 0.08)
+        time.sleep(PACE["after_action"])
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.
         from ApplicationServices import AXUIElementPerformAction
         AXUIElementPerformAction(node.handle, "AXScrollToVisible")
-        time.sleep(0.4)
+        time.sleep(PACE["after_action"])
 
     def press(self, logical_key):
         *mods, key = self.keys[logical_key]
@@ -166,7 +178,8 @@ class MacDesktop:
             ev = Q.CGEventCreateKeyboardEvent(None, KEYCODES[key], down)
             Q.CGEventSetFlags(ev, flags)
             Q.CGEventPost(Q.kCGHIDEventTap, ev)
-            time.sleep(0.03)
+            time.sleep(0.05)
+        time.sleep(PACE["key"])
 
     def type_text(self, text):
         for ch in text:
@@ -175,4 +188,5 @@ class MacDesktop:
                 Q.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
                 Q.CGEventSetFlags(ev, 0)
                 Q.CGEventPost(Q.kCGHIDEventTap, ev)
-            time.sleep(0.01)
+            time.sleep(PACE["char"])
+        time.sleep(PACE["after_action"])
