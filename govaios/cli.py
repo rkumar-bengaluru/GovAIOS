@@ -4,15 +4,43 @@ import time
 
 import sys
 
-from . import identity
+from . import identity, sandbox
+
+PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
 
 
 def _doctor(args) -> int:
+    from . import auth, hook, powers, runstate
+    from .home import data_home
+
+    home = data_home()
     c = identity.check()
+    try:
+        managed = hook.MANAGED_SETTINGS.stat().st_uid == 0
+    except OSError:
+        managed = False
+    ts = powers.last(home)
+    c.update(guard=runstate.guard_alive(home), managed_settings=managed,
+             powers_review=ts.date().isoformat() if ts else "missing", screen_locked=auth.screen_locked())
     for k, v in c.items():
         print(f"{k}: {v}")
     ok = c["bundle_id"] == "com.govaios.cli" and all(c[k] for k in ("frozen", "accessibility", "screen_recording"))
+    ok = ok and c["guard"] and managed and powers.fresh(home) and not c["screen_locked"]
     return 0 if ok else 1
+
+
+def preflight(home, dev: bool) -> None:
+    """Row 28, in order (the sandbox is already applied in main). Dev skips only what needs the installed app."""
+    from . import auth, powers, runstate
+
+    if not dev and not runstate.guard_alive(home):
+        raise SystemExit("refused: the gov-aios guard is not running")
+    if runstate.stopped(home):
+        raise SystemExit("refused: STOPPED (emergency stop); run `gov-aios resume`")
+    if auth.screen_locked():
+        raise SystemExit("refused: the screen is locked")
+    if not dev and not powers.fresh(home):
+        raise SystemExit("refused: no powers review in the last 30 days; run `gov-aios review-powers`")
 
 
 def _run(args) -> int:
@@ -22,18 +50,24 @@ def _run(args) -> int:
     from .engine import Runner, Stop
     from .home import data_home
     from .netguard import block_all_network
+    from .runstate import register_run, unregister_run
 
     packaged = identity.require_app(args.dev)
     block_all_network()  # before Runner exists, so nothing it builds can open a socket
     executor = "gov_runner" if packaged and not args.dev else "gov_runner_dev"
+    home = data_home()
+    register_run(home)   # before the STOPPED check, so a stop pressed in between still finds this run
     try:
-        Runner(Path(args.flow).resolve(), get_desktop(), data_home(), executor).run()
+        preflight(home, dev=not packaged)
+        Runner(Path(args.flow).resolve(), get_desktop(), home, executor).run()
     except Stop as e:
         print(f"STOPPED: {e}", file=sys.stderr)
         return 1
     except Exception as e:   # type only: messages and tracebacks can carry page content
         print(f"ERROR: {type(e).__name__}", file=sys.stderr)
         return 1
+    finally:
+        unregister_run(home)
     return 0
 
 
@@ -74,11 +108,18 @@ def _dump(args) -> int:
     # Read-only: no navigation, keystrokes or app launch (only sets Chrome's AX-enable flags); stdout only, never the audit.
     import time
 
+    from . import auth
     from .desktop import get_desktop
+    from .home import data_home
 
-    identity.require_app(args.dev)
+    packaged = identity.require_app(args.dev)
     from .netguard import block_all_network
     block_all_network()  # dump reads page content; nothing it does needs the network
+    home = data_home()
+    preflight(home, dev=not packaged)
+    if not auth.prove("read the current Chrome page", home)[0]:   # row 29: else a confused deputy for AX
+        print("not proven; nothing read", file=sys.stderr)
+        return 1
     d = get_desktop()
     if not d._app("chrome"):
         sys.exit("chrome is not running")
@@ -179,6 +220,19 @@ def _claude_settings(args) -> int:
     return 0
 
 
+def _review_powers(args) -> int:
+    from . import powers
+    from .audit.log import AuditLog
+    from .home import data_home
+
+    home = data_home()
+    if not powers.review(home, args.kept, AuditLog(home)):
+        print("powers review not approved", file=sys.stderr)
+        return 1
+    print("powers review recorded")
+    return 0
+
+
 def _selftest(args) -> int:
     if not args.dev:
         sys.exit("selftest requires --dev")
@@ -217,6 +271,9 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("claude-settings")
     c.add_argument("--root", action="append", required=True)
     c.set_defaults(fn=_claude_settings)
+    rp = sub.add_parser("review-powers")
+    rp.add_argument("kept", nargs="*", metavar="KEPT")   # the apps the admin keeps in the three panes
+    rp.set_defaults(fn=_review_powers)
     pf = os.environ.get("GOVAIOS_PID_FILE")  # lets the shim stop this run on Ctrl-C
     if pf:
         with open(pf, "w") as fh:
@@ -224,6 +281,14 @@ def main(argv: list[str] | None = None) -> int:
     code = 1
     try:
         args = p.parse_args(argv)
+        profile = PROFILES.get(args.cmd, sandbox.RUN_PROFILE)
+        if profile:   # first, before anything can resolve a name: a resolver opened earlier outlives the sandbox
+            try:
+                sandbox.apply(profile)
+            except RuntimeError:
+                print("refused: OS sandbox could not be applied", file=sys.stderr)
+                _write_exit(1)
+                return 1
         code = args.fn(args)
     except SystemExit as e:
         if isinstance(e.code, int):

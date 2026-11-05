@@ -19,7 +19,8 @@ def test_run_refused_outside_app(capsys):
 def test_run_dev_blocks_network(tmp_path):
     driver = textwrap.dedent("""
         import socket
-        from govaios import cli, engine
+        from govaios import auth, cli, engine
+        auth.screen_locked = lambda: False   # dev preflight still checks the lock; never depend on the real screen
         def run(self):
             socket.create_connection(("127.0.0.1", 9))
         engine.Runner.__init__ = lambda self, *a: None
@@ -36,9 +37,49 @@ def test_run_dev_blocks_network(tmp_path):
     assert "ERROR: PermissionError" in r.stderr and "DEV MODE" in r.stderr
 
 
-def test_doctor_fields(monkeypatch):
+def _doctor_env(monkeypatch, tmp_path, root_owned=True):
+    from govaios import auth, hook, runstate
+    managed = tmp_path / "managed-settings.json"   # never the real /Library file
+    managed.write_text("{}")
+    real_stat = type(managed).stat
     monkeypatch.setattr(identity, "check", lambda: OK)
+    monkeypatch.setattr(hook, "MANAGED_SETTINGS", managed)
+    monkeypatch.setattr(runstate, "guard_alive", lambda home: True)
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    monkeypatch.setattr("govaios.powers.fresh", lambda home, now=None: True)
+    if root_owned:
+        import os
+        monkeypatch.setattr(type(managed), "stat", lambda self, **k: os.stat_result(
+            (*real_stat(self, **k)[:4], 0, *real_stat(self, **k)[5:])) if self == managed else real_stat(self, **k))
+
+
+def test_doctor_fields(monkeypatch, tmp_path):
+    _doctor_env(monkeypatch, tmp_path)
     assert main(["doctor", "--dev"]) == 0
+
+
+def test_doctor_reports_new_checks(monkeypatch, tmp_path, capsys, govaios_home):
+    import json
+    _doctor_env(monkeypatch, tmp_path, root_owned=False)   # owned by the test user, not root
+    assert main(["doctor"]) == 1
+    assert "managed_settings: False" in capsys.readouterr().out.splitlines()
+    _doctor_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("govaios.powers.fresh", lambda home, now=None: False)
+    assert main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    for k in ("guard: True", "managed_settings: True", "powers_review: missing", "screen_locked: False"):
+        assert k in out.splitlines(), out
+    govaios_home.mkdir(parents=True, exist_ok=True)
+    (govaios_home / "powers_review.json").write_text(json.dumps({"ts": "2026-11-01T00:00:00+00:00", "kept": []}))
+    monkeypatch.setattr("govaios.powers.fresh", lambda home, now=None: True)
+    assert main(["doctor"]) == 0
+    assert "powers_review: 2026-11-01" in capsys.readouterr().out.splitlines()
+    from govaios import auth, runstate
+    monkeypatch.setattr(runstate, "guard_alive", lambda home: False)
+    assert main(["doctor"]) == 1
+    monkeypatch.setattr(runstate, "guard_alive", lambda home: True)
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    assert main(["doctor"]) == 1
 
 
 def test_doctor_wrong_bundle(monkeypatch):
@@ -91,7 +132,145 @@ def _fake_run(monkeypatch, exc, packaged=False):
     monkeypatch.setattr(desktop, "get_desktop", lambda: None)
     monkeypatch.setattr("govaios.netguard.block_all_network", lambda: None)
     monkeypatch.setattr(identity, "check", lambda: {**OK, "bundle_id": "com.govaios.cli" if packaged else "x"})
+    _checks(monkeypatch)
     return seen
+
+
+def _checks(monkeypatch, guard=True, stopped=False, locked=False, fresh=True):
+    from govaios import auth, powers, runstate
+    monkeypatch.setattr(runstate, "guard_alive", lambda home: guard)
+    monkeypatch.setattr(runstate, "stopped", lambda home: stopped)
+    monkeypatch.setattr(auth, "screen_locked", lambda: locked)
+    monkeypatch.setattr(powers, "fresh", lambda home, now=None: fresh)
+
+
+def test_preflight_order(monkeypatch, govaios_home):
+    from govaios.cli import preflight
+    want = [("guard", dict(guard=False, stopped=True, locked=True, fresh=False)),
+            ("STOPPED", dict(stopped=True, locked=True, fresh=False)),
+            ("locked", dict(locked=True, fresh=False)),
+            ("powers review", dict(fresh=False))]
+    for word, bad in want:
+        _checks(monkeypatch, **bad)
+        with pytest.raises(SystemExit) as e:
+            preflight(govaios_home, dev=False)
+        assert word in str(e.value) and "\n" not in str(e.value)
+    _checks(monkeypatch)
+    preflight(govaios_home, dev=False)
+
+
+def test_preflight_dev_skips_guard_and_powers_only(monkeypatch, govaios_home):
+    from govaios.cli import preflight
+    _checks(monkeypatch, guard=False, fresh=False)
+    preflight(govaios_home, dev=True)
+    for word, bad in [("STOPPED", dict(stopped=True)), ("locked", dict(locked=True))]:
+        _checks(monkeypatch, guard=False, fresh=False, **bad)
+        with pytest.raises(SystemExit) as e:
+            preflight(govaios_home, dev=True)
+        assert word in str(e.value)
+
+
+def test_run_preflight_refusal(monkeypatch, capsys, govaios_home):
+    seen = _fake_run(monkeypatch, None, packaged=True)
+    _checks(monkeypatch, guard=False)
+    with pytest.raises(SystemExit):
+        main(["run", "x.yaml"])
+    assert "executor" not in seen and "guard" in capsys.readouterr().err
+    assert not any((govaios_home / "runs").iterdir())
+
+
+@pytest.mark.parametrize("exc", [None, RuntimeError("x")])
+def test_run_registers_and_unregisters(monkeypatch, govaios_home, exc):
+    import os
+    from govaios import engine
+    _fake_run(monkeypatch, None)
+    during = []
+
+    class R:
+        def __init__(self, *a):
+            pass
+
+        def run(self):
+            during.append((govaios_home / "runs" / str(os.getpid())).exists())
+            if exc:
+                raise exc
+    monkeypatch.setattr(engine, "Runner", R)
+    assert main(["run", "x.yaml", "--dev"]) == (1 if exc else 0)
+    assert during == [True] and not (govaios_home / "runs" / str(os.getpid())).exists()
+
+
+def test_dev_requires_tmp_home(monkeypatch, tmp_path):
+    import os
+    import pwd
+    seen = _fake_run(monkeypatch, None)
+    f = tmp_path / "exit"
+    monkeypatch.setenv("GOVAIOS_EXIT_FILE", str(f))
+    real = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library/Application Support/GOV-AIOS")
+    for env in (None, real, real.upper(), real + "/sub"):
+        if env is None:
+            monkeypatch.delenv("GOVAIOS_HOME")
+        else:
+            monkeypatch.setenv("GOVAIOS_HOME", env)
+        f.unlink(missing_ok=True)
+        with pytest.raises(SystemExit):
+            main(["run", "x.yaml", "--dev"])
+        assert f.read_text() == "1" and "executor" not in seen
+
+
+def test_dump_needs_proof(monkeypatch, capsys, govaios_home):
+    from govaios import auth, desktop
+    _fake_run(monkeypatch, None)
+    reads, reasons = [], []
+
+    class D:
+        def _app(self, name):
+            return True
+
+        def web_root(self, name):
+            reads.append(name)
+
+    monkeypatch.setattr(desktop, "get_desktop", lambda: D())
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (reasons.append(reason), (False, "failed"))[1])
+    assert main(["dump", "--dev"]) == 1
+    assert reads == [] and reasons == ["read the current Chrome page"]
+    _checks(monkeypatch, locked=True)
+    with pytest.raises(SystemExit):
+        main(["dump", "--dev"])
+    assert reasons == ["read the current Chrome page"]   # preflight refuses before the proof
+
+
+@pytest.mark.parametrize("argv,profile", [(["run", "x.yaml", "--dev"], "RUN_PROFILE"), (["hook"], "RUN_PROFILE"),
+                                          (["audit-ui"], "UI_PROFILE"), (["doctor"], None),
+                                          (["review-powers", "Zoom"], "RUN_PROFILE")])
+def test_sandbox_applied_per_subcommand(monkeypatch, sandbox_calls, argv, profile):
+    from govaios import cli, sandbox
+    fn = {"run": "_run", "hook": "_hook", "audit-ui": "_audit_ui", "doctor": "_doctor", "review-powers": "_review_powers"}
+    order = []
+    monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
+    monkeypatch.setattr(cli, fn[argv[0]], lambda args: order.append(("handler", None)) or 0)
+    assert main(argv) == 0
+    assert order == ([("apply", getattr(sandbox, profile))] if profile else []) + [("handler", None)]
+
+
+def test_sandbox_refusal_runs_nothing(monkeypatch, capsys):
+    from govaios import cli, sandbox
+
+    def refuse(p):
+        raise RuntimeError("sandbox refused")
+    monkeypatch.setattr(sandbox, "apply", refuse)
+    monkeypatch.setattr(cli, "_hook", lambda args: pytest.fail("handler ran"))
+    assert main(["hook"]) == 1
+    assert capsys.readouterr().err.count("\n") == 1
+
+
+def test_review_powers_subcommand(monkeypatch, govaios_home):
+    from govaios import powers
+    seen = []
+    monkeypatch.setattr(powers, "review", lambda home, kept, audit: seen.append((home, kept)) or False)
+    assert main(["review-powers", "Zoom", "1Password"]) == 1
+    monkeypatch.setattr(powers, "review", lambda home, kept, audit: seen.append((home, kept)) or True)
+    assert main(["review-powers", "Zoom"]) == 0
+    assert seen == [(govaios_home, ["Zoom", "1Password"]), (govaios_home, ["Zoom"])]
 
 
 def test_run_unexpected_error_prints_type_only(monkeypatch, capsys):

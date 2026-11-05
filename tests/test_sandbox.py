@@ -87,3 +87,14 @@ except RuntimeError as e:
     print("RuntimeError", e)
 """)
     assert "RuntimeError sandbox refused" in r.stdout, r.stderr
+
+
+def test_exe_path_works_under_run_profile():
+    # runstate identifies gov-aios pids by proc_pidpath; it must still answer inside the sandbox.
+    r = child("""
+import os
+from govaios import runstate, sandbox
+sandbox.apply(sandbox.RUN_PROFILE)
+print(runstate._exe_path(os.getpid()) is not None, runstate._exe_path(os.getppid()) is not None)
+""")
+    assert r.stdout.strip() == "True True", r.stderr

@@ -1,3 +1,5 @@
+import os
+import pwd
 import sys
 
 
@@ -20,5 +22,15 @@ def require_app(dev: bool) -> bool:
         return True
     if not dev:
         raise SystemExit("gov-aios must run as com.govaios.cli (use bin/gov-aios); --dev allows Python for development only")
+    _require_dev_home()
     print("DEV MODE: insecure, not for real use", file=sys.stderr)
     return False
+
+
+def _require_dev_home() -> None:
+    """Row 28: dev runs never touch the real audit, key or approvals."""
+    from .policy import _inside
+    env = os.environ.get("GOVAIOS_HOME")
+    real = os.path.realpath(os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library/Application Support/GOV-AIOS"))
+    if not env or _inside(os.path.realpath(env), real, True):
+        raise SystemExit("--dev needs GOVAIOS_HOME set to a directory outside the real data home")
