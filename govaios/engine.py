@@ -17,6 +17,9 @@ from .policy import decide, origin
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
 
 
+NO_DEST = object()
+
+
 class Stop(Exception):
     """Flow stopped: unexpected state, denial, or admin needed (Rule 2)."""
 
@@ -80,6 +83,10 @@ class Runner:
         self.home = Path(home)
         self.flow_path = Path(flow_path)
         self.pages_dir = self.flow_path.parent.parent / "pages"   # flows/ and pages/ are siblings
+        try:
+            self.digest = flow_hash(self.flow_path, self.pages_dir)   # hashed once, before parsing; approval binds to this
+        except KeyError as e:
+            raise Stop(f"unknown page: {e.args[0]}") from None
         self.flow = yaml.safe_load(self.flow_path.read_text())["workflow"]
         self.d = desktop
         self.app = self.flow["browser"]["application"]
@@ -111,7 +118,13 @@ class Runner:
         return out
 
     # governance gate for every side effect
-    def gate(self, action, risk, target=None, destination=None):
+    def gate(self, action, risk, target=None, destination=NO_DEST):
+        if destination is not NO_DEST and not destination:   # blank/None URL: fail closed
+            self._audit("request", action=action, risk=risk, target=target, decision="deny",
+                        approver="policy", channel=None, reason="no url")
+            raise Stop(f"denied {action}: no url")
+        if destination is NO_DEST:
+            destination = None
         dest = url_for_audit(destination) if destination else None
         verdict = decide({"action": action, "risk": risk, "destination": destination}, self.flow, self.approvals)
         asked = verdict == "ask"
@@ -130,7 +143,7 @@ class Runner:
             raise Stop(f"denied {action} (risk {risk}) {dest or ''}")
 
     def approve_flow(self):
-        digest = flow_hash(self.flow_path, self.pages_dir)
+        digest = self.digest
         if self.approvals.flow_ok(self.flow["id"], digest):
             return
         f = self.flow
@@ -179,7 +192,7 @@ class Runner:
     # ----- step actions -----
     def run(self):
         self.step = None
-        self._audit("flow_start", flow_hash=flow_hash(self.flow_path, self.pages_dir))
+        self._audit("flow_start", flow_hash=self.digest)
         try:
             self.approve_flow()
             self.steps(self.flow["steps"])
@@ -226,8 +239,11 @@ class Runner:
             if what == "stop_and_report":
                 raise Stop("unexpected page")
             # stop_and_request_user (Rule 6)
-            if self.d.ask_admin(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
-                                f"then click Approve to continue.", timeout_s=300) is not True:
+            ok = self.d.ask_admin(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
+                                  f"then click Approve to continue.", timeout_s=300) is True
+            self._audit("request", action="resume", risk="read", target=page, decision="allow" if ok else "deny",
+                        approver="admin", channel="desktop_dialog")
+            if not ok:
                 raise Stop(f"stopped at {page}; admin did not resume")
         raise Stop("still not on the expected page after admin action")
 
@@ -311,7 +327,9 @@ class Runner:
 
     def do_write_json(self, s):
         self.gate("write_file", "modify")
-        out = self.home / s["directory"]   # never inside the sealed app bundle
+        out = (self.home / s["directory"]).resolve()   # never inside the sealed app bundle
+        if not out.is_relative_to(self.home.resolve()):
+            raise Stop("output directory outside the data home")
         out.mkdir(parents=True, exist_ok=True)
         rec = {**self.ctx["record"], "list_item": self.ctx["item"],
                "captured_at": datetime.now().isoformat(timespec="seconds"),

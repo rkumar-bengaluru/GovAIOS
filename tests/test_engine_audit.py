@@ -81,15 +81,17 @@ def nosleep(monkeypatch):
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
 
 
-def run(tmp_path, answers):
+def run(tmp_path, answers, desk=FakeDesktop, directory=None):
     src = tmp_path / "src"
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
     f = src / "flows" / "himalayas_job_vetting.yaml"
     t = f.read_text().replace("count: 5", "count: 1")
     t = t.replace("rupak.kumar.ambasta02@gmail.com", ACCT)
+    if directory:
+        t = t.replace("directory: jd_selected", f"directory: {directory}")
     f.write_text(t)
-    r = Runner(f, FakeDesktop(answers), tmp_path)
+    r = Runner(f, desk(answers), tmp_path)
     try:
         r.run()
         err = None
@@ -116,14 +118,17 @@ def test_click_target_is_element_ref(tmp_path):
 def test_no_content_in_audit(tmp_path):
     run(tmp_path, [True] * 10)
     log = (tmp_path / "audit.jsonl").read_text()
-    assert "SECRET" not in log and ACCT not in log and "utm" not in log
+    low = log.lower()
+    assert "secret-description" not in low and "secret-co" not in low and "secret_" not in low
+    assert ACCT not in log and "utm" not in log
 
 
 def test_denied_flow_approval_logged(tmp_path):
-    _, e, err = run(tmp_path, [False])
+    r, e, err = run(tmp_path, [False])
     assert isinstance(err, Stop)
     assert [x["kind"] for x in e][-2:] == ["flow_approval", "stop"]
     assert e[-2]["decision"] == "deny"
+    assert verify(r.audit.path, r.audit.pub_path).ok
 
 
 def test_write_json_under_home(tmp_path):
@@ -137,3 +142,52 @@ def test_destination_url_redacted(tmp_path):
     _, e, _ = run(tmp_path, [True] * 10)
     req = [x for x in e if x["kind"] == "request" and x["step"] == "open_matches"]
     assert req and req[0]["destination"] == "https://himalayas.app/jobs/matches"
+
+
+class BlankUrl(FakeDesktop):
+    def current_url(self, app):
+        return ""
+
+
+def test_blank_url_denied(tmp_path):
+    r, e, err = run(tmp_path, [True] * 10, BlankUrl)
+    assert isinstance(err, Stop)
+    assert [x["kind"] for x in e][-2:] == ["request", "stop"]
+    assert e[-2]["decision"] == "deny" and e[-2]["reason"] == "no url"
+    assert verify(r.audit.path, r.audit.pub_path).ok
+
+
+@pytest.mark.parametrize("d", ["../../x", "/tmp/govaios-x"])
+def test_write_json_outside_home_stops(tmp_path, d):
+    home = tmp_path / "h"
+    home.mkdir()
+    _, e, err = run(home, [True] * 10, directory=d)
+    assert isinstance(err, Stop) and e[-1]["kind"] == "stop"
+    assert not (tmp_path / "x").exists() and not [p for p in home.glob("**/*.json") if p.name != "approvals.json"]
+
+
+class LoggedOut(FakeDesktop):
+    def web_root(self, app):
+        if "himalayas" in self.url:
+            return N("document", "Your matches | Himalayas",
+                     children=[N("banner", children=[N("link", "Log in")])])
+        return super().web_root(app)
+
+
+def test_resume_denied_is_audited(tmp_path):
+    r, e, err = run(tmp_path, [True, True, True, False], LoggedOut)
+    assert isinstance(err, Stop)
+    req = [x for x in e if x["kind"] == "request" and x["action"] == "resume"]
+    assert len(req) == 1 and req[0]["decision"] == "deny" and req[0]["approver"] == "admin"
+    assert req[0]["channel"] == "desktop_dialog" and e[-1]["kind"] == "stop"
+    assert verify(r.audit.path, r.audit.pub_path).ok
+
+
+def test_page_edit_after_construction_cannot_diverge(tmp_path):
+    src = tmp_path / "src"
+    shutil.copytree(REPO / "flows", src / "flows")
+    shutil.copytree(REPO / "pages", src / "pages")
+    r = Runner(src / "flows" / "himalayas_job_vetting.yaml", FakeDesktop([]), tmp_path)
+    (src / "pages" / "google_home.yaml").write_text("# edited\n")
+    from govaios.approvals import flow_hash
+    assert r.digest != flow_hash(r.flow_path, r.pages_dir)

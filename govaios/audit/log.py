@@ -31,6 +31,8 @@ class AuditError(Exception):
 
 def url_for_audit(url: str) -> str:
     u = urlsplit(url)
+    if u.scheme not in ("http", "https"):
+        return f"{u.scheme}:"  # data:/javascript: payloads are content
     host = u.hostname or ""  # drops userinfo
     if ":" in host:
         host = f"[{host}]"

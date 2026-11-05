@@ -115,3 +115,9 @@ def test_append_only_flag_rearmed(home):
     os.chflags(home / "audit.jsonl", 0)
     log.append("action", flow="f")
     assert os.stat(home / "audit.jsonl").st_flags & stat.UF_APPEND
+
+
+def test_url_for_audit_non_http_has_no_payload():
+    from govaios.audit.log import url_for_audit
+    assert url_for_audit("data:text/html,<b>secret</b>") == "data:"
+    assert url_for_audit("javascript:alert(1)") == "javascript:"
