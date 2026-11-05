@@ -3,6 +3,8 @@
 # Decision rows 18, 26, 34. Never runs gov-aios, never creates anything in the data home.
 # Root writes nothing under the user's home except the guarded chown of root-owned data-home files.
 set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+unset PYTHONPATH PYTHONHOME
 cd "$(dirname "$0")/.."
 
 SIGNER_CN="GOV-AIOS Dev" # must match GOVAIOS_SIGN_ID used by build.sh
@@ -19,13 +21,12 @@ esac
 
 APP_SRC="dist/gov-aios.app"
 APP=/Applications/gov-aios.app
-APP_NEW=/Applications/gov-aios.app.new
 REQ="identifier \"com.govaios.cli\" and certificate leaf[subject.CN] = \"$SIGNER_CN\""
 [ -d "$APP_SRC" ] || { echo "missing $APP_SRC: run packaging/build.sh first" >&2; exit 1; }
 codesign --verify --strict "$APP_SRC" || { echo "$APP_SRC fails codesign --verify --strict" >&2; exit 1; }
 
 # Under sudo $HOME is root's: take the user's home and uid from the directory service.
-UHOME=$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory | /usr/bin/sed 's/^NFSHomeDirectory: *//')
+UHOME=$(/usr/bin/python3 -I -c 'import pwd,sys;print(pwd.getpwnam(sys.argv[1]).pw_dir)' "$SUDO_USER")
 UID_N=$(id -u "$SUDO_USER")
 [ "$UID_N" -ne 0 ] || { echo "refusing: $SUDO_USER has uid 0" >&2; exit 1; }
 [ -n "$UHOME" ] && [ -d "$UHOME" ] || { echo "cannot resolve home of $SUDO_USER" >&2; exit 1; }
@@ -34,26 +35,27 @@ AGENTS="$UHOME/Library/LaunchAgents"
 PLIST="$AGENTS/com.govaios.guard.plist"
 MS_DIR="/Library/Application Support/ClaudeCode"
 MS_TMP="$MS_DIR/.managed-settings.json.$$"
-trap 'rm -rf "$APP_NEW" "$MS_TMP"' EXIT
+STAGE=""
+trap '[ -n "${STAGE:-}" ] && rm -rf "$STAGE"; rm -rf "$MS_TMP"' EXIT
 
-# Stop the old guard before replacing the app under it (errors ignored: it may not be loaded).
+# Stage in a private (0700, root) directory, verify the root-owned copy against the pinned signer, then swap.
+STAGE=$(/usr/bin/mktemp -d /Applications/.gov-aios.XXXXXX)
+/usr/bin/ditto "$APP_SRC" "$STAGE/gov-aios.app"
+chown -R root:wheel "$STAGE/gov-aios.app"
+chmod -R go-w "$STAGE/gov-aios.app"
+codesign --verify --strict "-R=$REQ" "$STAGE/gov-aios.app" || { echo "installed copy fails signer check ($SIGNER_CN)" >&2; exit 1; }
+# Stop the old guard just before the swap (errors ignored: it may not be loaded).
 launchctl bootout "gui/$UID_N/com.govaios.guard" 2>/dev/null || true
-
-# Stage the new app root-owned, verify the root-owned copy against the pinned signer, then swap.
-rm -rf "$APP_NEW"
-/usr/bin/ditto "$APP_SRC" "$APP_NEW"
-chown -R root:wheel "$APP_NEW"
-codesign --verify --strict "-R=$REQ" "$APP_NEW" || { echo "installed copy fails signer check ($SIGNER_CN)" >&2; exit 1; }
-rm -rf "$APP"
-mv "$APP_NEW" "$APP"
+rm -rf "/Applications/gov-aios.app"
+mv "$STAGE/gov-aios.app" /Applications/gov-aios.app
 
 if [ -n "$SETTINGS" ]; then
   mkdir -p "$MS_DIR"
   cp "$SETTINGS" "$MS_TMP"
   chown root:wheel "$MS_TMP"; chmod 0644 "$MS_TMP"
   # A truncated or wrong settings file would lock Claude Code out: validate the root-owned copy.
-  /usr/bin/python3 -m json.tool "$MS_TMP" >/dev/null || { echo "settings are not valid JSON" >&2; exit 1; }
-  /usr/bin/python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d,dict) and "hooks" in d else 1)' "$MS_TMP" \
+  /usr/bin/python3 -I -m json.tool "$MS_TMP" >/dev/null || { echo "settings are not valid JSON" >&2; exit 1; }
+  /usr/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d,dict) and "hooks" in d else 1)' "$MS_TMP" \
     || { echo "settings must be a JSON object with \"hooks\"" >&2; exit 1; }
   mv -f "$MS_TMP" "$MS_DIR/managed-settings.json"
 elif [ -e "$MS_DIR/managed-settings.json" ]; then
@@ -64,15 +66,9 @@ fi
 sudo -u "$SUDO_USER" /bin/mkdir -p "$AGENTS"
 sudo -u "$SUDO_USER" /usr/bin/install -m 0644 packaging/com.govaios.guard.plist "$PLIST"
 
-# Hand back root-owned data-home files only (not chown -R: it would touch the UF_APPEND audit log).
-# Refuse symlinked components; skip hard-linked files (a link could point at a system file).
-if [ -e "$DATA" ] || [ -L "$DATA" ]; then
-  for p in "$UHOME/Library" "$UHOME/Library/Application Support" "$DATA"; do
-    [ ! -L "$p" ] || { echo "refusing: $p is a symlink" >&2; exit 1; }
-  done
-  find -P "$DATA" -xdev -user 0 \( -type d -o \( -type f -links 1 \) \) -exec chown -h "$SUDO_USER" {} +
-  [ -z "$(find -P "$DATA" -xdev -user 0 -print -quit)" ] || { echo "root-owned files remain in $DATA; fix by hand" >&2; exit 1; }
-fi
+# Hand back root-owned data-home files via fds (no path races, no symlinks, hard links fail closed).
+# The helper is also the assertion: non-zero aborts the install.
+/usr/bin/python3 -I packaging/handback.py "$UHOME" "$SUDO_USER" || { echo "data home hand-back failed; fix by hand, then re-run" >&2; exit 1; }
 
 cat <<MSG
 Installed $APP${SETTINGS:+ and managed settings}.
