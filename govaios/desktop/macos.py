@@ -223,6 +223,8 @@ class MacDesktop:
         hit_pid = AXUIElementGetPid(hit, None) if err == 0 and hit is not None else (1, None)
         if hit_pid[0] != 0 or hit_pid[1] != pid:
             raise RuntimeError("input refused: click point is not in the target app")
+        if self._window is not None and not CFEqual(_attr(hit, "AXWindow"), self._window):
+            raise RuntimeError("input refused: click point is not in the verified window")
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.

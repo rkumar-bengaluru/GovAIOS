@@ -25,6 +25,7 @@ class AX:
 
     def __init__(self):
         self.focus_pid, self.window, self.hit_pid = CHROME, "win1", CHROME
+        self.hit_window = "win1"
         self.focus_err = self.hit_err = 0
 
     def copy_attr(self, el, name, _):
@@ -32,6 +33,8 @@ class AX:
             return self.focus_err, "focused_app"
         if (el, name) == ("focused_app", "AXFocusedWindow"):
             return 0, self.window
+        if (el, name) == ("hit", "AXWindow"):
+            return 0, self.hit_window
         return -25212, None
 
     def get_pid(self, el, _):
@@ -187,3 +190,13 @@ def test_click_rechecks_before_button_down(env, monkeypatch):
     with pytest.raises(RuntimeError, match="click point"):
         env.d.click(Node("link", "SECRET"))
     assert [ev[1] for _, ev in env.posted] == [5]   # mouse moved only; no down/up
+
+
+def test_click_point_in_other_window_of_target_refuses(env):
+    env.d.pin_window(env.d.focused_window_id("chrome"))
+    env.ax.hit_window = "win2"   # e.g. another Chrome window overlapping the element
+    with pytest.raises(RuntimeError, match="verified window"):
+        env.d.click(Node("link", "SECRET"))
+    env.ax.hit_window = "win1"
+    env.d.click(Node("link", "SECRET"))
+    assert len(env.posted) == 3

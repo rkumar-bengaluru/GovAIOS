@@ -271,3 +271,14 @@ def test_flow_parsed_from_hashed_bytes(tmp_path, monkeypatch):
     monkeypatch.setattr(type(f), "read_text", lambda self, *a, **k: "workflow: {}" if self == f else real(self, *a, **k))
     r = Runner(f, FakeDesktop([]), tmp_path)   # a second read of the flow would see the swapped text
     assert r.flow["id"] == "himalayas_job_vetting"
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/b", "Upper", ""])
+def test_invalid_flow_id_refused(tmp_path, bad):
+    src = tmp_path / "src"
+    shutil.copytree(REPO / "flows", src / "flows")
+    shutil.copytree(REPO / "pages", src / "pages")
+    f = src / "flows" / "himalayas_job_vetting.yaml"
+    f.write_text(f.read_text().replace("id: himalayas_job_vetting", f"id: '{bad}'", 1))
+    with pytest.raises(Stop, match="invalid flow id"):
+        Runner(f, FakeDesktop([]), tmp_path)

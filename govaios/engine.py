@@ -90,6 +90,8 @@ class Runner:
         except KeyError as e:
             raise Stop(f"unknown page: {e.args[0]}") from None
         self.flow = yaml.safe_load(raw[self.flow_path])["workflow"]
+        if not re.fullmatch(r"[a-z0-9_]+", str(self.flow.get("id"))):   # it becomes part of a report filename
+            raise Stop("invalid flow id")
         self.d = desktop
         self.launched = False
         self.report_path = None
