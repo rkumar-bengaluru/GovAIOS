@@ -1,10 +1,12 @@
 """MacDesktop input guards with every pyobjc call mocked: no real input, focus, AX or app launch."""
+import subprocess
 import types
 
 import pytest
 
 from govaios.desktop import Node
 from govaios.desktop import macos
+from govaios.runstate import Stop
 
 CHROME, OTHER = 100, 200
 
@@ -164,16 +166,55 @@ def test_errors_carry_no_page_content(env, monkeypatch):
     assert "SECRET" not in str(e.value)
 
 
-def test_launch_hands_profile_to_running_chrome(env):
+CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+class Proc:
+    def __init__(self, code=0, hang=False):
+        self.code, self.hang, self.killed, self.reaped = code, hang, False, False
+
+    def wait(self, timeout=None):
+        if self.hang and not self.killed:
+            raise subprocess.TimeoutExpired("chrome", timeout)
+        self.reaped = self.killed
+        return self.code
+
+    def kill(self):
+        self.killed = True
+
+
+def _handoff(env, monkeypatch, proc):
+    argv = []
+    monkeypatch.setattr(macos.subprocess, "Popen", lambda a, **k: argv.append(a) or proc)
+    monkeypatch.setattr(macos.subprocess, "TimeoutExpired", subprocess.TimeoutExpired, raising=False)
+    return argv
+
+
+def test_launch_hands_profile_to_running_chrome(env, monkeypatch):
+    argv = _handoff(env, monkeypatch, Proc(0))
     env.d.launch_application("chrome", "Profile 2")
-    assert env.calls[0][0] == "popen" and env.calls[0][1][-1] == "--profile-directory=Profile 2"
+    assert argv == [[CHROME_BIN, "--profile-directory=Profile 2"]] and env.app.activated
 
 
-def test_launch_starts_chrome_via_open_when_not_running(env):
+def test_launch_handoff_timeout_kills_and_stops(env, monkeypatch):
+    proc = Proc(hang=True)
+    _handoff(env, monkeypatch, proc)
+    with pytest.raises(Stop, match="^chrome handoff failed$"):
+        env.d.launch_application("chrome", "Profile 2")
+    assert proc.killed and proc.reaped
+
+
+def test_launch_handoff_nonzero_exit_stops(env, monkeypatch):
+    _handoff(env, monkeypatch, Proc(1))
+    with pytest.raises(Stop, match="^chrome handoff failed$"):
+        env.d.launch_application("chrome", "Profile 2")
+
+
+def test_launch_profile_refuses_when_chrome_not_running(env):
     env.d._app = lambda name: None
-    env.d.activate = lambda app: None
-    env.d.launch_application("chrome", "Profile 2")
-    assert env.calls == [("run", ["open", "-a", "Google Chrome", "--args", "--profile-directory=Profile 2"])]
+    with pytest.raises(Stop, match="^start Chrome, then run the flow again$"):
+        env.d.launch_application("chrome", "Profile 2")
+    assert env.calls == []
 
 
 def test_permission_error_names_the_app(monkeypatch):

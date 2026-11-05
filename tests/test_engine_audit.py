@@ -360,6 +360,17 @@ def test_lock_mid_run_stops(tmp_path, monkeypatch):
     assert [x["action"] for x in e if x["kind"] == "action"] == ["launch_application"]
 
 
+class StopOnLaunch(FakeDesktop):
+    def launch_application(self, app, profile=None):
+        raise Stop("start Chrome, then run the flow again")
+
+
+def test_stop_from_launch_is_audited_with_reason(tmp_path):
+    _, e, err = run(tmp_path, [True] * 10, StopOnLaunch)
+    assert isinstance(err, Stop)
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "start Chrome, then run the flow again"
+
+
 class TermOnClick(FakeDesktop):
     def click(self, node):
         os.kill(os.getpid(), signal.SIGTERM)   # the guard's emergency stop, aimed at this run

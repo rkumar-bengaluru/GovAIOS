@@ -13,6 +13,7 @@ from CoreFoundation import CFEqual
 
 from . import Node, ROLES, native_to_neutral
 from .. import auth
+from ..runstate import Stop
 
 BUNDLES = {"chrome": ("com.google.Chrome", "Google Chrome")}
 # Fixed human pace (spec 5.8): reliability and fair site load, never bot-detection evasion (no jitter).
@@ -92,18 +93,21 @@ class MacDesktop:
         return running[0] if running else None
 
     def launch_application(self, app, profile_directory=None):
-        """With a profile, Chrome opens (or focuses) a window in that profile even if already running."""
-        if profile_directory and self._app(app):
-            # `open -a X --args` drops the args when X is already running; the binary hands
-            # them to the running instance, which opens (or focuses) that profile's window.
-            # Only when running: a binary we start would make gov-aios Chrome's responsible process.
+        """With a profile, Chrome must already be running; its own binary hands the profile to it (row 23)."""
+        if profile_directory and not self._app(app):
+            raise Stop("start Chrome, then run the flow again")   # never launch: a child would inherit our sandbox and TCC identity
+        if profile_directory:
             exe = f"/Applications/{BUNDLES[app][1]}.app/Contents/MacOS/{BUNDLES[app][1]}"
-            subprocess.Popen([exe, f"--profile-directory={profile_directory}"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            time.sleep(3)
-        elif profile_directory:
-            subprocess.run(["open", "-a", BUNDLES[app][1], "--args", f"--profile-directory={profile_directory}"], check=True)
-            time.sleep(3)
+            proc = subprocess.Popen([exe, f"--profile-directory={profile_directory}"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                code = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:   # it became a browser of its own: not a handoff
+                proc.kill()
+                proc.wait()
+                raise Stop("chrome handoff failed") from None
+            if code != 0:
+                raise Stop("chrome handoff failed")
         elif not self._app(app):
             subprocess.run(["open", "-a", BUNDLES[app][1]], check=True)
             time.sleep(3)
