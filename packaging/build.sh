@@ -9,6 +9,8 @@ PLIST="${GOVAIOS_ENTITLEMENTS:-packaging/entitlements.plist}"
 keys=$(plutil -convert json -o - "$PLIST" | python3 -c 'import json,sys; print(" ".join(sorted(json.load(sys.stdin))))')
 [ "$keys" = "com.apple.security.cs.disable-library-validation" ] || { echo "ERROR: unexpected entitlements: $keys" >&2; exit 1; }
 
+# Any failure from here on (build, signing, entitlement check) leaves no app behind to run by mistake.
+trap 'rm -rf dist/gov-aios.app' ERR
 .venv/bin/pyinstaller --clean --noconfirm packaging/gov-aios.spec
 ent=()
 case "$SIGN_ID" in
