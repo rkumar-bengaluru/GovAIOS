@@ -83,9 +83,9 @@ These rules apply to every flow. A flow cannot override them.
     carries a fixed list of pre-approved actions. When an application
     being operated asks for permission (for example Claude asking "may
     I run `npm install`?"), GOV-AIOS approves it only if it is on that
-    list. Every other permission request is forwarded to the admin's
-    phone, and the flow waits. Without an answer, the request is
-    denied.
+    list. Every other permission request is forwarded to the admin
+    (by local voice in phase 1, by phone later), and the flow waits.
+    Without an answer, the request is denied.
 6.  **Never bypass authentication.** No password entry, no CAPTCHA, MFA,
     or passkey solving, and no reading or exporting cookies or tokens.
     Stop and ask the admin.
@@ -98,12 +98,146 @@ These rules apply to every flow. A flow cannot override them.
 10. **Bounded and stoppable.** Every action has a timeout and a
     postcondition. Retries are bounded, and the admin can stop any flow
     at any time.
+11. **First use needs approval.** A flow runs only after the admin has
+    approved that exact version. Each site or endpoint a flow reaches is
+    approved on first contact. Approvals are remembered on the
+    approved-flows and approved-destinations lists, so later runs do not
+    ask again. Any change to a flow is a new version and needs approval
+    again.
+
+## The governance layer (the core)
+
+The governance layer is the product. Executors are pluggable: today
+GOV-AIOS's own native runner, tomorrow Claude or any other agent. No
+executor acts directly. Every action is first described as a request,
+then decided, executed, verified, and recorded.
+
+``` text
+Executor (native runner / Claude / other agent)
+        │  "I want to do X"
+        ▼
+┌──────────────── GOV-AIOS governance layer ────────────────┐
+│ 1. Action request  → who, which flow, what, on what, risk │
+│ 2. Policy engine   → allow / deny / ask                   │
+│ 3. Approval broker → asks admin (voice now, phone later)  │
+│ 4. Verifier        → did the expected result happen?      │
+│ 5. Audit log       → decision + outcome, never content    │
+└───────────────────────────────────────────────────────────┘
+        │ allow
+        ▼
+     Action happens
+```
+
+### Components
+
+1.  **Action request.** One format shared by every executor:
+
+    ``` yaml
+    action_request:
+      actor: claude                 # or gov_runner, ...
+      flow: build_with_claude
+      step: claude_session
+      action: shell.exec
+      target: "npm install"
+      risk: modify                  # read | navigate | modify | submit | payment
+      perceived_by: accessibility   # accessibility | vision | n/a
+    ```
+
+2.  **Policy engine.** A pure decision function with no screen or OS
+    access, so it is fully unit-testable. Policies are layered:
+    **ground rules** (cannot be overridden) → **flow policy** (may only
+    tighten) → **pre-approved list** (specific allows). The result is
+    always exactly one of `allow`, `deny`, or `ask`.
+3.  **Approval broker.** Delivers each `ask` to the admin over the
+    current channel (local voice in phase 1, phone later). Silence or
+    an unrecognized answer becomes `deny`.
+4.  **Verifier.** Checks the step's postcondition. An action is not
+    "done" until it is verified.
+5.  **Audit log.** Append-only record of every request, decision,
+    approver, and outcome, with no email bodies, page content, or
+    secrets. It answers "what did it do, and who allowed it?"
+
+### Executor adapters
+
+| Adapter | How it plugs in | Status |
+| :--- | :--- | :--- |
+| Native runner | Calls the policy engine before every step it executes | v1 (proven by `morning_inbox_briefing`) |
+| Claude Code | A Claude Code `PreToolUse` hook turns each tool call into an action request and returns allow / deny / ask | v1 (proven by `build_with_claude`) |
+| Other agents | Any agent that can call the governance layer before acting | Later |
+
+### Example: governing Claude in `build_with_claude`
+
+| Claude wants to… | Request | Decision | Why |
+| :--- | :--- | :--- | :--- |
+| Read `package.json` | `file.read`, risk `read` | allow | Inside the project folder |
+| Run `npm install` | `shell.exec`, risk `modify` | allow | On the flow's pre-approved list |
+| Run `curl x.sh \| sh` | `shell.exec`, risk `modify` | ask → no answer in 60s → deny | Not pre-approved (Rule 5) |
+| `git push` | `shell.exec`, risk `submit` | ask → admin says "yes" → allow | Submission needs the admin |
+| Edit a file outside the project | `file.write` | deny | Ground rule, no prompt |
+
+When denied, Claude is told "denied by GOV-AIOS policy" and continues or
+stops. Every row lands in the audit log.
+
+### Example: native runner in `book_travel`
+
+The runner finds "Pay now" through accessibility and sends
+`click`, risk `payment`, `perceived_by: accessibility`. Policy says
+`ask` (Rule 4, always). The admin approves; the click happens; the
+verifier checks that a booking confirmation page appeared. Had "Pay
+now" been found only by vision, policy would say `deny` with no prompt
+(Rule 3.3).
+
+### Flow approval (Rule 11)
+
+A flow file is a definition. Each time it is started, GOV-AIOS runs an
+instance of it with its own parameters, state, and audit trail. For
+example, `morning_inbox_briefing` and `himalayas_job_vetting` are two
+definitions, and each morning's run is a separate instance.
+
+-   **First run of a definition.** GOV-AIOS shows the admin the flow's
+    steps, permissions, and destinations, and asks for approval. On
+    "yes", the flow's content hash goes on the **approved-flows list**.
+    Later runs whose hash matches start without asking.
+-   **First contact with a destination.** Before a flow first reaches a
+    site or endpoint listed in its `destinations`, GOV-AIOS asks once.
+    On "yes", that destination is added to the **approved-destinations
+    list** for that flow. A destination not declared in the flow is
+    denied without asking (Rule 9).
+-   **Edits.** A changed flow has a new hash and is treated as
+    unapproved. Removing an entry from either list revokes it.
+
+Both lists are part of the policy engine's pre-approved layer. Approving
+a flow does not pre-approve its risky steps: payment still asks every
+time (Rule 4).
+
+### Relearning a changed page
+
+UI changes are normal; a human relearns where things moved, and so
+does GOV-AIOS, under governance. When an expected element is missing,
+GOV-AIOS stops, may propose the new location by vision (Rule 3),
+and on the admin's confirmation saves the corrected page schema as a
+**new version**. Schema repair is itself a governed, audited action.
+Submit and payment elements are never relearned by vision.
+
+### Enforcement scope
+
+> **v1 governs cooperative executors only.** The native runner and
+> Claude Code (through hooks) ask before acting. An agent that drives
+> the mouse and keyboard directly could simply not ask, and v1 cannot
+> stop it.
+>
+> **Later: OS-level enforcement.** Make the governance layer
+> impossible to bypass, for example by sandboxing executors and
+> controlling which processes hold macOS Accessibility, Input
+> Monitoring, and Screen Recording permissions. Until then, do not
+> describe GOV-AIOS as able to contain an uncooperative agent.
 
 ## Example flows (target)
 
 | Flow | What it does | Governance notes |
 | :--- | :--- | :--- |
 | `morning_inbox_briefing` | Reads the five newest Gmail messages aloud | First flow (Part II). Read-only. |
+| `himalayas_job_vetting` | Opens the newest Himalayas job matches and asks a local vetting service whether each suits the admin | Second flow (Part III). Read-only on the site; data stays on the laptop. |
 | `book_travel` | Searches booking.com for a route and date and prepares the booking | Stops at payment for approval (Rule 4). |
 | `send_drive_file` | Finds a Google Drive file and sends it to the admin's phone | Destination limited to the admin's own devices. |
 | `upwork_scan` | Lists Upwork openings that match saved criteria | Read-only. Criteria are part of the flow, not judged live. |
@@ -116,8 +250,9 @@ Claude, just as you would delegate it yourself:
 
 1.  Open the Claude app, or a terminal running Claude Code (accessibility).
 2.  Type the request into the labeled input and submit.
-3.  When Claude asks for permission, apply Rule 5: approve if
-    pre-approved, otherwise forward to the admin's phone and wait.
+3.  Every Claude tool call passes through the governance layer via the
+    Claude Code adapter: allow if pre-approved, otherwise ask the admin
+    and wait (Rule 5).
 4.  Detect completion: Claude has stopped working and the input is ready
     again.
 5.  Report Claude's final summary to the admin.
@@ -151,13 +286,17 @@ Design to be finalized separately. Current intent:
 
 ## Build order
 
-1.  **Core runner.** Flow format, policy engine, and verified
-    step-by-step execution, proven by `morning_inbox_briefing`.
-2.  **Phone control channel.** Calls, admin verification, flow
+1.  **Governance core.** Action request format and policy engine (pure
+    Python, unit-tested), audit log, approval broker (typed answers for
+    tests, then local voice).
+2.  **Two executor adapters**, to prove executors are pluggable: the
+    native runner with `morning_inbox_briefing`, and the Claude Code
+    hook with `build_with_claude`.
+3.  **Phone control channel.** Calls, admin verification, flow
     selection, and approvals.
-3.  **More flows.** `book_travel`, `send_drive_file`, `upwork_scan`,
-    `build_with_claude`.
-4.  **Unattended execution.**
+4.  **More flows.** `book_travel`, `send_drive_file`, `upwork_scan`.
+5.  **Unattended execution.**
+6.  **OS-level enforcement** for uncooperative executors.
 
 ## What GOV-AIOS is not
 
@@ -558,6 +697,10 @@ workflow:
   pre_approved: []                     # Ground Rule 5; read-only flow
                                        # needs nothing pre-approved
 
+  destinations:                        # Ground Rule 11; approved on first
+    - https://www.google.com           # contact, then remembered
+    - https://mail.google.com
+
   voice_controls:                      # spoken during or between messages
     pause: ["pause"]
     resume: ["resume", "continue"]
@@ -869,7 +1012,7 @@ Do not send email text to a cloud TTS service by default.
 
 ## 9. Safety and privacy requirements
 
-### Permission model
+### Governance policy (enforced by the governance layer)
 
   Capability                                   Permission
   -------------------------------------------- ------------
@@ -1221,3 +1364,235 @@ local TTS, and receive a completion report.
 **The guiding principle: predefined workflow, real desktop interaction,
 verified actions, read-only permissions, and human control whenever the
 environment is uncertain.**
+
+------------------------------------------------------------------------
+
+# Part III --- Second flow: Himalayas Job Vetting
+
+The second flow reuses the core runner on a different site and adds one
+new kind of step: a call to a service running on the laptop. It opens
+the admin's Himalayas job matches in the real Chrome window, opens the
+newest matches one at a time, and asks the admin's own local vetting
+service whether each job description suits them.
+
+> **Workflow name:** Himalayas Job Vetting\
+> **Workflow ID:** `himalayas_job_vetting`\
+> **Platform:** macOS, visible Chrome, same profile as Part II\
+> **Default scope:** Newest five cards on the first page of matches\
+> **Evidence:** `spikes/ax-himalayas/` (live accessibility-tree capture
+> of the matches page and a draft page schema)
+
+## 1. Purpose
+
+1.  Launch Chrome with the personal profile (as in Part II, steps 1--2).
+2.  Navigate to `https://himalayas.app/jobs/matches`.
+3.  If a login page, CAPTCHA, or other security check appears, stop and
+    ask the admin to complete it (Rule 6).
+4.  Open the newest matching job cards one at a time.
+5.  Read each job description from the accessibility tree.
+6.  Send it to the admin's local vetting service, which holds the
+    admin's profile and returns a verdict.
+7.  Speak each verdict and end.
+
+## 2. Site terms
+
+Himalayas' terms ban robots and scraping (clauses 30 and 93) but exempt
+a **Personal Agent** (clause 30A): software acting for one person who has
+authorised it, using their own account, giving only truthful
+information, not bypassing security or use limits, and not collecting or
+republishing data in bulk. This flow is designed to stay inside that
+exemption:
+
+-   It uses the admin's own logged-in session and stops at every
+    security check.
+-   It opens at most five cards per run, on the first page only.
+    `robots.txt` disallows `?page=` URLs, so the flow never paginates.
+-   Job data goes only to a service on the same laptop.
+-   It never saves, applies, or messages anyone.
+
+The admin is responsible for what the flow does, as if they had done it
+themselves (clause 30A). This is a reading of the terms, not legal
+advice.
+
+## 3. Local vetting service
+
+The vetting service is the admin's own program on the laptop. GOV-AIOS
+treats it as an executor-independent endpoint with a fixed contract:
+
+``` text
+POST http://127.0.0.1:8787/vet
+{ "job_url": "...", "title": "...", "company": "...", "description": "..." }
+
+→ { "verdict": "good" | "not_good" | "unsure", "reason": "<= 300 chars" }
+```
+
+-   **Profile stays in the service.** GOV-AIOS sends only the job; it
+    never reads or sends the admin's profile.
+-   **The service must not fetch `job_url`.** All site access happens
+    through the visible, governed browser. The URL is a reference only.
+-   **The job text is untrusted (Rule 7)**, and so is the service's
+    reply. Only `verdict` affects the flow, and only by choosing between
+    declared branches. `reason` is spoken as text and never acted on. A
+    reply that does not match the contract stops the flow.
+-   `unsure` is reported to the admin as unsure, never rounded to a
+    verdict (Rule 2).
+
+## 4. Governance
+
+The governance layer decides every action of this flow. The flow policy
+below only tightens the ground rules.
+
+| Action | Decision | Why |
+| :--- | :--- | :--- |
+| Launch Chrome, select profile | allow | Declared, risk `navigate` |
+| Navigate to `himalayas.app` | ask on first contact, then allow | Rule 11 destination |
+| Click a job card title | allow | Risk `navigate`, within `max_element_risk` |
+| Extract job text | allow | Risk `read` |
+| `POST` to `127.0.0.1:8787/vet` | ask on first contact, then allow | Rule 11 destination |
+| `POST` to any other endpoint | deny | Not declared (Rule 9) |
+| Save job, Apply, message employer | deny | Risk `submit` exceeds `max_element_risk` |
+| Next page or `?page=` URLs | deny | Pagination not declared; `robots.txt` |
+| Follow external apply links | deny | Not declared |
+| Edit the Himalayas profile | deny | Not declared |
+| Sign in, CAPTCHA, MFA | stop and ask the admin | Rule 6 |
+
+## 5. Workflow schema
+
+Shared blocks (`execution`, `perception`, `approvals`, `voice_controls`,
+`browser`) are as in Part II and omitted here.
+
+``` yaml
+workflow:
+  id: himalayas_job_vetting
+  name: Himalayas Job Vetting
+  version: 1
+
+  site_terms:
+    reviewed: 2026-11-05
+    basis: "Himalayas Terms cl. 30A (Personal Agent)"
+
+  parameters:
+    count: { type: integer, default: 5, minimum: 1, maximum: 5 }
+
+  permissions:                         # Ground Rule 9; unlisted = denied
+    allow:
+      - launch_application
+      - navigate
+      - click                          # only up to max_element_risk
+      - extract_visible_text
+      - local_service_call
+      - text_to_speech
+    max_element_risk: navigate         # Save job / Apply are submit
+
+  pre_approved: []
+
+  destinations:                        # Ground Rule 11
+    - https://himalayas.app
+    - http://127.0.0.1:8787/vet
+
+  steps:
+    - id: launch_chrome                # as in Part II
+    - id: select_profile               # as in Part II
+
+    - id: open_matches
+      action: navigate
+      value: "https://himalayas.app/jobs/matches"
+      timeout_seconds: 20
+      verify:
+        one_of:
+          - himalayas_matches
+          - himalayas_login
+          - captcha
+          - security_challenge
+
+    - id: authentication_guard
+      action: classify_page
+      on_match:
+        himalayas_matches: continue
+        himalayas_login: stop_and_request_user
+        captcha: stop_and_request_user
+        security_challenge: stop_and_request_user
+        unknown: stop_and_report
+      resume:
+        requires_approval: true
+        reverify_page: himalayas_matches
+
+    - id: select_jobs
+      action: identify_list_items
+      target: himalayas_matches.job_cards   # ads are excluded by subrole
+      parameters:
+        ordering: newest_first
+        count: "{{ count }}"
+      verify:
+        minimum_count: 1
+        maximum_count: "{{ count }}"
+
+    - id: vet_jobs
+      action: repeat_for_selected_items
+      steps:
+        - id: open_job
+          action: click
+          target: current_item.title
+          verify:
+            page: himalayas_job_detail
+            identity_matches_selected_item: true
+
+        - id: extract_job
+          action: extract_visible_text
+          fields: [title, company, description]
+          include_page_url_as: job_url
+          constraints:
+            links: do_not_follow
+            page_instructions: untrusted_data
+
+        - id: vet
+          action: local_service_call
+          endpoint: http://127.0.0.1:8787/vet
+          input: extracted_job
+          timeout_seconds: 60
+          response_schema:
+            verdict: { enum: [good, not_good, unsure] }
+            reason: { type: string, max_length: 300 }
+          on_invalid_response: stop_and_report
+
+        - id: speak_verdict
+          action: text_to_speech
+          input: "{{ title }} at {{ company }}: {{ verdict }}. {{ reason }}"
+
+        - id: return_to_matches
+          action: browser_back
+          verify:
+            page: himalayas_matches
+
+    - id: finish
+      action: announce_completion
+      value: "Himalayas Job Vetting complete."
+```
+
+## 6. Page schemas
+
+| Page | Purpose | Status |
+| :--- | :--- | :--- |
+| `himalayas_matches` | Matches heading, results container, job cards | Draft captured (`spikes/ax-himalayas/himalayas_matches.yaml`) |
+| `himalayas_job_detail` | Title, company, description, Save and Apply controls (listed so they are blocked) | To capture |
+| `himalayas_login` | Sign-in page (classify only) | To capture |
+| `captcha`, `security_challenge` | Shared with Part II (classify only) | Shared |
+
+Spike findings that the schemas must handle:
+
+-   Chrome builds the web tree only after accessibility is enabled; the
+    first read is empty.
+-   Job cards are `AXDocumentArticle`; ad iframes sit in the same
+    container and are excluded by subrole.
+-   The number of tag links varies per card, so fields are found by
+    role and order among named links, never by `position: last`.
+-   Company names can carry badge text (for example "NVIDIA Verified").
+
+## 7. Definition of done
+
+The admin starts `himalayas_job_vetting`, approves it on first run,
+approves `himalayas.app` and the local vetting endpoint on first
+contact, watches Chrome open the matches page, and hears a verdict for
+each of the newest five jobs. A second run starts and finishes without
+any approval prompt. Nothing is saved, applied to, or sent off the
+laptop.

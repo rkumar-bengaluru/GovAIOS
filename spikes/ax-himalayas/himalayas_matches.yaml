@@ -1,0 +1,56 @@
+# Captured from the live AX tree, Chrome (profile "Rupak"), 2026-11-05.
+page:
+  id: himalayas_matches
+  title: Himalayas Your matches
+  application: chrome
+
+  identification:
+    window_title_contains: "Your matches | Himalayas"
+    anchors:
+      - page_heading
+      - results
+      - matches_tab
+
+  elements:
+    page_heading:
+      role: AXHeading
+      name: "Your matches"
+      risk: read
+
+    matches_tab:
+      role: AXLink
+      name: "Matches"
+      parent: results
+      risk: navigate
+
+    results:
+      role: AXGroup
+      dom_id: "job-search-results"      # AXDOMIdentifier; the only stable container id
+      risk: read
+
+    job_cards:
+      role: AXGroup
+      subrole: AXDocumentArticle        # ad iframes are siblings, not articles: excluded by subrole
+      parent: results
+      repeated: true
+      ordering: newest_first            # observed "45 mins ago" .. "7 days ago"
+      risk: read
+      fields:
+        title:   { role: AXLink, index_excluding: ["View job"], position: 1 }
+        company: { role: AXLink, index_excluding: ["View job"], position: 2, strip_suffix: " Verified" }
+        posted:  { role: AXGroup, subrole: AXTimeGroup }
+        # tag links (job type, category) vary 0-4 per card: do not address by position: last
+      actions:
+        view_job:  { role: AXLink, name: "View job", risk: navigate }
+        save_job:  { role: AXButton, name: "Save job", risk: submit }   # changes account data
+
+    job_search:
+      role: AXComboBox
+      name: "Job title or skill search"
+      risk: read
+
+    next_page:
+      role: AXLink
+      name: "Next Next page"            # duplicated text in Chrome's computed name
+      parent_landmark: { subrole: AXLandmarkNavigation, name: "pagination" }
+      risk: navigate
