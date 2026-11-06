@@ -130,11 +130,11 @@ Anti-goals (a failure even if it works)
 ## 8. Open questions for the admin (before build)
 1. Channel: direct API call with key in Keychain, or Claude Code in no-tools mode (§5.4)?
 2. Other LLMs (Codex/OpenAI) as Studio writers: in scope for the first build, or Claude only?
-3. Typing and inputs (asked 2026-11-06, see §11.1): the Drive example needs a search box and a value given at run time. The engine has neither today.
+3. ~~Typing and inputs~~ **Decided 2026-11-06 (admin): "add typing with search boxes only".** See §11.1. Questions 1 and 2 stay open until the build (admin: "we will decide when we get there").
 
 ## 11. Calls made after the builder check (my calls, for the admin to check)
-1. **Typing and run-time inputs.** Pending the admin's answer (§8.3). Proposed:
-   - a new `type_text` action, allowed only into searchbox/textbox elements of `navigate` risk;
+1. **Typing and run-time inputs.** Decided by the admin: typing into search boxes only. So:
+   - a new `type_text` action, allowed only into elements whose role is searchbox (or a textbox inside a search landmark), at `navigate` risk; any other text field is refused;
    - flow `inputs:` with names and short descriptions, which the panel asks for when the app is run (e.g. "run drive finder: invoice 2026");
    - each input value audited as a digest, never as text.
 2. **Several captures per page.** A page may have more than one capture, e.g. logged-in and logged-out, or empty and populated. Studio asks for the extra states the plan names. Identification must tell apart every captured state that the flow treats differently, as `himalayas_logged_out` does today.

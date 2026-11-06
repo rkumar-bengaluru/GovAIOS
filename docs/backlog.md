@@ -7,8 +7,8 @@ Updated 2026-11-06 after control panel v2 (PR #10).
 
 - **Studio: new apps from a sentence.** Capture the real page, mask it, hand it to an LLM, check
   the draft, test-run it, approve it. Spec: `docs/superpowers/specs/2026-11-06-studio-capture-handover-design.md`.
-  Open before build: the Claude channel (API key in Keychain or Claude Code no-tools mode); other
-  LLMs as writers.
+  Decided: typing into search boxes only, with run-time inputs. Open until build: the Claude channel
+  (API key in Keychain or Claude Code no-tools mode); other LLMs as writers.
 - **My apps and Marketplace** panel areas. Each app drives its own setup; upgrades carry apps over.
   Mockup: `docs/superpowers/mockups/2026-11-06-apps-journey.html`.
 - **Govern OpenAI Codex** like Claude Code: Codex 0.162 has `PreToolUse` hooks and a managed `/etc/codex/requirements.toml`. Needs one live test (does a hook crash or timeout fail closed?). Spike: `docs/superpowers/spikes/2026-11-06-codex-governance.md`.
