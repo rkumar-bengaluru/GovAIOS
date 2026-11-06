@@ -75,7 +75,10 @@ def _posted_on(posted, captured_at):
         d = at.date() - timedelta(days=word == "yesterday")
     else:
         k = 1 if n in ("a", "an") else int(n)
-        d = (at - timedelta(**{unit + "s": k})).date()
+        try:
+            d = (at - timedelta(**{unit + "s": k})).date()
+        except OverflowError:   # absurd age from the page
+            return None
     if d > datetime.now(_IST).date():   # JobLens refuses a date after its today (Asia/Kolkata)
         return None
     return d.isoformat()

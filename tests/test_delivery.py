@@ -79,6 +79,7 @@ def test_payload_maps_fields():
     ("3 weeks ago", "2026-11-06T09:00:00", None),
     ("a month ago", "2026-11-06T09:00:00", None),
     ("Nov 3", "2026-11-06T09:00:00", None),
+    ("99999999999 days ago", "2026-11-06T09:00:00", None),
     (None, "2026-11-06T09:00:00", None),
     ("9 hours ago", None, None),
     ("9 hours ago", "garbage", None),
