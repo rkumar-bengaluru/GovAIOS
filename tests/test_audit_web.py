@@ -221,7 +221,7 @@ def test_missing_log_no_crash(tmp_path, ui):
     p.unlink()
     status, body, _ = req("/audit", cookie=sid)
     srv.shutdown(); srv.server_close()
-    assert status == 200 and "No runs yet" in body and "FAIL" in body
+    assert status == 200 and "No apps yet" in body and "FAIL" in body
 
 
 def _raw_server(tmp_path, ui, lines, approvals=None):
@@ -351,4 +351,68 @@ def test_delivery_entry_shows_its_fields(tmp_path, ui):
     for c in ("flow", "response_code", "listing_id", "file_hash"):
         assert f"<th>{c}</th>" in body
     assert "<td>202</td>" in body and "<td>4711</td>" in body and "<td>ab12</td>" in body and "<td>f1</td>" in body
+    srv.shutdown(); srv.server_close()
+
+
+def _app_server(tmp_path, ui, entries, flows=True):
+    home = tmp_path / "home"
+    log = AuditLog(home)
+    for kind, f in entries:
+        log.append(kind, **f)
+    fd = None
+    if flows:
+        fd = home / "apps" / "flows"
+        fd.mkdir(parents=True)
+        (home / "apps" / "pages").mkdir()
+        for i, n in (("alpha", "Alpha App"), ("beta", "Beta App")):
+            (fd / f"{i}.yaml").write_text(f"workflow:\n  id: {i}\n  name: {n}\n  app: {n}\n  steps: []\n")
+    srv = make_server(home, now=Clock(), flows_dir=fd)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    req, sid = _client(srv, ui)
+    return srv, lambda p: req(p, cookie=sid)
+
+
+RUNS = [("flow_start", {"flow": "alpha"}), ("request", {"action": "run_start", "channel": "totp_session"}),
+        ("delivery", {"flow": "alpha", "outcome": "delivered"}), ("delivery", {"flow": "alpha", "outcome": "delivered"}),
+        ("delivery", {"flow": "alpha", "outcome": "duplicate"}), ("flow_end", {"flow": "alpha", "outcome": "done"}),
+        ("flow_start", {"flow": "alpha"}), ("request", {"action": "run_start", "channel": "touch_id"}),
+        ("flow_end", {"flow": "alpha", "outcome": "failed"}),
+        ("flow_start", {"flow": "gone_app"}), ("flow_end", {"flow": "gone_app", "outcome": "done"})]
+
+
+def test_audit_lists_apps(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS)
+    body = get("/audit")[1]
+    assert body.index("Alpha App") < body.index("Beta App") < body.index("Removed apps") < body.index("gone_app")
+    assert "href='/audit/app/alpha'" in body and "<td>2</td>" in body and "failed" in body and "Terminal" in body
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_app_page_only_its_runs(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS)
+    s, body, _ = get("/audit/app/alpha")
+    assert s == 200 and "gone_app" not in body and "delivered 2, duplicate 1" in body
+    assert body.index("<td>failed") < body.index("<td>done") and "Panel" in body and "Terminal" in body
+    assert "href='/audit/run/" in body and "/audit/log" in body
+    assert get("/audit/app/gone_app")[0] == 200 and get("/audit/app/nosuch")[0] == 404
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_app_bad_id_404(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS)
+    for bad in ("../x", "A", "%2e%2e", "a" * 65):
+        assert get(f"/audit/app/{bad}")[0] == 404
+    srv.shutdown(); srv.server_close()
+
+
+def test_old_runs_started_by_dash(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, [("flow_start", {"flow": "alpha"}), ("flow_end", {"flow": "alpha", "outcome": "done"})])
+    assert "<td>—</td>" in get("/audit/app/alpha")[1]
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_without_flows_dir_state_dash(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS, flows=False)
+    body = get("/audit")[1]
+    assert "gone_app" in body and "Removed" not in body
     srv.shutdown(); srv.server_close()

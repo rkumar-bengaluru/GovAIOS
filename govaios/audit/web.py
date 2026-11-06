@@ -185,9 +185,32 @@ def _tone(line):
 
 
 def _started_by(run):
-    panel = any(e.get("kind") == "request" and e.get("action") == "run_start" and e.get("channel") == "totp_session"
-                for e in run)
-    return "Panel, session code" if panel else "Terminal, Touch ID"
+    ch = next((e.get("channel") for e in run if e.get("kind") == "request" and e.get("action") == "run_start"), None)
+    return {"totp_session": "Panel", "touch_id": "Terminal"}.get(ch, "\u2014")   # older runs carry no run_start
+
+
+def _outcome(r):
+    return r[-1].get("outcome") or r[-1].get("kind")
+
+
+def _apps_summary(runs, apps):
+    """One row per app: the folder's apps first (Approved/Draft), then apps seen only in the log (Removed)."""
+    out = [{"id": a.id, "name": a.name, "state": "Approved" if a.approved else "Draft", "runs": 0,
+            "last_time": None, "last_outcome": None, "last_started_by": "\u2014"} for a in apps]
+    by = {d["id"]: d for d in out}
+    for r in runs:   # log order, so the last one wins
+        f = r[0].get("flow")
+        if not isinstance(f, str):
+            continue
+        if f not in by:
+            by[f] = {"id": f, "name": f, "state": "Removed", "runs": 0}
+            out.append(by[f])
+        d = by[f]
+        d.update(runs=d["runs"] + 1, last_time=r[0].get("ts"), last_outcome=_outcome(r), last_started_by=_started_by(r))
+    return out
+
+
+APP_ID = re.compile(r"[a-z0-9_]{1,64}")
 
 
 def _say(text):
@@ -324,13 +347,37 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def index():
         runs, orphans = _runs(_entries(log))
         note = f"<p class=fail>{orphans} entries outside any run</p>" if orphans else ""
+        rows = {"Removed": [], "": []}
+        for d in _apps_summary(runs, apps()):
+            if not flows_dir and d["state"] == "Removed":
+                d["state"] = "\u2014"   # without an apps folder nothing can be called removed
+            link = f"<a href='/audit/app/{escape(d['id'])}'>{escape(d['name'])}</a>" if APP_ID.fullmatch(d["id"]) \
+                else escape(d["name"])
+            rows["Removed" if d["state"] == "Removed" else ""].append(
+                f"<tr><td>{link}</td>{_td(d['state'])}{_td(d['runs'])}{_td(d['last_time'])}"
+                f"{_td(d['last_outcome'])}{_td(d['last_started_by'])}</tr>")
+        head = "<tr><th>app</th><th>state</th><th>runs</th><th>last run</th><th>outcome</th><th>started by</th></tr>"
+        table = lambda rs: f"<table>{head}{''.join(rs)}</table>"
+        body = (f"<h1>Audit log</h1>{banner()}{note}<h2>Apps</h2>"
+                + (table(rows[""]) if rows[""] else "<p>No apps yet.</p>")
+                + (f"<h2>Removed apps</h2>{table(rows['Removed'])}" if rows["Removed"] else "")
+                + "<p><a href='/audit/log'>Full log</a></p>")
+        return _page(body, here="/audit")
+
+    def app_page(app_id):
+        runs = [r for r in _runs(_entries(log))[0] if r[0].get("flow") == app_id]
+        known = {a.id: a.name for a in apps()}
+        if not runs and app_id not in known:
+            return None
         rows = "".join(
-            f"<tr><td><a href='/audit/run/{int(r[0]['seq'])}'>{int(r[0]['seq'])}</a></td>{_td(r[0].get('flow'))}"
-            f"{_td(r[0].get('ts'))}{_td(sum(1 for e in r if e.get('kind') == 'action'))}"
-            f"{_td(r[-1].get('outcome') or r[-1].get('kind'))}{_td(_started_by(r))}</tr>" for r in runs)
-        table = (f"<table><tr><th>run</th><th>flow</th><th>time</th><th>steps</th><th>outcome</th><th>started by</th></tr>"
-                 f"{rows}</table>" if runs else "<p>No runs yet.</p>")
-        return _page(f"<h1>Runs</h1>{banner()}{note}{table}<p><a href='/audit/log'>Full log</a></p>", here="/audit")
+            f"<tr><td><a href='/audit/run/{int(r[0]['seq'])}'>{int(r[0]['seq'])}</a></td>{_td(r[0].get('ts'))}"
+            f"{_td(_outcome(r))}{_td(_started_by(r))}"
+            f"{_td('delivered %d, duplicate %d' % tuple(sum(1 for e in r if e.get('kind') == 'delivery' and e.get('outcome') == o) for o in ('delivered', 'duplicate')))}</tr>"
+            for r in reversed(runs))
+        table = (f"<table><tr><th>run</th><th>time</th><th>outcome</th><th>started by</th><th>delivery</th></tr>{rows}</table>"
+                 if runs else "<p>No runs yet.</p>")
+        return _page(f"<h1>{escape(known.get(app_id, app_id))}</h1>{banner()}{table}"
+                     f"<p><a href='/audit'>Apps</a> | <a href='/audit/log'>Full log</a></p>", here="/audit")
 
     def run(seq):
         for r in _runs(_entries(log))[0]:
@@ -338,7 +385,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 head = "".join(f"<th>{c}</th>" for c in COLS)
                 rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in COLS) + "</tr>" for e in r)
                 return _page(f"<h1>Run {int(seq)}</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                             f"<p><a href='/audit'>Runs</a></p>", here="/audit")
+                             f"<p><a href='/audit'>Apps</a></p>", here="/audit")
         return None
 
     def fulllog():
@@ -347,7 +394,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             "<tr>" + "".join(_td(e.get(c)) for c in ["seq", "ts", *COLS]) + "</tr>" if e is not None
             else f"<tr><td colspan={len(COLS) + 2} class=fail>unparsed: {escape(raw)}</td></tr>" for e, raw in _entries(log))
         return _page(f"<h1>Full log</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                     f"<p><a href='/audit'>Runs</a></p>", here="/audit")
+                     f"<p><a href='/audit'>Apps</a></p>", here="/audit")
 
     def hidden(csrf):
         return f"<input type=hidden name=csrf value='{escape(csrf)}'>"
@@ -656,10 +703,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 return self._signed_out(u.query)
             try:
                 m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
+                a = re.fullmatch(r"/audit/app/([^/]{1,200})", u.path)
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
-                        else run(int(m[1])) if m else None)
+                        else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed
                 return self._send(500, "internal error")
             self._send(200, page) if page else self._send(404)

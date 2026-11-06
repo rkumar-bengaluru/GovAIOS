@@ -303,7 +303,7 @@ def test_audit_pages_moved(panel):
     log.append("flow_end", flow="b", outcome="done")
     s, body, _ = P.get("/audit")
     assert s == 200 and "<th>started by</th>" in body and "OK 7 entries" in body
-    assert "Panel, session code" in body and "Terminal, Touch ID" in body
+    assert "Panel" in P.get("/audit/app/a")[1] and "Terminal" in P.get("/audit/app/b")[1]
     assert P.get("/audit/run/2")[0] == 200 and P.get("/audit/log")[0] == 200   # seq 1 is the sign-in
     assert P.get("/log")[0] == 404 and P.get("/run/1")[0] == 404
     talk = P.get("/")[1]
