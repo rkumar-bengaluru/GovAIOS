@@ -502,6 +502,7 @@ REPO = Path(__file__).resolve().parent.parent
 def test_real_flows_load(tmp_path):
     him = Runner(REPO / "flows" / "himalayas_job_vetting.yaml", None, tmp_path)
     assert him.deliver == {"to": "joblens", "from": "jd_selected", "source": "Himalayas"}
+    assert him.flow["app"] == "JobLens"
     morning = Runner(REPO / "flows" / "morning_inbox_briefing.yaml", None, tmp_path)
     assert morning.deliver is None
 

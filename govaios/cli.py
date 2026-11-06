@@ -7,7 +7,7 @@ import sys
 
 from . import identity, sandbox
 
-PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE, "deliver": sandbox.DELIVER_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
+PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE, "panel": sandbox.UI_PROFILE, "deliver": sandbox.DELIVER_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
 
 
 def _doctor(args) -> int:
@@ -68,7 +68,8 @@ def _run(args) -> int:
     register_run(home)   # before the STOPPED check, so a stop pressed in between still finds this run
     try:
         preflight(home, dev=not packaged)
-        runner = Runner(Path(args.flow).resolve(), get_desktop(), home, executor)
+        runner = Runner(Path(args.flow).resolve(), get_desktop(), home, executor,
+                        ticket=os.environ.get("GOVAIOS_RUN_TICKET") or None)
         runner.run()
         if runner.deliver:   # only after flow_end: the shim then starts `deliver`, which re-checks everything
             _write_shim_file("GOVAIOS_NEXT_FILE", "deliver")
@@ -117,6 +118,8 @@ def _verify_audit(args) -> int:
 
 
 def _audit_ui(args) -> int:
+    from pathlib import Path
+
     from .audit.web import make_server
     from .home import data_home
 
@@ -129,15 +132,29 @@ def _audit_ui(args) -> int:
     if not ok:
         print("not proven; audit UI not started", file=sys.stderr)
         return 1
-    server, code = make_server(home, args.port)
+    flows = Path(args.flows_dir).resolve() if args.flows_dir else None
+    server, code = make_server(home, args.port, flows_dir=flows, helper=args.helper)
     print(f"http://127.0.0.1:{server.server_address[1]}/login?c={code}", flush=True)
+    import signal
+
+    def _term(*_):
+        raise KeyboardInterrupt   # the shim's trap sends SIGTERM: end like Ctrl-C, so server_close runs
+    prev = signal.signal(signal.SIGTERM, _term)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)   # a 2nd SIGTERM must not cut the session end / run stop short
+        try:
+            server.server_close()
+        finally:
+            signal.signal(signal.SIGTERM, prev)
     return 0
+
+
+def _panel(args) -> int:
+    return _audit_ui(args)   # audit-ui is the older name
 
 
 def _dump(args) -> int:
@@ -317,9 +334,11 @@ def main(argv: list[str] | None = None) -> int:
     dl.add_argument("--dev", action="store_true")
     dl.set_defaults(fn=_deliver)
     sub.add_parser("verify-audit").set_defaults(fn=_verify_audit)
-    a = sub.add_parser("audit-ui")
-    a.add_argument("--port", type=int, default=0)
-    a.set_defaults(fn=_audit_ui)
+    for name, fn in (("audit-ui", _audit_ui), ("panel", _panel)):
+        a = sub.add_parser(name)
+        a.add_argument("flows_dir", nargs="?")
+        a.add_argument("--port", type=int, default=0)
+        a.set_defaults(fn=fn)
     x = sub.add_parser("dump")
     x.add_argument("--dev", action="store_true")
     x.set_defaults(fn=_dump)
@@ -334,8 +353,16 @@ def main(argv: list[str] | None = None) -> int:
     rp.set_defaults(fn=_review_powers)
     _write_shim_file("GOVAIOS_PID_FILE", os.getpid())  # lets the shim stop this run on Ctrl-C
     code = 1
+    helper = None
     try:
         args = p.parse_args(argv)
+        args.helper = None
+        if args.cmd in ("panel", "audit-ui") and args.flows_dir:   # before the sandbox and any thread: it runs the app
+            from pathlib import Path
+
+            from .home import data_home
+            from .panel import helper as launch_helper
+            args.helper = helper = launch_helper.start_helper(Path(args.flows_dir).resolve(), data_home())
         profile = PROFILES.get(args.cmd, sandbox.RUN_PROFILE)
         if profile:   # first, before anything can resolve a name: a resolver opened earlier outlives the sandbox
             try:
@@ -357,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException:
         _write_exit(1)
         raise
+    finally:
+        if helper is not None:
+            helper.close()   # ends the helper and any run it still has
     _write_exit(code)
     return code
 

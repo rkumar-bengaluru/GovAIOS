@@ -28,7 +28,7 @@ def test_run_dev_blocks_network(tmp_path):
         powers.fresh = lambda home, now=None: True
         def run(self):
             socket.create_connection(("127.0.0.1", 9))
-        engine.Runner.__init__ = lambda self, *a: None
+        engine.Runner.__init__ = lambda self, *a, **k: None
         engine.Runner.run = run
         import govaios.desktop as d
         d.get_desktop = lambda: object()
@@ -136,8 +136,9 @@ def _fake_run(monkeypatch, exc, packaged=False):
     class R:
         deliver = None   # a flow without a deliver block
 
-        def __init__(self, path, d, home, executor):
+        def __init__(self, path, d, home, executor, ticket=None):
             seen["executor"] = executor
+            seen["ticket"] = ticket
 
         def run(self):
             if exc:
@@ -225,7 +226,7 @@ def test_run_registers_and_unregisters(monkeypatch, govaios_home, exc):
     class R:
         deliver = None
 
-        def __init__(self, *a):
+        def __init__(self, *a, **k):
             pass
 
         def run(self):
@@ -302,7 +303,7 @@ def _subcommands():
     return re.search(r"\{([a-z,-]+)\}", buf.getvalue())[1].split(",")
 
 
-SUBCOMMANDS = ["doctor", "selftest", "run", "deliver", "verify-audit", "audit-ui", "dump", "guard", "resume", "hook",
+SUBCOMMANDS = ["doctor", "selftest", "run", "deliver", "verify-audit", "audit-ui", "panel", "dump", "guard", "resume", "hook",
                "claude-settings", "review-powers"]
 ARGV = {"selftest": ["selftest", "lines", "1"], "run": ["run", "x.yaml"], "deliver": ["deliver", "x.yaml"],
         "claude-settings": ["claude-settings", "--root", "/x"],
@@ -317,7 +318,7 @@ def test_sandbox_table_covers_every_subcommand():
 def test_sandbox_applied_per_subcommand(monkeypatch, sandbox_calls, cmd):
     """The Global Constraints table: doctor none, audit-ui UI_PROFILE, every other subcommand RUN_PROFILE."""
     from govaios import cli, sandbox
-    profile = {"doctor": None, "audit-ui": "UI_PROFILE", "deliver": "DELIVER_PROFILE"}.get(cmd, "RUN_PROFILE")
+    profile = {"doctor": None, "audit-ui": "UI_PROFILE", "panel": "UI_PROFILE", "deliver": "DELIVER_PROFILE"}.get(cmd, "RUN_PROFILE")
     order = []
     monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
     monkeypatch.setattr(cli, "_" + cmd.replace("-", "_"), lambda args: order.append(("handler", None)) or 0)
@@ -504,10 +505,101 @@ def test_audit_ui_deny_and_allow(monkeypatch, capsys, govaios_home):
     class Srv:
         server_address = ("127.0.0.1", 1234)
         serve_forever = server_close = lambda self: None
-    monkeypatch.setattr(web, "make_server", lambda home, port: (Srv(), "CODE"))
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None: (Srv(), "CODE"))
     monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
     assert main(["audit-ui"]) == 0
     assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+
+
+class FakeHelper:
+    last = None
+
+    def __init__(self):
+        self.closed = False
+        FakeHelper.last = self
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("argv", [["panel", "FLOWS"], ["audit-ui", "FLOWS"], ["audit-ui"], ["panel"]])
+def test_cli_panel_starts_helper_before_sandbox(monkeypatch, tmp_path, govaios_home, argv):
+    from govaios import cli, sandbox
+    argv = [str(tmp_path) if a == "FLOWS" else a for a in argv]
+    order = []
+    monkeypatch.setattr("govaios.panel.helper.start_helper",
+                        lambda flows, home: order.append(("helper", flows, home)) or FakeHelper())
+    monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
+    monkeypatch.setattr(cli, "_audit_ui", lambda args: order.append(("handler", args.helper)) or 0)
+    assert main(argv) == 0
+    if len(argv) == 2:
+        assert order == [("helper", tmp_path.resolve(), govaios_home), ("apply", sandbox.UI_PROFILE),
+                         ("handler", FakeHelper.last)] and FakeHelper.last.closed
+    else:
+        assert order == [("apply", sandbox.UI_PROFILE), ("handler", None)]
+
+
+def test_panel_deny_and_allow(monkeypatch, capsys, govaios_home, tmp_path):
+    from govaios import auth
+    from govaios.audit import web
+    monkeypatch.setattr(web, "make_server", lambda *a, **k: pytest.fail("must not bind"))
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
+    monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
+    assert main(["panel", str(tmp_path)]) == 1
+    assert FakeHelper.last.closed   # closed on the refused path too
+    seen = []
+
+    class Srv:
+        server_address = ("127.0.0.1", 1234)
+        serve_forever = server_close = lambda self: None
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None:
+                        seen.append((port, flows_dir, helper)) or (Srv(), "CODE"))
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
+    assert main(["panel", str(tmp_path), "--port", "7"]) == 0
+    assert seen == [(7, tmp_path.resolve(), FakeHelper.last)] and FakeHelper.last.closed
+    assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+
+
+def test_panel_sigterm_ends_session_and_stops_run(monkeypatch, govaios_home):
+    """The shim's trap sends SIGTERM: the panel must still end the session and stop its run, once."""
+    import json
+    import signal
+    from govaios import auth
+    from govaios.audit import web
+    from govaios.audit.log import AuditLog
+    real = web.make_server
+    stops, got = [], {}
+
+    class Run:
+        done, ticket = False, "0" * 64
+        stop = lambda self, why: stops.append(why)
+
+    def make(home, port, flows_dir=None, helper=None):
+        srv, code = real(home, 0, flows_dir=flows_dir, tick_s=None)
+        srv.panel.session.open()
+        srv.panel.run = Run()
+
+        def serve():
+            got["h"] = signal.getsignal(signal.SIGTERM)
+            got["h"](signal.SIGTERM, None)   # what the shim's kill -TERM delivers
+        srv.serve_forever = serve
+        return srv, code
+    monkeypatch.setattr(web, "make_server", make)
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    before = signal.getsignal(signal.SIGTERM)
+    assert main(["panel"]) == 0
+    assert got["h"] is not before and signal.getsignal(signal.SIGTERM) is before   # restored
+    ends = [json.loads(l) for l in AuditLog(govaios_home).path.read_text().splitlines()]
+    assert [e["reason"] for e in ends if e["kind"] == "session_end"] == ["server_stop"]
+    assert stops == ["session ended"]
+
+
+def test_audit_ui_alias_same_handler(monkeypatch):
+    from govaios import cli, sandbox
+    monkeypatch.setattr(sandbox, "apply", lambda p: None)
+    monkeypatch.setattr(cli, "_audit_ui", lambda args: 0 if args.flows_dir is None else 1)
+    assert main(["audit-ui"]) == 0 and main(["panel"]) == 0
 
 
 def test_doctor_reports_drift_and_mode(monkeypatch, tmp_path, capsys):
@@ -563,7 +655,7 @@ def test_run_writes_next_file_only_for_deliver_flows(monkeypatch, tmp_path, deli
     _fake_run(monkeypatch, None)
 
     class R:
-        def __init__(self, *a):
+        def __init__(self, *a, **k):
             self.deliver = deliver
 
         def run(self):
@@ -595,3 +687,17 @@ def test_deliver_refused_when_screen_locked(monkeypatch, capsys, govaios_home):
         main(["deliver", "x.yaml", "--dev"])
     assert e.value.code == 1 and "screen is locked" in capsys.readouterr().err
     assert not any((govaios_home / "runs").iterdir())
+
+
+def test_cli_run_passes_ticket_env(monkeypatch):
+    seen = _fake_run(monkeypatch, None)
+    monkeypatch.setenv("GOVAIOS_RUN_TICKET", "abc")
+    main(["run", "x.yaml", "--dev"])
+    assert seen["ticket"] == "abc"
+
+
+def test_cli_empty_ticket_env_is_no_ticket(monkeypatch):
+    seen = _fake_run(monkeypatch, None)
+    monkeypatch.setenv("GOVAIOS_RUN_TICKET", "")
+    main(["run", "x.yaml", "--dev"])
+    assert seen["ticket"] is None
