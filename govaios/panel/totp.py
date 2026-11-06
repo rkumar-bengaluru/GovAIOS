@@ -86,11 +86,20 @@ class Verifier:
         secret = SecretStore(self.path.parent).load()
         if secret is None:
             return "no_secret"
-        raw = _read_nofollow(self.path)
         try:
-            st = json.loads(raw) if raw else {}
-        except ValueError:
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
             st = {}
+        except OSError:  # symlink or unreadable: fail closed
+            return "locked_out"
+        else:
+            try:
+                with os.fdopen(fd, "rb") as f:
+                    st = json.loads(f.read())
+                if not isinstance(st, dict):
+                    raise ValueError
+            except (OSError, ValueError):
+                return "locked_out"
         now = self.clock()
         if now < st.get("locked_until", 0):
             return "locked_out"

@@ -48,8 +48,33 @@ def test_lockout_after_five(tmp_path):
     for _ in range(3):
         v.verify("000000")
     c["t"] += 30
-    assert v.verify(code_at(S, c["t"])) == "ok"  # success reset the count
-    assert Verifier(v.path, lambda: c["t"]).verify("000000") == "bad_code"  # state persisted
+    assert v.verify(code_at(S, c["t"])) == "ok"  # success resets the count
+    for _ in range(4):
+        assert v.verify("000000") == "bad_code"
+    assert v.verify("000000") == "bad_code"  # 5th failure sets the lock
+    assert v.verify(code_at(S, c["t"] + 30)) == "locked_out"
+    assert Verifier(v.path, lambda: c["t"]).verify("000000") == "locked_out"  # state persisted
+
+
+def test_bad_state_fails_closed(tmp_path):
+    SecretStore(tmp_path).save(S)
+    v = Verifier(tmp_path / "totp.state", lambda: 1_000_000_020)
+    v.path.write_text("{not json")
+    assert v.verify(code_at(S, 1_000_000_020)) == "locked_out"
+    v.path.unlink()
+    os.symlink(tmp_path / "elsewhere", v.path)
+    assert v.verify(code_at(S, 1_000_000_020)) == "locked_out"
+    v.path.unlink()
+    assert v.verify(code_at(S, 1_000_000_020)) == "ok"  # missing = fresh
+
+
+def test_delete_removes_state(tmp_path):
+    SecretStore(tmp_path).save(S)
+    v = Verifier(tmp_path / "totp.state", lambda: 1_000_000_020)
+    assert v.verify("000000") == "bad_code"
+    assert v.path.exists()
+    SecretStore(tmp_path).delete()
+    assert not v.path.exists()
 
 
 def test_no_secret(tmp_path):
