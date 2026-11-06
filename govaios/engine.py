@@ -82,11 +82,19 @@ def identify(page, root):
     return True
 
 
+def approval_question(f, deliver):
+    return (f"First run of flow '{f['id']}' (v{f['version']}). It may: {', '.join(f['permissions']['allow'])}; "
+            f"max element risk {f['permissions']['max_element_risk']}; destinations "
+            f"{', '.join(f['destinations'])}"
+            f"{'; delivers to: ' + TARGETS[deliver['to']]['label'] if deliver else ''}. Approve this flow?")
+
+
 # ---------- executor ----------
 
 class Runner:
-    def __init__(self, flow_path, desktop, home, executor="gov_runner_dev"):
+    def __init__(self, flow_path, desktop, home, executor="gov_runner_dev", ticket=None):
         self.home = Path(home)
+        self.ticket = ticket   # panel run: a one-use ticket stands in for the Touch ID start proof
         self.executor = executor   # "gov_runner" only when cli runs inside com.govaios.cli
         self.flow_path = Path(flow_path)
         self.pages_dir = self.flow_path.parent.parent / "pages"   # flows/ and pages/ are siblings
@@ -168,11 +176,7 @@ class Runner:
         if self.approvals.flow_ok(self.flow["id"], digest):
             return
         f = self.flow
-        q = (f"First run of flow '{f['id']}' (v{f['version']}). It may: {', '.join(f['permissions']['allow'])}; "
-             f"max element risk {f['permissions']['max_element_risk']}; destinations "
-             f"{', '.join(f['destinations'])}"
-             f"{'; delivers to: ' + TARGETS[self.deliver['to']]['label'] if self.deliver else ''}. Approve this flow?")
-        ok, how = self.ask(q, f"approve flow {f['id']}")
+        ok, how = self.ask(approval_question(f, self.deliver), f"approve flow {f['id']}")
         self._audit("flow_approval", flow_hash=digest, decision="allow" if ok else "deny",
                     approver="admin", channel="touch_id", auth=how)
         if not ok:
@@ -231,7 +235,16 @@ class Runner:
         self.step = None
         self._audit("flow_start", flow_hash=self.digest)
         try:
-            if self.approvals.flow_ok(self.flow["id"], self.digest):   # approved flow: Touch ID is the start proof
+            approved = self.approvals.flow_ok(self.flow["id"], self.digest)
+            if self.ticket is not None:   # panel run: never a prompt; the ticket is the start proof
+                from .panel import tickets
+                ok = approved and tickets.consume(self.home, self.ticket, self.flow["id"], self.digest)
+                if approved:
+                    self._audit("request", action="run_start", decision="allow" if ok else "deny",
+                                approver="admin", channel="totp_session", auth="ticket")
+                if not ok:
+                    raise Stop("run ticket not valid")
+            elif approved:   # approved flow: Touch ID is the start proof
                 ok, how = auth.prove(f"run {self.flow['id']}", self.home)
                 self._audit("request", action="run_start", decision="allow" if ok else "deny",
                             approver="admin", channel="touch_id", auth=how)

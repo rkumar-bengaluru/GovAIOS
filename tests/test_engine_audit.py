@@ -103,7 +103,7 @@ def fake_auth(monkeypatch):
     monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
 
 
-def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, deliver=None):
+def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, deliver=None, ticket=None, mint=False):
     src = tmp_path / "src"
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
@@ -117,9 +117,12 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, d
         t = t.replace("write_file, report]", "write_file, report, deliver]")
         t = t.replace("  steps:\n", f"  deliver: {deliver}\n  steps:\n", 1)
     f.write_text(t)
-    r = Runner(f, desk(answers), tmp_path)
+    r = Runner(f, desk(answers), tmp_path, ticket=ticket)
     if preapprove:
         r.approvals.approve_flow(r.flow["id"], r.digest)
+    if mint:   # a panel would mint this for the approved flow
+        from govaios.panel import tickets
+        r.ticket = tickets.create(tmp_path, r.flow["id"], r.digest)
     try:
         r.run()
         err = None
@@ -511,3 +514,50 @@ def test_flow_ends_by_closing_its_window(tmp_path):
     assert err is None and r.d.calls[-1] == "close_window"
     req = [x for x in e if x["kind"] == "request" and x.get("action") == "close_window"]
     assert req and req[0]["decision"] == "allow" and e[-1]["kind"] == "flow_end"
+
+
+def _no_prompts(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("no prompt for a panel run")
+    monkeypatch.setattr(engine.auth, "prove", boom)
+    monkeypatch.setattr(engine.auth, "approve", boom)
+
+
+def test_ticket_run_skips_touch_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no Touch ID")))
+    r, e, err = run(tmp_path, [True] * 10, preapprove=True, mint=True)
+    assert err is None
+    req = [x for x in e if x.get("action") == "run_start"]
+    assert len(req) == 1 and req[0]["decision"] == "allow" and req[0]["approver"] == "admin"
+    assert req[0]["channel"] == "totp_session" and req[0]["auth"] == "ticket"
+
+
+def test_bad_ticket_stops_without_prompt(tmp_path, monkeypatch):
+    _no_prompts(monkeypatch)
+    r, e, err = run(tmp_path, [], preapprove=True, ticket="0" * 64)
+    assert isinstance(err, Stop) and str(err) == "run ticket not valid" and "launch" not in r.d.calls
+
+
+def test_ticket_for_unapproved_flow_stops(tmp_path, monkeypatch):
+    _no_prompts(monkeypatch)
+    r, e, err = run(tmp_path, [], ticket="0" * 64)
+    assert isinstance(err, Stop) and str(err) == "run ticket not valid"
+
+
+def test_terminal_run_still_proves(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (calls.append(1), (True, "biometric"))[1])
+    run(tmp_path, [True] * 10, preapprove=True)
+    assert calls == [1]
+
+
+def test_approval_question_unchanged(tmp_path, monkeypatch):
+    qs = []
+    real = engine.auth.approve
+    monkeypatch.setattr(engine.auth, "approve", lambda q, *a, **k: (qs.append(q), real(q, *a, **k))[1])
+    r, _, _ = run(tmp_path, [True] * 10, deliver=GOOD_DELIVER)
+    f = r.flow
+    want = (f"First run of flow '{f['id']}' (v{f['version']}). It may: {', '.join(f['permissions']['allow'])}; "
+            f"max element risk {f['permissions']['max_element_risk']}; destinations "
+            f"{', '.join(f['destinations'])}; delivers to: joblens (local). Approve this flow?")
+    assert qs[0] == want == engine.approval_question(f, r.deliver)

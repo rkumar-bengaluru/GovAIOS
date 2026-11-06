@@ -28,7 +28,7 @@ def test_run_dev_blocks_network(tmp_path):
         powers.fresh = lambda home, now=None: True
         def run(self):
             socket.create_connection(("127.0.0.1", 9))
-        engine.Runner.__init__ = lambda self, *a: None
+        engine.Runner.__init__ = lambda self, *a, **k: None
         engine.Runner.run = run
         import govaios.desktop as d
         d.get_desktop = lambda: object()
@@ -136,8 +136,9 @@ def _fake_run(monkeypatch, exc, packaged=False):
     class R:
         deliver = None   # a flow without a deliver block
 
-        def __init__(self, path, d, home, executor):
+        def __init__(self, path, d, home, executor, ticket=None):
             seen["executor"] = executor
+            seen["ticket"] = ticket
 
         def run(self):
             if exc:
@@ -225,7 +226,7 @@ def test_run_registers_and_unregisters(monkeypatch, govaios_home, exc):
     class R:
         deliver = None
 
-        def __init__(self, *a):
+        def __init__(self, *a, **k):
             pass
 
         def run(self):
@@ -563,7 +564,7 @@ def test_run_writes_next_file_only_for_deliver_flows(monkeypatch, tmp_path, deli
     _fake_run(monkeypatch, None)
 
     class R:
-        def __init__(self, *a):
+        def __init__(self, *a, **k):
             self.deliver = deliver
 
         def run(self):
@@ -595,3 +596,10 @@ def test_deliver_refused_when_screen_locked(monkeypatch, capsys, govaios_home):
         main(["deliver", "x.yaml", "--dev"])
     assert e.value.code == 1 and "screen is locked" in capsys.readouterr().err
     assert not any((govaios_home / "runs").iterdir())
+
+
+def test_cli_run_passes_ticket_env(monkeypatch):
+    seen = _fake_run(monkeypatch, None)
+    monkeypatch.setenv("GOVAIOS_RUN_TICKET", "abc")
+    main(["run", "x.yaml", "--dev"])
+    assert seen["ticket"] == "abc"

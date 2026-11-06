@@ -68,7 +68,8 @@ def _run(args) -> int:
     register_run(home)   # before the STOPPED check, so a stop pressed in between still finds this run
     try:
         preflight(home, dev=not packaged)
-        runner = Runner(Path(args.flow).resolve(), get_desktop(), home, executor)
+        runner = Runner(Path(args.flow).resolve(), get_desktop(), home, executor,
+                        ticket=os.environ.get("GOVAIOS_RUN_TICKET"))
         runner.run()
         if runner.deliver:   # only after flow_end: the shim then starts `deliver`, which re-checks everything
             _write_shim_file("GOVAIOS_NEXT_FILE", "deliver")
