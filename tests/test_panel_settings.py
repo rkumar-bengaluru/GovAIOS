@@ -27,7 +27,7 @@ def test_set_name_file_mode_and_symlink(tmp_path):
     assert (tmp_path / "target").read_text() == "{}" and not p.is_symlink()
 
 
-@pytest.mark.parametrize("bad", ["", "  ", "x" * 41, "\x07", "a\nb"])
+@pytest.mark.parametrize("bad", ["", "  ", "x" * 41, "\x07", "a\nb", "a\u0085b", "a\u2028b", "a\u2029b"])
 def test_set_name_rejects(tmp_path, bad):
     with pytest.raises(ValueError):
         settings.set_name(tmp_path, bad)

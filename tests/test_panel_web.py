@@ -748,3 +748,40 @@ def test_name_escaped(panel):
     page = P.get("/")[1]
     assert "<b>x" not in page and "&lt;b&gt;x" in page
     assert "Your name" in P.get("/approvals")[1]
+
+
+def test_name_not_written_when_audit_fails(panel, monkeypatch):
+    P = panel
+    def boom(*a, **k):
+        raise OSError("disk")
+    monkeypatch.setattr(AuditLog, "append", boom)
+    assert P.post("/name", name="Asha")[0] == 500
+    assert json.loads((P.home / "panel.json").read_text())["name"] == "Rupak" and P.srv.panel.name == "Rupak"
+
+
+def test_name_forged_requests_403(panel):
+    P = panel
+    t = P.csrf()
+    assert P.req("/name", "POST", cookie=P.sid, headers={"Origin": "http://evil"}, body={"csrf": t, "name": "Zed"})[0] == 403
+    assert P.req("/name", "POST", cookie=P.sid, body={"csrf": "bad", "name": "Zed"})[0] == 403
+    assert P.srv.panel.name == "Rupak" and not _log(P.home, "setting")
+
+
+@pytest.mark.parametrize("gecos,shown", [("", "Admin"), ("<b>x Y", "&lt;b&gt;x")])
+def test_default_name_from_account_on_page(tmp_path, monkeypatch, ui, gecos, shown):
+    import pwd
+    from govaios import auth
+    real = pwd.getpwuid(__import__("os").getuid())
+    monkeypatch.setattr(pwd, "getpwuid", lambda u: type("E", (), {"pw_gecos": gecos})())
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    srv = make_server(tmp_path, tick_s=None, speak=lambda t: None)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    try:
+        sid = ui.signin(srv)
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        c.request("GET", "/", headers={"Cookie": f"s={sid}"})
+        page = c.getresponse().read().decode()
+        assert shown in page and "<b>x" not in page
+    finally:
+        srv.shutdown()
+        srv.server_close()

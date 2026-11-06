@@ -2,6 +2,7 @@
 import json
 import os
 import pwd
+import unicodedata
 from pathlib import Path
 
 from govaios.panel.totp import _read_nofollow, _replace
@@ -28,8 +29,12 @@ def name(home: Path) -> str:
     return default_name(pwd.getpwuid(os.getuid()).pw_gecos)
 
 
-def set_name(home: Path, value: str) -> None:
+def check(value: str) -> str:
     value = value.strip()
-    if not 0 < len(value) <= MAX or any(ord(c) < 32 or ord(c) == 127 for c in value):
+    if not 0 < len(value) <= MAX or any(unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp") for c in value):
         raise ValueError("name must be 1-40 characters, no control characters")
-    _replace(Path(home) / "panel.json", json.dumps({**_load(home), "name": value}).encode())
+    return value
+
+
+def set_name(home: Path, value: str) -> None:
+    _replace(Path(home) / "panel.json", json.dumps({**_load(home), "name": check(value)}).encode())

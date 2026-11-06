@@ -572,12 +572,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/approvals"
 
     def set_name(f):
-        v = f.get("name", "")
         try:
-            settings.set_name(home, v)   # validates before anything is logged
+            v = settings.check(f.get("name", ""))
         except ValueError:
             return None
-        audited("setting", {"field": "name"}, lambda: setattr(panel, "name", v.strip()))
+        audited("setting", {"field": "name"}, lambda: (settings.set_name(home, v), setattr(panel, "name", v)))
         return "/approvals"
 
     def end(f):
