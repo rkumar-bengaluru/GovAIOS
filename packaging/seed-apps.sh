@@ -19,7 +19,11 @@ for d in flows pages; do
     elif [ -e "$t" ]; then cmp -s "$f" "$t" || echo "not updated: $d/$n"
     # exclusive, no-follow create (0600): a path that appeared since the check is skipped, never written through
     elif ! /usr/bin/python3 -I -c 'import os,sys
+data=open(sys.argv[1],"rb").read()
 fd=os.open(sys.argv[2],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-with os.fdopen(fd,"wb") as o, open(sys.argv[1],"rb") as i: o.write(i.read())' "$f" "$t" 2>/dev/null; then echo "not updated: $d/$n"; fi
+try:
+  with os.fdopen(fd,"wb") as o: o.write(data)
+except BaseException:
+  os.unlink(sys.argv[2]); raise' "$f" "$t" 2>/dev/null; then echo "not updated: $d/$n"; fi
   done
 done

@@ -263,3 +263,14 @@ def test_seed_odd_names(tmp_path):
     assert (dest / "flows/-dash.yaml").read_text() == "d"
     assert (dest / "flows/with space.yaml").read_text() == "s"
     assert (dest / "flows/x.yaml").stat().st_mode & 0o777 == 0o600
+
+
+def test_seed_failed_write_leaves_no_partial_file(tmp_path):
+    r = repo(tmp_path, pages=False)
+    dest = tmp_path / "apps"
+    # file-size limit 0 with SIGXFSZ ignored: the write fails with EFBIG after the create
+    p = subprocess.run(["/bin/bash", "-c", "trap '' XFSZ; ulimit -f 0; exec /bin/bash \"$0\" \"$1\" \"$2\"",
+                        str(PK / "seed-apps.sh"), str(r), str(dest)], capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0
+    assert "not updated: flows/x.yaml" in p.stdout.splitlines()
+    assert not (dest / "flows/x.yaml").exists()
