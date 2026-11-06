@@ -132,10 +132,17 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             log.append("session_end", session=sid, reason=reason)
         finally:   # a failed audit line must not leave the run going
             if run is not None:
-                stop = lambda: run.stop("session ended")
+                stop = lambda: stop_run(run)
                 stop() if later is None else later.append(stop)
         return sid
     panel.end_session = end_session
+
+    def stop_run(run):
+        """Spend the run's ticket first: an app that starts after stop's wait then refuses to run."""
+        try:
+            (home / "tickets" / run.ticket).unlink(missing_ok=True)
+        finally:
+            run.stop("session ended")
 
     def report():
         """Once per run, when it is done: the result line, then speech on its own thread (say blocks)."""
@@ -314,6 +321,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 end_session("expired", later)
             if not code:
                 tell(NO_SESSION)
+                return "/"
+            if runstate.stopped(home):
+                log.append("session_open", decision="deny", reason="emergency_stop")
+                tell("Emergency stop is on. Clear it first.")
                 return "/"
             r = totp.Verifier(home / "totp.state").verify(text)
             if r != "ok":
@@ -531,10 +542,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         def server_close(self):
             halt.set()
             try:
-                end_session("server_stop")
+                # a run whose session already ended still must not outlive us; never stop it twice
+                # (end_session stops it, even when it raises): a 2nd SIGTERM can cut the app's own stop entry
+                if end_session("server_stop") is None and live():
+                    stop_run(panel.run)
             finally:
-                if live():   # a run whose session already ended (or never audited) still must not outlive us
-                    panel.run.stop("session ended")
                 super().server_close()
 
     def ticker():

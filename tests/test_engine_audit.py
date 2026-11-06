@@ -547,6 +547,13 @@ def test_ticket_for_unapproved_flow_stops(tmp_path, monkeypatch):
     assert isinstance(err, Stop) and str(err) == "run ticket not valid"
 
 
+def test_ticket_for_unapproved_flow_is_spent(tmp_path, monkeypatch):
+    _no_prompts(monkeypatch)
+    r, e, err = run(tmp_path, [], mint=True)
+    assert isinstance(err, Stop) and str(err) == "run ticket not valid"
+    assert list((tmp_path / "tickets").iterdir()) == []
+
+
 def test_terminal_run_still_proves(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (calls.append(1), (True, "biometric"))[1])

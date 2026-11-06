@@ -16,8 +16,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -n "${FAKE_SLEEP:-}" ] && [ "$1" = run ]; then
-  echo $$ > "$GOVAIOS_PID_FILE"
   trap 'echo term >> "$CALLS"; exit 143' TERM
+  [ -n "${FAKE_PID_DELAY:-}" ] && { sleep "$FAKE_PID_DELAY" & wait $!; }
+  echo $$ > "$GOVAIOS_PID_FILE"
   sleep "$FAKE_SLEEP" & wait $!
 fi
 echo "${FAKE_CODE-0}" > "$GOVAIOS_EXIT_FILE"
@@ -83,7 +84,7 @@ def test_stop_kills_and_skips_deliver(env, monkeypatch):
         time.sleep(0.02)
     assert r.done and r.stopped_reason == "session ended"
     lines = calls.read_text().splitlines()
-    assert "term" in lines and sum("--args" in x for x in lines) == 1
+    assert lines.count("term") == 1 and sum("--args" in x for x in lines) == 1   # one SIGTERM, not two
 
 
 def test_summary_captured(env, monkeypatch):
@@ -112,3 +113,28 @@ def test_missing_open_cmd(env):
     while not r.done and time.time() < end:
         time.sleep(0.02)
     assert r.done and r.code == 70 and r.lines() == ["launch failed: FileNotFoundError"]
+
+
+def test_stop_after_finish_is_not_a_stop(env):
+    r, _ = run(env)
+    r.stop("session ended")
+    assert r.code == 0 and r.stopped_reason is None
+
+
+def test_late_pid_still_gets_sigterm(env, monkeypatch):
+    monkeypatch.setenv("FAKE_SLEEP", "8")
+    monkeypatch.setenv("FAKE_PID_DELAY", "2.5")   # a cold start slower than stop's 2 s wait
+    fake, flow, calls = env
+    r = RunLaunch(flow, "t1", app="/app", open_cmd=str(fake))
+    r.start()
+    end = time.time() + 3
+    while not calls.exists() and time.time() < end:
+        time.sleep(0.02)
+    time.sleep(0.1)
+    r.stop("session ended")
+    end = time.time() + 5
+    while not r.done and time.time() < end:
+        time.sleep(0.02)
+    assert r.done and r.stopped_reason == "session ended"
+    lines = calls.read_text().splitlines()
+    assert "term" in lines and sum("--args" in x for x in lines) == 1

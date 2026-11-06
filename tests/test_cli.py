@@ -529,6 +529,40 @@ def test_panel_deny_and_allow(monkeypatch, capsys, govaios_home, tmp_path):
     assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
 
 
+def test_panel_sigterm_ends_session_and_stops_run(monkeypatch, govaios_home):
+    """The shim's trap sends SIGTERM: the panel must still end the session and stop its run, once."""
+    import json
+    import signal
+    from govaios import auth
+    from govaios.audit import web
+    from govaios.audit.log import AuditLog
+    real = web.make_server
+    stops, got = [], {}
+
+    class Run:
+        done, ticket = False, "0" * 64
+        stop = lambda self, why: stops.append(why)
+
+    def make(home, port, flows_dir=None):
+        srv, code = real(home, 0, flows_dir=flows_dir, tick_s=None)
+        srv.panel.session.open()
+        srv.panel.run = Run()
+
+        def serve():
+            got["h"] = signal.getsignal(signal.SIGTERM)
+            got["h"](signal.SIGTERM, None)   # what the shim's kill -TERM delivers
+        srv.serve_forever = serve
+        return srv, code
+    monkeypatch.setattr(web, "make_server", make)
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    before = signal.getsignal(signal.SIGTERM)
+    assert main(["panel"]) == 0
+    assert got["h"] is not before and signal.getsignal(signal.SIGTERM) is before   # restored
+    ends = [json.loads(l) for l in AuditLog(govaios_home).path.read_text().splitlines()]
+    assert [e["reason"] for e in ends if e["kind"] == "session_end"] == ["server_stop"]
+    assert stops == ["session ended"]
+
+
 def test_audit_ui_alias_same_handler(monkeypatch):
     from govaios import cli, sandbox
     monkeypatch.setattr(sandbox, "apply", lambda p: None)

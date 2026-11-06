@@ -20,6 +20,7 @@ class RunLaunch:
         self._lock = threading.Lock()
         self._proc = None
         self._pidf = None
+        self._termed = None
 
     def lines(self):
         with self._lock:
@@ -30,26 +31,36 @@ class RunLaunch:
 
     def stop(self, reason):
         with self._lock:
+            if self.done:   # finished: a late stop is not a stop
+                return
             self.stopped_reason = reason
             active = self._proc is not None
             pidf = self._pidf
         if not active:
             return
-        end = time.time() + 2
+        end = time.time() + 2   # a slower start is signalled by _launch's poll loop
         while time.time() < end:
-            try:
-                txt = Path(pidf).read_text().strip()
-            except OSError:
-                txt = ""
-            if txt.isdigit():
-                try:
-                    os.kill(int(txt), signal.SIGTERM)
-                except OSError:
-                    pass
-                return
-            if self._proc is None:  # launch ended: pid file was truncated, nothing to signal
+            if self._signal(pidf) or self._proc is None:  # launch ended: pid file was truncated, nothing to signal
                 return
             time.sleep(0.05)
+
+    def _signal(self, pidf):
+        """SIGTERM the pid the app wrote, once (a 2nd can cut its stop entry); False while it has not written one."""
+        try:
+            txt = Path(pidf).read_text().strip()
+        except OSError:
+            txt = ""
+        if not txt.isdigit():
+            return False
+        with self._lock:
+            if self._termed == txt:
+                return True
+            self._termed = txt
+        try:
+            os.kill(int(txt), signal.SIGTERM)
+        except OSError:
+            pass
+        return True
 
     def _main(self):
         d = tempfile.mkdtemp(prefix="govaios-run-")
@@ -62,13 +73,15 @@ class RunLaunch:
             self._pidf = pidf = mk()
             nextf = mk()
             self._launch(d, mk, pidf, ["run", self.flow], nextf)
-            with self._lock:
-                go = self.code == 0 and self.stopped_reason is None
-            if go and Path(nextf).read_text() == "deliver":
+            with self._lock:   # done is set with the last exit code, so stop() never sees a finished run as live
+                go = self.code == 0 and self.stopped_reason is None and Path(nextf).read_text() == "deliver"
+                self.done = not go
+            if go:
                 self._launch(d, mk, pidf, ["deliver", self.flow], None)
         finally:
+            with self._lock:
+                self.done = True
             shutil.rmtree(d, ignore_errors=True)
-            self.done = True
 
     def _launch(self, d, mk, pidf, args, nextf):
         out, err, exitf = mk(), mk(), mk()
@@ -87,8 +100,11 @@ class RunLaunch:
                 self.code = 70
                 return
         offs = {out: 0, err: 0}
+        killed = False
         while proc.poll() is None:
             self._pump(offs)
+            if not killed and self.stopped_reason is not None:
+                killed = self._signal(pidf)   # stopped before the app wrote its pid
             time.sleep(0.05)
         self._pump(offs)  # app has exited: one last pass is complete
         try:
@@ -99,6 +115,7 @@ class RunLaunch:
         with self._lock:
             self._proc = None
             self.code = int(txt) if txt.lstrip("-").isdigit() else 70
+            self.done = self.done or nextf is None   # deliver is the last launch
 
     def _pump(self, offs):
         for f in offs:

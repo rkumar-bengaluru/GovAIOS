@@ -135,12 +135,21 @@ def _audit_ui(args) -> int:
     flows = Path(args.flows_dir).resolve() if args.flows_dir else None
     server, code = make_server(home, args.port, flows_dir=flows)
     print(f"http://127.0.0.1:{server.server_address[1]}/login?c={code}", flush=True)
+    import signal
+
+    def _term(*_):
+        raise KeyboardInterrupt   # the shim's trap sends SIGTERM: end like Ctrl-C, so server_close runs
+    prev = signal.signal(signal.SIGTERM, _term)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)   # a 2nd SIGTERM must not cut the session end / run stop short
+        try:
+            server.server_close()
+        finally:
+            signal.signal(signal.SIGTERM, prev)
     return 0
 
 

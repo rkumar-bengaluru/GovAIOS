@@ -238,7 +238,8 @@ class Runner:
             approved = self.approvals.flow_ok(self.flow["id"], self.digest)
             if self.ticket is not None:   # panel run: never a prompt; the ticket is the start proof
                 from .panel import tickets
-                sid = approved and tickets.consume(self.home, self.ticket, self.flow["id"], self.digest)
+                sid = tickets.consume(self.home, self.ticket, self.flow["id"], self.digest)   # always: a refused ticket is spent too
+                sid = approved and sid
                 if approved:
                     extra = {"session": sid} if sid else {}
                     self._audit("request", action="run_start", decision="allow" if sid else "deny",

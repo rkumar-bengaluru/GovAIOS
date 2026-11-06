@@ -29,7 +29,7 @@ class FakeLaunch:
             self.entered.set()
             self.gate.wait(5)
         self.flow_path, self.ticket = flow_path, ticket
-        self.done, self.started, self.stopped = False, False, None
+        self.done, self.started, self.stopped, self.stops = False, False, None, []
         self.code, self.summary, self.stopped_reason = None, None, None
         self._lines = ["step 3 <script>alert(1)</script>"]
         self.made.append(self)
@@ -41,6 +41,7 @@ class FakeLaunch:
         return list(self._lines)
 
     def stop(self, reason):
+        self.stops.append(reason)
         self.stopped = self.stopped_reason = reason
 
 
@@ -185,6 +186,16 @@ def test_wrong_code_audited_without_code(panel):
 def _open(P):
     P.say(code_at(_secret(P), time.time()))
     assert P.srv.panel.session.active()
+
+
+def test_no_session_while_emergency_stop(panel):
+    P = panel
+    (P.home / "STOPPED").write_text("")
+    P.say(code_at(_secret(P), time.time()))
+    assert not P.srv.panel.session.active()
+    assert "Emergency stop is on. Clear it first." in P.get("/")[1]
+    e = _log(P.home, "session_open")[-1]
+    assert (e["decision"], e["reason"]) == ("deny", "emergency_stop")
 
 
 def test_draft_refused_text(panel):
@@ -433,8 +444,26 @@ def test_server_close_stops_live_run(panel):
     L = _running(P)
     P.srv.shutdown()
     P.srv.server_close()
-    assert L.stopped == "session ended" and not P.srv.panel.session.active()
+    assert L.stops == ["session ended"] and not P.srv.panel.session.active()   # once: a 2nd SIGTERM can cut the app's stop entry
     assert _log(P.home, "session_end")[-1]["reason"] == "server_stop"
+
+
+def test_server_close_stops_run_of_ended_session(panel):
+    P = panel
+    L = _running(P)
+    P.srv.panel.session.end("x")   # session gone without its stop: the server still stops the run, once
+    P.srv.shutdown()
+    P.srv.server_close()
+    assert L.stops == ["session ended"]
+
+
+def test_ending_session_spends_unconsumed_ticket(panel):
+    P = panel
+    L = _running(P)
+    t = P.home / "tickets" / L.ticket
+    assert t.exists()
+    P.post("/end")
+    assert L.stops == ["session ended"] and not t.exists()   # a slow-starting app cannot start the run later
 
 
 def test_end_racing_run_start_stops_that_run(panel):
@@ -462,8 +491,12 @@ def test_shutdown_reports_finished_run_first(panel, monkeypatch):
     monkeypatch.setattr(P.srv, "shutdown", lambda: (down.set(), real()))
     P.wall[0] += 3601
     assert P.req("/audit", cookie=P.sid)[0] == 403
-    assert down.wait(2)
-    P.srv.panel.voice.join(5)
+    # the shutdown may find the speech still going: wait for it, then the next tick shuts down
+    while not down.is_set():
+        if P.srv.panel.voice:
+            P.srv.panel.voice.join(5)
+        P.srv.panel.tick()
+        down.wait(0.05)
     assert P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
     assert "GOV-AIOS -> JobLens finished: done" in P.srv.panel.convo
 
