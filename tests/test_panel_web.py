@@ -435,7 +435,7 @@ def test_expiry_keeps_serving_and_run_reports(panel):
     L.code, L.done = 0, True
     _tick(P)
     assert P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
-    assert "Sign in with Touch ID" in P.get("/audit")[1]
+    assert P.get("/audit")[0] == 404
 
 
 def test_server_close_stops_live_run(panel):
@@ -578,8 +578,9 @@ def test_signin_forged(panel):
     _, pre, ck, _ = P.ui.signed_out(port)
     _, pre2, ck2, _ = P.ui.signed_out(port)
     n = len(_log(P.home, "ui_login"))
-    assert P.ui.raw(port, "POST", "/signin", "", {"pre": pre})[0] == 403                    # no pre cookie
-    assert P.ui.signin_post(port, ck2, pre)[0] == 403                                        # mismatched
+    for r in (P.ui.raw(port, "POST", "/signin", "", {"pre": pre})[2],                       # no pre cookie
+              P.ui.signin_post(port, ck2, pre)[2]):                                          # mismatched
+        assert (r.status, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
     s, _, r = P.ui.signin_post(port, "made-up", "made-up")                               # never issued
     assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)   # a fresh Locked page
     assert P.ui.signin_post(port, ck, pre, {"Origin": "http://evil"})[0] == 403
@@ -641,12 +642,64 @@ def test_signin_pause_after_refusal(panel):
     P.answers["prove"] = True
     P.wall[0] += 9.9
     _, pre, ck, _ = P.ui.signed_out(port)
-    assert P.ui.signin_post(port, ck, pre)[2].getheader("Location") == "/?m=paused" and len(P.asked) == 1
-    assert "Sign-in is paused for 10 seconds." in P.ui.raw(port, "GET", "/?m=paused")[1]
+    assert P.ui.signin_post(port, ck, pre)[2].getheader("Location") == "/" and len(P.asked) == 1
+    assert "Sign-in paused. Try again in 1 s." in P.ui.raw(port, "GET", "/")[1]
     P.wall[0] += 0.1
     _, pre, ck, _ = P.ui.signed_out(port)
     r = P.ui.signin_post(port, ck, pre)[2]
     assert len(P.asked) == 2 and "s=" in r.getheader("Set-Cookie")
+
+
+def test_signed_out_get_reuses_valid_pre(panel):
+    P = panel
+    port = _port(P)
+    _, pre, ck, word = P.ui.signed_out(port)
+    s, body, r = P.ui.raw(port, "GET", "/", f"pre={ck}")
+    assert (s, r.getheader("Set-Cookie")) == (200, None)
+    assert re.search(r"name=pre value='([^']+)'", body)[1] == pre and P.ui.WORD.search(body)[1] == word
+    P.wall[0] += 121   # expired: a fresh pair
+    assert P.ui.raw(port, "GET", "/", f"pre={ck}")[2].getheader("Set-Cookie").startswith("pre=")
+
+
+def test_signed_out_other_paths_404_no_cookie(panel):
+    P = panel
+    for path in ("/favicon.ico", "/audit", "/approvals"):
+        s, _, r = P.ui.raw(_port(P), "GET", path)
+        assert (s, r.getheader("Set-Cookie")) == (404, None)
+
+
+def test_signin_backoff_doubles_caps_and_resets(panel):
+    P = panel
+    port = _port(P)
+    P.answers["prove"] = False
+
+    def attempt():
+        _, pre, ck, _ = P.ui.signed_out(port)
+        return P.ui.signin_post(port, ck, pre)[2].getheader("Location")
+    for n, secs in enumerate((10, 20, 40, 80, 160, 300, 300), 1):
+        assert attempt() == "/?m=no"
+        asked = len(P.asked)
+        P.wall[0] += secs - 0.5
+        assert attempt() == "/" and len(P.asked) == asked   # still paused: no prompt
+        assert f"Try again in 1 s." in P.ui.raw(port, "GET", "/")[1]
+        P.wall[0] += 0.5
+    P.answers["prove"] = True
+    assert "s=" in (lambda: (lambda t: P.ui.signin_post(port, t[2], t[1])[2])(P.ui.signed_out(port)))().getheader("Set-Cookie")
+    P.answers["prove"] = False
+    assert attempt() == "/?m=no"
+    P.wall[0] += 9.5
+    assert attempt() == "/"   # n restarted at 1: a 10 s pause
+    P.wall[0] += 0.5
+    assert attempt() == "/?m=no"
+
+
+def test_paused_page_shows_whole_seconds_rounded_up(panel):
+    P = panel
+    P.answers["prove"] = False
+    _, pre, ck, _ = P.ui.signed_out(_port(P))
+    P.ui.signin_post(_port(P), ck, pre)
+    P.wall[0] += 3.2
+    assert "Sign-in paused. Try again in 7 s." in P.ui.raw(_port(P), "GET", "/")[1]
 
 
 def test_signin_expires_after_8h(panel):

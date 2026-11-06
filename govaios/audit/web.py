@@ -223,10 +223,9 @@ def _say(text):
 NO_SESSION = "Enter the 6-digit code from your authenticator."
 
 
-SIGNIN_S, SIGNIN_PAUSE_S, PRE_S = 8 * 3600, 10, 120
+SIGNIN_S, SIGNIN_PAUSE_S, SIGNIN_PAUSE_MAX_S, PRE_S = 8 * 3600, 10, 300, 120
 WORD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ"
-NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "paused": "Sign-in is paused for 10 seconds.",
-         "no": "Touch ID did not sign you in."}
+NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "no": "Touch ID did not sign you in."}
 
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
@@ -323,12 +322,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             except Exception:
                 pass   # already answering 500; nothing more can be recorded
             raise
-    # sessions: sid -> (signed in at, csrf); pre: token -> (issued at, code word); refused: last refused prompt
-    state = {"sessions": {}, "pre": {}, "refused": float("-inf")}
+    # sessions: sid -> (signed in at, csrf); pre: token -> (issued at, code word); until: end of the panel-wide pause; n: consecutive refusals
+    state = {"sessions": {}, "pre": {}, "until": float("-inf"), "n": 0}
     sign_lock, prompt = threading.Lock(), threading.Lock()   # prompt: one Touch ID sign-in sheet at a time
 
     def signed_out(pre, word, m):
         note = NOTES.get(m, "")
+        left = state["until"] - now()
+        if left > 0:
+            note = f"{note} Sign-in paused. Try again in {math.ceil(left)} s.".strip()
         return _page(f"<section class=card><h1>Locked</h1>{f'<p class=fail>{note}</p>' if note else ''}"
                      f"<p>Code <b class=word>{word}</b></p>"
                      f"<p>The Touch ID prompt shows this same code. If it shows another, cancel it.</p>"
@@ -660,14 +662,20 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return None
 
         def _signed_out(self, query):
-            """The Locked page: a fresh pre-login token (cookie + form field) and the code word for its prompt."""
-            pre, word = secrets.token_urlsafe(32), "".join(secrets.choice(WORD_ABC) for _ in range(4))
+            """The Locked page. Only GET / makes a pre-login token (cookie + form field) and code word;
+            a browser that still holds a valid one gets the same pair back."""
+            ck, m = self._cookie("pre"), parse_qs(query).get("m", [""])[0]
             with sign_lock:
                 pres = state["pre"]
-                for k in [k for k, (t, _) in pres.items() if now() - t >= PRE_S] + list(pres)[:max(0, len(pres) - 63)]:
-                    pres.pop(k, None)   # expired, and at most 64 kept: a page loaded in a loop cannot grow it
+                for k in [k for k, (t, _) in pres.items() if now() - t >= PRE_S]:
+                    pres.pop(k)
+                hit = next((k for k in pres if ck is not None and hmac.compare_digest(k.encode(), ck.encode())), None)
+                if hit is not None:
+                    return self._send(200, signed_out(hit, pres[hit][1], m))
+                pre, word = secrets.token_urlsafe(32), "".join(secrets.choice(WORD_ABC) for _ in range(4))
+                for k in list(pres)[:max(0, len(pres) - 63)]:
+                    pres.pop(k)   # at most 64 kept: a page loaded in a loop cannot grow it
                 pres[pre] = (now(), word)
-            m = parse_qs(query).get("m", [""])[0]
             self._send(200, signed_out(pre, word, m),
                        (("Set-Cookie", f"pre={pre}; HttpOnly; SameSite=Strict; Path=/; Max-Age={PRE_S}"),))
 
@@ -676,7 +684,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             paused SIGNIN_PAUSE_S after a refusal. The prompt names the code word shown on that page."""
             ck, field = self._cookie("pre"), f.get("pre", "")
             if ck is None or not hmac.compare_digest(ck.encode(), field.encode()):
-                return self._send(403)
+                return self._redirect("/")   # a bad Host/Origin was already 403; this is a stale or missing pair
             with sign_lock:   # spent by this one attempt
                 hit = next((k for k in state["pre"] if hmac.compare_digest(k.encode(), ck.encode())), None)
                 issued, word = state["pre"].pop(hit) if hit is not None else (None, None)
@@ -685,13 +693,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if not prompt.acquire(blocking=False):
                 return self._redirect("/?m=busy")
             try:
-                if now() - state["refused"] < SIGNIN_PAUSE_S:
-                    return self._redirect("/?m=paused")
+                if now() < state["until"]:
+                    return self._redirect("/")   # the Locked page tells how long
                 ok, how = auth.prove(f"sign in to the GOV-AIOS panel, code {word}", home)
                 if not ok and how in ("busy", "none"):
                     return self._redirect("/?m=busy")   # no sheet was shown: nothing refused, no pause
+                state["n"] = 0 if ok else state["n"] + 1
                 if not ok:
-                    state["refused"] = now()
+                    state["until"] = now() + min(SIGNIN_PAUSE_S * 2 ** (state["n"] - 1), SIGNIN_PAUSE_MAX_S)
                 log.append("ui_login", decision="allow" if ok else "deny", approver="admin", channel="touch_id",
                            auth=how)   # audit first, then the cookie
             finally:
@@ -710,7 +719,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             u = urlsplit(self.path)
             sess = self._session()
             if not sess:
-                return self._signed_out(u.query)
+                return self._signed_out(u.query) if u.path == "/" else self._send(404)
             try:
                 m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
                 a = re.fullmatch(r"/audit/app/([^/]{1,200})", u.path)
