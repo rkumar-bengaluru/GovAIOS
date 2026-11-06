@@ -60,3 +60,13 @@ def test_shim_no_deliver_after_failed_run(tmp_path):
 def test_shim_next_ignored_for_other_subcommands(tmp_path):
     p, calls, _ = shim(tmp_path, "doctor", FAKE_NEXT="1")
     assert p.returncode == 0 and calls == ["doctor"]
+
+
+def test_shim_forwards_flags_before_flow(tmp_path):
+    p, calls, flow = shim(tmp_path, "run", "--dev", "FLOW", FAKE_NEXT="1")
+    assert calls == [f"run --dev {flow}", f"deliver --dev {flow}"]
+
+
+def test_shim_forwards_flags_after_flow(tmp_path):
+    p, calls, flow = shim(tmp_path, "run", "FLOW", "--dev", FAKE_NEXT="1")
+    assert calls == [f"run {flow} --dev", f"deliver {flow} --dev"]

@@ -44,10 +44,10 @@ launch() {
   while kill -0 "$opid" 2>/dev/null; do pump "$out" o_off 1; pump "$err" e_off 2; sleep 0.05; done
   wait "$opid" || true
   pump "$out" o_off 1; pump "$err" e_off 2
-  code=$(cat "$exitf")
+  code=$(cat "$exitf"); : >"$pidf"  # app is gone: a late signal must not hit a recycled pid
 }
 launch --env GOVAIOS_NEXT_FILE="$nextf" -- ${args[@]+"${args[@]}"}
 if [ "${code:-70}" = 0 ] && [ "${1:-}" = run ] && [ "$(cat "$nextf")" = deliver ]; then
-  launch -- deliver "${args[1]}"
+  launch -- deliver "${args[@]:1}"
 fi
 exit "${code:-70}"
