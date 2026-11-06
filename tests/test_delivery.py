@@ -64,6 +64,38 @@ def test_payload_maps_fields():
                   "url": "https://himalayas.app/x", "source": "Himalayas"}, None, None)
 
 
+@pytest.mark.parametrize("posted, captured, want", [
+    ("just now", "2026-11-06T09:00:00", "2026-11-06"),
+    ("today", "2026-11-06T09:00:00", "2026-11-06"),
+    ("5 minutes ago", "2026-11-06T09:00:00", "2026-11-06"),
+    ("9 hours ago", "2026-11-06T14:17:42", "2026-11-06"),
+    ("13 hours ago", "2026-11-06T09:00:00", "2026-11-05"),   # crosses midnight
+    ("1 hour ago", "2026-11-06T00:30:00", "2026-11-05"),
+    ("an hour ago", "2026-11-06T09:00:00", "2026-11-06"),
+    ("yesterday", "2026-11-06T09:00:00", "2026-11-05"),
+    ("1 day ago", "2026-11-06T09:00:00", "2026-11-05"),
+    ("3 days ago", "2026-11-01T09:00:00", "2026-10-29"),
+    ("Posted 2 days ago", "2026-11-06T09:00:00", "2026-11-04"),
+    ("3 weeks ago", "2026-11-06T09:00:00", None),
+    ("a month ago", "2026-11-06T09:00:00", None),
+    ("Nov 3", "2026-11-06T09:00:00", None),
+    (None, "2026-11-06T09:00:00", None),
+    ("9 hours ago", None, None),
+    ("9 hours ago", "garbage", None),
+    ("2 days ago", "2999-01-03T09:00:00", None),   # never after today (Asia/Kolkata)
+])
+def test_payload_posted_on(posted, captured, want):
+    r = rec()
+    r["list_item"] = {"title": "t", "posted": posted}
+    r["captured_at"] = captured
+    p = build_payload(r, "S")[0]
+    assert p.get("posted_on") == want
+
+
+def test_payload_posted_on_without_list_item():
+    assert "posted_on" not in build_payload(rec(), "S")[0]
+
+
 def test_payload_jd_limits():
     assert build_payload(rec(description="d" * 299), "S") == (None, "skipped_too_short", "jd_text")
     assert build_payload(rec(description="d" * 300), "S")[0]["jd_text"] == "d" * 300
