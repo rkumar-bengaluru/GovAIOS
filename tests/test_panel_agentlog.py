@@ -64,3 +64,24 @@ def test_rotated_file_is_0600(tmp_path):
     os.chmod(tmp_path / "panel.log", 0o644)
     agentlog.open_log(tmp_path, cap=10).close()
     assert stat.S_IMODE(os.stat(tmp_path / "panel.log.1").st_mode) == 0o600
+
+
+def test_append_at_cap_is_dropped(tmp_path):
+    (tmp_path / "panel.log").write_text("x" * 20)
+    assert not agentlog.once(tmp_path, "more", cap=20)
+    assert (tmp_path / "panel.log").stat().st_size == 20
+    assert agentlog.once(tmp_path, "more", cap=21)
+
+
+def test_handle_error_one_line_no_traceback(tmp_path):
+    from govaios.audit.web import make_server
+    srv = make_server(tmp_path, tick_s=None)
+    try:
+        try:
+            raise ConnectionResetError("secret-peer")
+        except ConnectionResetError:
+            srv.handle_error(None, ("203.0.113.9", 5555))
+        text = (tmp_path / "panel.log").read_text()
+        assert text == "panel: request error (ConnectionResetError)\n"
+    finally:
+        srv.server_close()

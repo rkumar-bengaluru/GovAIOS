@@ -7,6 +7,7 @@ import math
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -783,6 +784,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     halt = threading.Event()
 
     class Server(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            # the default prints a traceback and the peer's address; only the class name goes to panel.log
+            from govaios.panel import agentlog
+            agentlog.once(home, f"panel: request error ({type(sys.exc_info()[1]).__name__})")
+
         def server_close(self):
             halt.set()
             try:
