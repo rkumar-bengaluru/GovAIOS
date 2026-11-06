@@ -134,6 +134,8 @@ def _fake_run(monkeypatch, exc, packaged=False):
     seen = {}
 
     class R:
+        deliver = None   # a flow without a deliver block
+
         def __init__(self, path, d, home, executor):
             seen["executor"] = executor
 
@@ -221,6 +223,8 @@ def test_run_registers_and_unregisters(monkeypatch, govaios_home, exc):
     during = []
 
     class R:
+        deliver = None
+
         def __init__(self, *a):
             pass
 
@@ -298,9 +302,10 @@ def _subcommands():
     return re.search(r"\{([a-z,-]+)\}", buf.getvalue())[1].split(",")
 
 
-SUBCOMMANDS = ["doctor", "selftest", "run", "verify-audit", "audit-ui", "dump", "guard", "resume", "hook",
+SUBCOMMANDS = ["doctor", "selftest", "run", "deliver", "verify-audit", "audit-ui", "dump", "guard", "resume", "hook",
                "claude-settings", "review-powers"]
-ARGV = {"selftest": ["selftest", "lines", "1"], "run": ["run", "x.yaml"], "claude-settings": ["claude-settings", "--root", "/x"],
+ARGV = {"selftest": ["selftest", "lines", "1"], "run": ["run", "x.yaml"], "deliver": ["deliver", "x.yaml"],
+        "claude-settings": ["claude-settings", "--root", "/x"],
         "review-powers": ["review-powers", "Zoom"]}
 
 
@@ -312,7 +317,7 @@ def test_sandbox_table_covers_every_subcommand():
 def test_sandbox_applied_per_subcommand(monkeypatch, sandbox_calls, cmd):
     """The Global Constraints table: doctor none, audit-ui UI_PROFILE, every other subcommand RUN_PROFILE."""
     from govaios import cli, sandbox
-    profile = {"doctor": None, "audit-ui": "UI_PROFILE"}.get(cmd, "RUN_PROFILE")
+    profile = {"doctor": None, "audit-ui": "UI_PROFILE", "deliver": "DELIVER_PROFILE"}.get(cmd, "RUN_PROFILE")
     order = []
     monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
     monkeypatch.setattr(cli, "_" + cmd.replace("-", "_"), lambda args: order.append(("handler", None)) or 0)
@@ -549,3 +554,34 @@ def test_shim_files_never_follow_links_or_truncate(monkeypatch, tmp_path, var):
     monkeypatch.setenv(var, str(empty))
     assert main(["selftest", "lines", "1", "--dev"]) == 0
     assert empty.read_text() != ""
+
+
+@pytest.mark.parametrize("deliver,exc,want", [({"to": "joblens"}, None, "deliver"), (None, None, ""),
+                                              ({"to": "joblens"}, "stop", "")])
+def test_run_writes_next_file_only_for_deliver_flows(monkeypatch, tmp_path, deliver, exc, want):
+    from govaios import engine
+    _fake_run(monkeypatch, None)
+
+    class R:
+        def __init__(self, *a):
+            self.deliver = deliver
+
+        def run(self):
+            if exc:
+                raise engine.Stop("x")
+    monkeypatch.setattr(engine, "Runner", R)
+    f = tmp_path / "next"
+    f.write_text("")   # the shim's mktemp file
+    monkeypatch.setenv("GOVAIOS_NEXT_FILE", str(f))
+    assert main(["run", "x.yaml", "--dev"]) == (1 if exc else 0)
+    assert f.read_text() == want
+
+
+def test_deliver_is_a_registered_run_and_preflighted(monkeypatch, capsys, govaios_home):
+    from govaios import delivery
+    _checks(monkeypatch, stopped=True, ident={"bundle_id": "x"})
+    monkeypatch.setattr(delivery, "run_delivery", lambda *a: pytest.fail("delivery ran"))
+    with pytest.raises(SystemExit) as e:
+        main(["deliver", "x.yaml", "--dev"])
+    assert e.value.code == 1 and "STOPPED" in capsys.readouterr().err
+    assert not any((govaios_home / "runs").iterdir())

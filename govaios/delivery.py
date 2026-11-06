@@ -5,7 +5,9 @@ import http.client
 import json
 import os
 import re
+import signal
 import stat
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -173,7 +175,7 @@ def _read(path):
 def deliver_batch(home, flow, block, audit, post=send):
     home = Path(home)
     d, tracker = home / block["from"], Deliveries(home / "deliveries.json")
-    counts = dict.fromkeys(("delivered", "duplicate", "retry", "failed", "skipped", "left"), 0)
+    counts = dict.fromkeys(("delivered", "duplicate", "retry", "failed", "skipped", "left", "unreachable"), 0)
     todo = []
     for name in (sorted(os.listdir(d)) if d.is_dir() else []):
         data = _read(d / name) if name.endswith(".json") else None
@@ -211,6 +213,75 @@ def deliver_batch(home, flow, block, audit, post=send):
         audit.append("delivery", flow=flow["id"], target=block["to"], file_hash=h, response_code=code,
                      listing_id=lid, outcome=outcome, reason=reason)
         if outcome == "retry":
+            counts["unreachable"] += reason == "unreachable"
             counts["left"] = len(todo) - i - 1
             break
     return counts
+
+
+def last_run_finished(home, flow_id):
+    state = None
+    try:
+        lines = (Path(home) / "audit.jsonl").read_text().splitlines()
+    except FileNotFoundError:
+        return False
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and e.get("flow") == flow_id:
+            state = {"flow_start": "open", "flow_end": "done", "stop": "stopped"}.get(e.get("kind"), state)
+    return state == "done"
+
+
+def run_delivery(flow_path, home, audit):
+    """Spec 4.3: trusts nothing from the shim; every check is made here."""
+    import yaml
+
+    from . import auth
+    from .approvals import Approvals, read_bound
+
+    flow_path, home = Path(flow_path), Path(home)
+    try:
+        digest, raw = read_bound(flow_path, flow_path.parent.parent / "pages")
+    except KeyError as e:
+        raise Stop(f"unknown page: {e.args[0]}") from None
+    flow = yaml.safe_load(raw[flow_path])["workflow"]
+    try:
+        block = check_block(flow)
+    except ValueError as e:
+        raise Stop(f"bad deliver block: {e}") from None
+    if block is None:
+        raise Stop("flow has no deliver block")
+    fid, approvals = flow["id"], Approvals(home / "approvals.json")
+    if not approvals.flow_ok(fid, digest):
+        raise Stop("flow not approved for its current file")
+    if [p for p in runstate.live_runs(home) if p != os.getpid()]:
+        raise Stop("another gov-aios run is live")
+    if not last_run_finished(home, fid):
+        raise Stop("last run did not finish")
+    if not approvals.destination_ok(fid, block["to"]):
+        ok, how = auth.approve(f"Flow '{fid}' wants to deliver its saved jobs to JobLens (local, 127.0.0.1:8100) "
+                               f"for the first time. Approve?", f"{fid}: deliver to {block['to']}", home)
+        audit.append("request", action="deliver", destination=block["to"], decision="allow" if ok else "deny",
+                     approver="admin", channel="touch_id", auth=how, flow=fid)
+        if not ok:
+            print("approval busy" if how == "busy" else "not approved; nothing sent", file=sys.stderr)
+            return 1
+        approvals.approve_destination(fid, block["to"])
+
+    def on_term(signum, frame):
+        raise Stop("emergency stop")
+    prev = signal.signal(signal.SIGTERM, on_term)
+    try:
+        c = deliver_batch(home, flow, block, audit)
+    finally:
+        signal.signal(signal.SIGTERM, prev)
+    print(f"deliver {block['to']}: delivered {c['delivered']}, duplicate {c['duplicate']}, retry {c['retry']}, "
+          f"failed {c['failed']}, skipped {c['skipped']}")
+    if c["unreachable"]:
+        print("JobLens not reachable at 127.0.0.1:8100 (is it running?)", file=sys.stderr)
+    if c["left"]:
+        print(f"{c['left']} files left for the next delivery")
+    return 1 if c["retry"] or c["failed"] else 0

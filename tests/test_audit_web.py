@@ -346,7 +346,8 @@ def test_normal_entries_outside_runs_not_flagged(tmp_path):
     """M-13: hook requests, stops, logins, revocations and dump are expected outside runs."""
     srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"request","flow":"claude_code","action":"Bash"}',
                                       '{"seq":2,"kind":"emergency_stop"}', '{"seq":3,"kind":"ui_login"}',
-                                      '{"seq":4,"kind":"request","action":"dump"}', '{"seq":5,"kind":"revoke"}'])
+                                      '{"seq":4,"kind":"request","action":"dump"}', '{"seq":5,"kind":"revoke"}',
+                                      '{"seq":6,"kind":"request","flow":"f1","action":"deliver"}'])
     assert "outside any run" not in get("/")[1]
     srv.shutdown(); srv.server_close()
 

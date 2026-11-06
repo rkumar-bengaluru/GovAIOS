@@ -281,3 +281,118 @@ def test_truncated_error_body_is_retry(govaios_home, fake):
     fake([(503, "short")])
     job(govaios_home, "a.json")
     assert batch(govaios_home)["retry"] == 1
+
+
+def _log(home, *entries):
+    a = AuditLog(home)
+    for kind, fl in entries:
+        a.append(kind, flow=fl)
+
+
+@pytest.mark.parametrize("entries,want", [
+    ([("flow_start", "f1"), ("flow_end", "f1")], True),
+    ([("flow_start", "f1"), ("stop", "f1")], False),
+    ([("flow_start", "f1")], False),
+    ([("flow_start", "f1"), ("flow_end", "other")], False),
+    ([("flow_start", "f1"), ("flow_end", "f1"), ("flow_start", "f1"), ("stop", "f1")], False),
+    ([("flow_start", "f1"), ("stop", "f1"), ("flow_start", "f1"), ("flow_end", "f1")], True),
+    ([], False),
+])
+def test_last_run_finished(govaios_home, entries, want):
+    _log(govaios_home, *entries)
+    with open(govaios_home / "audit.jsonl", "a") if entries else open(os.devnull, "a") as f:
+        f.write("not json\n")
+    assert delivery.last_run_finished(govaios_home, "f1") is want
+
+
+FLOW_YAML = """workflow:
+  id: f1
+  permissions: {allow: [deliver]}
+  steps: [{action: write_json, directory: jd_selected}]
+"""
+BLOCK_YAML = "  deliver: {to: joblens, from: jd_selected, source: Himalayas}\n"
+
+
+@pytest.fixture
+def setup(govaios_home, tmp_path, monkeypatch):
+    from govaios import auth, runstate
+    from govaios.approvals import Approvals, flow_hash
+
+    def make(block=True, approved=True, last="flow_end", live=(), dest=True):
+        (tmp_path / "flows").mkdir(exist_ok=True)
+        p = tmp_path / "flows" / "f1.yaml"
+        p.write_text(FLOW_YAML + (BLOCK_YAML if block else ""))
+        govaios_home.mkdir(parents=True, exist_ok=True)
+        ap = Approvals(govaios_home / "approvals.json")
+        if approved:
+            ap.approve_flow("f1", flow_hash(p, tmp_path / "pages"))
+        if dest:
+            ap.approve_destination("f1", "joblens")
+        _log(govaios_home, ("flow_start", "f1"), (last, "f1"))
+        monkeypatch.setattr(runstate, "live_runs", lambda home: [os.getpid(), *live])
+        monkeypatch.setattr(auth, "approve", lambda *a: pytest.fail("asked"))
+        return p
+    return make
+
+
+@pytest.mark.parametrize("kw,msg", [
+    (dict(approved=False), "flow not approved for its current file"),
+    (dict(block=False), "flow has no deliver block"),
+    (dict(last="stop"), "last run did not finish"),
+    (dict(live=(1,)), "another gov-aios run is live"),
+])
+def test_run_delivery_refusals(govaios_home, setup, kw, msg):
+    p = setup(**kw)
+    with pytest.raises(Stop) as e:
+        delivery.run_delivery(p, govaios_home, AuditLog(govaios_home))
+    assert str(e.value) == msg
+
+
+def _requests(home):
+    return [e for e in map(json.loads, (home / "audit.jsonl").read_text().splitlines()) if e["kind"] == "request"]
+
+
+@pytest.mark.parametrize("answer", [(True, "biometric"), (False, "cancelled"), (False, "busy")])
+def test_first_contact_asks_once(govaios_home, setup, fake, monkeypatch, capsys, answer):
+    from govaios import auth
+    f = fake([(202, {"id": 1})])
+    p = setup(dest=False)
+    job(govaios_home, "a.json")
+    asked = []
+    monkeypatch.setattr(auth, "approve", lambda q, r, h: (asked.append((q, r)), answer)[1])
+    code = delivery.run_delivery(p, govaios_home, AuditLog(govaios_home))
+    assert asked == [("Flow 'f1' wants to deliver its saved jobs to JobLens (local, 127.0.0.1:8100) for the first "
+                      "time. Approve?", "f1: deliver to joblens")]
+    (r,) = _requests(govaios_home)
+    assert (r["action"], r["destination"], r["decision"], r["approver"], r["channel"], r["auth"]) == \
+        ("deliver", "joblens", "allow" if answer[0] else "deny", "admin", "touch_id", answer[1])
+    if not answer[0]:
+        assert code == 1 and not f.bodies
+        assert capsys.readouterr().err.strip() == ("approval busy" if answer[1] == "busy" else "not approved; nothing sent")
+        return
+    assert code == 0 and len(f.bodies) == 1
+    asked.clear()
+    assert delivery.run_delivery(p, govaios_home, AuditLog(govaios_home)) == 0 and asked == []
+
+
+def test_summary_and_exit_code(govaios_home, setup, capsys):
+    p = setup()
+    job(govaios_home, "a.json", description="short", job_title="ZQXMARKER")
+    assert delivery.run_delivery(p, govaios_home, AuditLog(govaios_home)) == 0
+    out = capsys.readouterr()
+    assert out.out == "deliver joblens: delivered 0, duplicate 0, retry 0, failed 0, skipped 1\n" and not out.err
+    (govaios_home / "jd_selected" / "b.json").write_text("{nope")
+    assert delivery.run_delivery(p, govaios_home, AuditLog(govaios_home)) == 1
+    out = capsys.readouterr()
+    assert "failed 1" in out.out and "ZQXMARKER" not in out.out + out.err
+
+
+def test_unreachable_message(govaios_home, setup, monkeypatch, capsys):
+    monkeypatch.setitem(delivery.TARGETS["joblens"], "url", "http://127.0.0.1:1/x")
+    p = setup()
+    job(govaios_home, "a.json", at="1")
+    job(govaios_home, "b.json", at="2")
+    assert delivery.run_delivery(p, govaios_home, AuditLog(govaios_home)) == 1
+    out = capsys.readouterr()
+    assert out.err == "JobLens not reachable at 127.0.0.1:8100 (is it running?)\n"
+    assert out.out.splitlines()[1:] == ["1 files left for the next delivery"]

@@ -7,7 +7,7 @@ import sys
 
 from . import identity, sandbox
 
-PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
+PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE, "deliver": sandbox.DELIVER_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
 
 
 def _doctor(args) -> int:
@@ -68,7 +68,10 @@ def _run(args) -> int:
     register_run(home)   # before the STOPPED check, so a stop pressed in between still finds this run
     try:
         preflight(home, dev=not packaged)
-        Runner(Path(args.flow).resolve(), get_desktop(), home, executor).run()
+        runner = Runner(Path(args.flow).resolve(), get_desktop(), home, executor)
+        runner.run()
+        if runner.deliver:   # only after flow_end: the shim then starts `deliver`, which re-checks everything
+            _write_shim_file("GOVAIOS_NEXT_FILE", "deliver")
     except Stop as e:
         print(f"STOPPED: {e}", file=sys.stderr)
         return 1
@@ -78,6 +81,30 @@ def _run(args) -> int:
     finally:
         unregister_run(home)
     return 0
+
+
+def _deliver(args) -> int:
+    from pathlib import Path
+
+    from . import delivery
+    from .audit.log import AuditLog
+    from .home import data_home
+    from .runstate import Stop, register_run, unregister_run
+
+    packaged = identity.require_app(args.dev)
+    home = data_home()   # no block_all_network(): DELIVER_PROFILE already allows only 127.0.0.1:8100
+    register_run(home)   # as _run: so the emergency stop finds and ends it
+    try:
+        preflight(home, dev=not packaged)
+        return delivery.run_delivery(Path(args.flow).resolve(), home, AuditLog(home))
+    except Stop as e:
+        print(f"STOPPED: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:   # type only: messages can carry job content
+        print(f"ERROR: {type(e).__name__}", file=sys.stderr)
+        return 1
+    finally:
+        unregister_run(home)
 
 
 def _verify_audit(args) -> int:
@@ -285,6 +312,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("flow")
     r.add_argument("--dev", action="store_true")
     r.set_defaults(fn=_run)
+    dl = sub.add_parser("deliver")
+    dl.add_argument("flow")
+    dl.add_argument("--dev", action="store_true")
+    dl.set_defaults(fn=_deliver)
     sub.add_parser("verify-audit").set_defaults(fn=_verify_audit)
     a = sub.add_parser("audit-ui")
     a.add_argument("--port", type=int, default=0)

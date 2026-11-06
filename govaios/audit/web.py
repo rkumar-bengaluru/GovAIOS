@@ -57,8 +57,9 @@ def _runs(entries):
             cur.append(e)
             if e.get("kind") in ("flow_end", "stop"):
                 cur = None
-        elif e.get("kind") in ("action", "request") and e.get("flow") not in (None, "claude_code"):
-            odd += 1   # a flow step outside a run; hook, stop, login, revoke and dump entries are normal here
+        elif (e.get("kind") in ("action", "request") and e.get("flow") not in (None, "claude_code")
+              and not (e.get("kind") == "request" and e.get("action") == "deliver")):
+            odd += 1   # a flow step outside a run; hook, stop, login, revoke, dump and deliver entries are normal here
     return runs, odd
 
 
