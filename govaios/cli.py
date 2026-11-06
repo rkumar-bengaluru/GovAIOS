@@ -322,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
             if e.code is not None:
                 print(e.code, file=sys.stderr)
         _write_exit(code)
-        raise
+        raise SystemExit(code) from None   # message already printed; re-raising the string prints it twice
     except BaseException:
         _write_exit(1)
         raise

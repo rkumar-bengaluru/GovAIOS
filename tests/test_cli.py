@@ -14,7 +14,8 @@ OK = {"bundle_id": "com.govaios.cli", "frozen": True, "accessibility": True, "sc
 def test_run_refused_outside_app(capsys):
     with pytest.raises(SystemExit) as e:
         main(["run", "flows/himalayas_job_vetting.yaml"])
-    assert "com.govaios.cli" in str(e.value)
+    assert e.value.code == 1
+    assert capsys.readouterr().err.count("com.govaios.cli") == 1   # printed once, not again by the re-raise
 
 
 def test_run_dev_blocks_network(tmp_path):
