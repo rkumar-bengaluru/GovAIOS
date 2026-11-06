@@ -624,13 +624,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 hit = next((k for k in state["pre"] if hmac.compare_digest(k.encode(), ck.encode())), None)
                 issued, word = state["pre"].pop(hit) if hit is not None else (None, None)
             if issued is None or now() - issued >= PRE_S:
-                return self._send(403)
+                return self._redirect("/")   # stale, unknown or evicted (the pair matched): a fresh Locked page
             if not prompt.acquire(blocking=False):
                 return self._redirect("/?m=busy")
             try:
                 if now() - state["refused"] < SIGNIN_PAUSE_S:
                     return self._redirect("/?m=paused")
                 ok, how = auth.prove(f"sign in to the GOV-AIOS panel, code {word}", home)
+                if not ok and how in ("busy", "none"):
+                    return self._redirect("/?m=busy")   # no sheet was shown: nothing refused, no pause
                 if not ok:
                     state["refused"] = now()
                 log.append("ui_login", decision="allow" if ok else "deny", approver="admin", channel="touch_id",
@@ -639,6 +641,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 prompt.release()
             if not ok:
                 return self._redirect("/?m=no")
+            if auth.screen_locked():   # locked while the sheet was up: that lock signs this browser out too
+                return self._redirect("/")
             sid = secrets.token_urlsafe(32)
             with sign_lock:
                 state["sessions"][sid] = (now(), secrets.token_urlsafe(32))
