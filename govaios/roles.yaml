@@ -54,5 +54,4 @@ operations:
 keys:
   focus_address_bar: { macos: [cmd, l],   windows: [ctrl, l] }
   browser_back:      { macos: [cmd, "["], windows: [alt, left] }
-  close_window:      { macos: [cmd, shift, w], windows: [ctrl, shift, w] }
   enter:             { macos: [return],   windows: [enter] }

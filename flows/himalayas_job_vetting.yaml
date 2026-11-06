@@ -10,7 +10,7 @@ workflow:
     account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
 
   permissions:                          # Rule 9: unlisted = denied
-    allow: [launch_application, navigate, read_page, click, extract_visible_text, write_file, report, close_window]
+    allow: [launch_application, navigate, read_page, click, extract_visible_text, write_file, report]
     max_element_risk: navigate          # Save job / Apply now are submit
   destinations: ["https://www.google.com", "https://himalayas.app"]   # Rule 11
 
@@ -39,4 +39,3 @@ workflow:
         - { id: save_jd, action: write_json, directory: jd_selected }
         - { id: report, action: report, fields: [job_title, company] }
         - { id: back, action: browser_back }
-    - { id: close_browser, action: close_window }   # back to the admin's original state
