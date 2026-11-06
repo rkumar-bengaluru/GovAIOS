@@ -71,7 +71,7 @@ def test_pages_need_cookie(web):
     get = web[2]
     for p in ("/", "/audit", "/audit/log", "/approvals"):
         s, body, _ = get(p, tok=False)
-        assert s == (200 if p == "/" else 404) and "demo_flow" not in body and "Revoke" not in body
+        assert s == (200 if p == "/" else 303) and "demo_flow" not in body and "Revoke" not in body
         assert ("Sign in with Touch ID" in body) == (p == "/")
         assert get(p)[0] == 200 and "Sign in with Touch ID" not in get(p)[1]
     assert "demo_flow" not in get.req("/audit", cookie="forged")[1]

@@ -435,7 +435,7 @@ def test_expiry_keeps_serving_and_run_reports(panel):
     L.code, L.done = 0, True
     _tick(P)
     assert P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
-    assert P.get("/audit")[0] == 404
+    assert P.get("/audit")[0] == 303   # expired sign-in: back to the Locked page
 
 
 def test_server_close_stops_live_run(panel):
@@ -663,9 +663,16 @@ def test_signed_out_get_reuses_valid_pre(panel):
 
 def test_signed_out_other_paths_404_no_cookie(panel):
     P = panel
-    for path in ("/favicon.ico", "/audit", "/approvals"):
+    for path in ("/favicon.ico", "/log", "/auditx"):
         s, _, r = P.ui.raw(_port(P), "GET", path)
         assert (s, r.getheader("Set-Cookie")) == (404, None)
+
+
+def test_signed_out_panel_pages_go_to_locked_page_no_cookie(panel):
+    P = panel
+    for path in ("/audit", "/audit/log", "/audit/run/3", "/audit/app/joblens", "/approvals", "/totp/setup"):
+        s, _, r = P.ui.raw(_port(P), "GET", path)
+        assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
 
 
 def test_signin_backoff_doubles_caps_and_resets(panel):

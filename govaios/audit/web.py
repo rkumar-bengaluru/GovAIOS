@@ -216,6 +216,7 @@ def _apps_summary(runs, apps):
     return out
 
 
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup")
 APP_ID = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -725,7 +726,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             u = urlsplit(self.path)
             sess = self._session()
             if not sess:
-                return self._signed_out(u.query) if u.path == "/" else self._send(404)
+                if u.path == "/":
+                    return self._signed_out(u.query)
+                # a panel page (bookmark, expired sign-in) goes to the Locked page; no cookie is set here
+                return self._redirect("/") if PANEL_PATH.fullmatch(u.path) else self._send(404)
             try:
                 m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
                 a = re.fullmatch(r"/audit/app/([^/]{1,200})", u.path)
