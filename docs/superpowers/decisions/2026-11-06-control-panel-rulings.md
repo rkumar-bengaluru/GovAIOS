@@ -13,3 +13,10 @@ Plan: `docs/superpowers/plans/2026-11-06-control-panel.md`. Each line: what was 
 9. Ending a session deletes the run's unused ticket and SIGTERMs a late-appearing pid — so a slow cold start cannot outlive the session.
 
 Accepted residuals: lock polled every 1 s (a sub-second lock/unlock can be missed); no spoken result when the server itself stops; SIGTERM landing in a few-bytecode window around the handler can skip `server_close`; an app SIGTERMed during cold start exits 70 without `flow_end`; "Approve…" twice opens one dialog (second is "busy"); deferred minors in tickets/TOTP housekeeping.
+
+## After live test 1
+
+10. No sandboxed process can start an app with `open -a` (bisected: even `(allow default)` fails silently). Admin chose: a helper is split off (`fork`) before the sandbox; it has no socket and no web server and accepts only run (a `*.yaml` directly in the flows folder + a 64-hex ticket that exists), stop, and `say -- <text≤300>`. It stops its run and exits when the panel goes away. The web-facing panel stays sandboxed.
+11. For the panel, the data folder is resolved (and created if missing) before the sandbox is applied, because the helper needs it — no network involved.
+12. `say` itself works under the sandbox; it is routed through the helper anyway (one path, speaker output under the sandbox untested).
+13. Restyled to the journey-v2 mockup with CSS only; left out: web fonts, the JS ring, the Emergency stop and Hold to talk buttons (no routes yet), the 6-box code input.
