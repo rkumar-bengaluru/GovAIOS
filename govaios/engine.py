@@ -1,6 +1,7 @@
 """OS-agnostic flow engine: page identification, element location, step execution.
 Every OS side effect goes through the desktop adapter, and every action is
 decided by policy.decide() first."""
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import yaml
 
 from . import auth, runstate
 from .audit.log import AuditLog, url_for_audit
+from .delivery import TARGETS, check_block
 from .approvals import Approvals, pages_used, read_bound
 from .policy import decide, origin
 from .runstate import Stop
@@ -95,6 +97,10 @@ class Runner:
         self.flow = yaml.safe_load(raw[self.flow_path])["workflow"]
         if not re.fullmatch(r"[a-z0-9_]+", str(self.flow.get("id"))):   # it becomes part of a report filename
             raise Stop("invalid flow id")
+        try:
+            self.deliver = check_block(self.flow)
+        except ValueError as e:
+            raise Stop(f"bad deliver block: {e}") from None
         self.d = desktop
         self.launched = False
         self.report_path = None
@@ -164,7 +170,8 @@ class Runner:
         f = self.flow
         q = (f"First run of flow '{f['id']}' (v{f['version']}). It may: {', '.join(f['permissions']['allow'])}; "
              f"max element risk {f['permissions']['max_element_risk']}; destinations "
-             f"{', '.join(f['destinations'])}. Approve this flow?")
+             f"{', '.join(f['destinations'])}"
+             f"{'; delivers to: ' + TARGETS[self.deliver['to']]['label'] if self.deliver else ''}. Approve this flow?")
         ok, how = self.ask(q, f"approve flow {f['id']}")
         self._audit("flow_approval", flow_hash=digest, decision="allow" if ok else "deny",
                     approver="admin", channel="touch_id", auth=how)
@@ -380,7 +387,7 @@ class Runner:
                "captured_at": datetime.now().isoformat(timespec="seconds"),
                "flow": self.flow["id"], "flow_version": self.flow["version"]}
         slug = re.sub(r"[^a-z0-9]+", "-", (rec.get("job_title") or rec.get("title") or "item").lower()).strip("-")[:60]
-        path = out / f"{datetime.now():%Y%m%d}-{slug}.json"
+        path = out / f"{datetime.now():%Y%m%d}-{slug}-{hashlib.sha256((rec.get('url') or '').encode()).hexdigest()[:8]}.json"
         self._act("write_file", path.write_text, json.dumps(rec, indent=2, ensure_ascii=False))
 
     def do_report(self, s):

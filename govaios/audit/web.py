@@ -16,7 +16,8 @@ from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.audit.verify import verify
 
-COLS = ["kind", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason", "auth", "command"]
+COLS = ["kind", "flow", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason",
+        "response_code", "listing_id", "auth", "command", "file_hash"]
 CSS = ("body{font:14px system-ui;margin:2em}table{border-collapse:collapse}td,th{border:1px solid #bbb;"
        "padding:3px 8px;text-align:left}.ok{background:#d8f5d8;padding:6px}.fail{background:#f8d0d0;padding:6px}")
 
@@ -57,8 +58,9 @@ def _runs(entries):
             cur.append(e)
             if e.get("kind") in ("flow_end", "stop"):
                 cur = None
-        elif e.get("kind") in ("action", "request") and e.get("flow") not in (None, "claude_code"):
-            odd += 1   # a flow step outside a run; hook, stop, login, revoke and dump entries are normal here
+        elif (e.get("kind") in ("action", "request") and e.get("flow") not in (None, "claude_code")
+              and not (e.get("kind") == "request" and e.get("action") == "deliver")):
+            odd += 1   # a flow step outside a run; hook, stop, login, revoke, dump and deliver entries are normal here
     return runs, odd
 
 

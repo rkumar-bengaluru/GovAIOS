@@ -6,6 +6,7 @@ _BASE = ('(version 1) (allow default) (deny network*) (allow network* (remote un
          '(deny mach-lookup (global-name "com.apple.dnssd.service"))')
 _DNS_FIX = '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))'
 RUN_PROFILE = _BASE + " " + _DNS_FIX
+DELIVER_PROFILE = _BASE + ' (allow network-outbound (remote ip "localhost:8100"))' + " " + _DNS_FIX
 UI_PROFILE = _BASE + ' (allow network-bind network-inbound (local ip "localhost:*"))' + " " + _DNS_FIX
 
 

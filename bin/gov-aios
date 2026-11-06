@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-APP=/Applications/gov-aios.app
+APP=${GOVAIOS_APP:-/Applications/gov-aios.app}  # GOVAIOS_APP: test hook
 [ -d "$APP" ] || { echo "not installed: run packaging/install.sh" >&2; exit 1; }
-out=$(mktemp); err=$(mktemp); exitf=$(mktemp); pidf=$(mktemp)
+out=$(mktemp); err=$(mktemp); exitf=$(mktemp); pidf=$(mktemp); nextf=$(mktemp)
 opid=""
-cleanup() { rm -f "$out" "$err" "$exitf" "$pidf"; }
+cleanup() { rm -f "$out" "$err" "$exitf" "$pidf" "$nextf"; }
 # Ctrl-C/SIGTERM: stop the app this shim launched (pid written by the app), then exit.
 stop_app() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$pidf" ] && break; sleep 0.1; done
@@ -22,10 +22,6 @@ for a in "$@"; do
   if [ "$i" -gt 0 ] && [ "${a#-}" = "$a" ] && [ -e "$a" ]; then a="$(cd "$(dirname -- "$a")" && pwd)/$(basename -- "$a")"; fi
   args+=("$a"); i=$((i+1))
 done
-open -W -n -a "$APP" --stdout "$out" --stderr "$err" \
-  --env GOVAIOS_EXIT_FILE="$exitf" --env GOVAIOS_PID_FILE="$pidf" \
-  ${args[@]+--args "${args[@]}"} &
-opid=$!
 # Stream by byte offset; after open returns the app has exited, so one last pass is complete.
 o_off=0; e_off=0
 pump() { # file offset-var fd
@@ -35,8 +31,23 @@ pump() { # file offset-var fd
     printf -v "$2" %s "$size"
   fi
 }
-while kill -0 "$opid" 2>/dev/null; do pump "$out" o_off 1; pump "$err" e_off 2; sleep 0.05; done
-wait "$opid" || true
-pump "$out" o_off 1; pump "$err" e_off 2
-code=$(cat "$exitf")
+# launch <extra open flags> -- <app args...>; sets $code
+launch() {
+  local extra=()
+  while [ "$1" != -- ]; do extra+=("$1"); shift; done; shift
+  : >"$out"; : >"$err"; : >"$exitf"; : >"$pidf"; o_off=0; e_off=0
+  open -W -n -a "$APP" --stdout "$out" --stderr "$err" \
+    --env GOVAIOS_EXIT_FILE="$exitf" --env GOVAIOS_PID_FILE="$pidf" \
+    ${extra[@]+"${extra[@]}"} \
+    ${@+--args "$@"} &
+  opid=$!
+  while kill -0 "$opid" 2>/dev/null; do pump "$out" o_off 1; pump "$err" e_off 2; sleep 0.05; done
+  wait "$opid" || true; opid=""  # reaped: the trap must not kill a recycled pid
+  pump "$out" o_off 1; pump "$err" e_off 2
+  code=$(cat "$exitf"); : >"$pidf"  # app is gone: a late signal must not hit a recycled pid
+}
+launch --env GOVAIOS_NEXT_FILE="$nextf" -- ${args[@]+"${args[@]}"}
+if [ "${code:-70}" = 0 ] && [ "${1:-}" = run ] && [ "$(cat "$nextf")" = deliver ]; then
+  launch -- deliver "${args[@]:1}"
+fi
 exit "${code:-70}"

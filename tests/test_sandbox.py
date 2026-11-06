@@ -98,3 +98,36 @@ sandbox.apply(sandbox.RUN_PROFILE)
 print(runstate._exe_path(os.getpid()) is not None, runstate._exe_path(os.getppid()) is not None)
 """)
     assert r.stdout.strip() == "True True", r.stderr
+
+
+def test_deliver_profile_allows_only_8100():
+    # Connect only, never a request: JobLens may really be listening on 8100. Refused by the peer = allowed through.
+    if child(_DNS).stdout.strip() != "dns open":
+        pytest.skip("no DNS")
+    with socket.create_server(("127.0.0.1", 0)) as srv:
+        port = srv.getsockname()[1]
+        r = child(f"""
+import errno, socket
+from govaios import sandbox
+sandbox.apply(sandbox.DELIVER_PROFILE)
+def connect(host, port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(3)
+    try:
+        s.connect((host, port))
+        return "allowed"
+    except OSError as e:
+        if e.errno == errno.ECONNREFUSED:
+            return "allowed"
+        if e.errno in (errno.EPERM, errno.EACCES):
+            return "denied"
+        return "other"
+    finally:
+        s.close()
+print(connect("127.0.0.1", 8100), connect("127.0.0.1", {port}), connect("127.0.0.1", 8000), connect("1.1.1.1", 443))
+a, b = socket.socketpair(); a.sendall(b"x")
+print("pair", b.recv(1) == b"x")
+""")
+        d = child("from govaios import sandbox\nsandbox.apply(sandbox.DELIVER_PROFILE)\n" + _DNS)
+    assert r.stdout.split("\n")[:2] == ["allowed denied denied denied", "pair True"], r.stderr
+    assert d.stdout.strip() == "dns blocked", d.stderr

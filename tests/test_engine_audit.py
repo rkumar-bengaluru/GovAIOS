@@ -103,15 +103,19 @@ def fake_auth(monkeypatch):
     monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
 
 
-def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False):
+def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, deliver=None):
     src = tmp_path / "src"
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
     f = src / "flows" / "himalayas_job_vetting.yaml"
     t = f.read_text().replace("count: 5", "count: 1")
     t = t.replace("rupak.kumar.ambasta02@gmail.com", ACCT)
+    t = t.replace("  deliver: { to: joblens, from: jd_selected, source: Himalayas }\n", "")   # start without deliver
     if directory:
         t = t.replace("directory: jd_selected", f"directory: {directory}")
+    if deliver:
+        t = t.replace("write_file, report]", "write_file, report, deliver]")
+        t = t.replace("  steps:\n", f"  deliver: {deliver}\n  steps:\n", 1)
     f.write_text(t)
     r = Runner(f, desk(answers), tmp_path)
     if preapprove:
@@ -465,3 +469,38 @@ def test_resume_reason_names_unknown_page(tmp_path, monkeypatch):
     with pytest.raises(Stop):
         r.do_classify_page({"on_match": {"a": "continue", "unknown": "stop_and_request_user"}})
     assert reasons[-1].endswith("resume unknown page")
+
+
+GOOD_DELIVER = "{ to: joblens, from: jd_selected, source: Himalayas }"
+
+
+def test_write_json_name_has_url_hash(tmp_path):
+    import re
+    r = Runner.__new__(Runner)
+    r.ctx = {"record": {"title": "Same Title", "url": "https://a.example/1"}, "item": {}}
+    r.flow = {"id": "x", "version": 1}
+    r.home = tmp_path
+    r._act = lambda name, fn, *a, target=None: fn(*a)
+    r.gate = lambda *a, **k: None
+    for u in ("https://a.example/1", "https://a.example/2"):
+        r.ctx["record"]["url"] = u
+        r.do_write_json({"directory": "out"})
+    names = [p.name for p in (tmp_path / "out").glob("*.json")]
+    assert len(names) == 2 and all(re.fullmatch(r"\d{8}-[a-z0-9-]+-[0-9a-f]{8}\.json", n) for n in names)
+
+
+def test_bad_deliver_block_stops_at_load(tmp_path):
+    with pytest.raises(Stop, match="^bad deliver block"):
+        run(tmp_path, [], deliver="{ to: other, from: jd_selected, source: Himalayas }")
+
+
+def test_approval_dialog_names_delivery(tmp_path, monkeypatch):
+    qs = []
+    real = engine.auth.approve
+    monkeypatch.setattr(engine.auth, "approve", lambda q, *a, **k: (qs.append(q), real(q, *a, **k))[1])
+    run(tmp_path, [True] * 10, deliver=GOOD_DELIVER)
+    assert "delivers to: joblens (local). Approve this flow?" in qs[0]
+    qs.clear()
+    (tmp_path / "b").mkdir()
+    run(tmp_path / "b", [True] * 10)
+    assert "delivers" not in qs[0]
