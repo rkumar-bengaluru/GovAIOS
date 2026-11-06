@@ -15,8 +15,8 @@ Work not in an active plan. Set by the admin on 2026-11-06: plan 4 goes first; t
 ## Flow improvements
 
 - After a click lands on the wrong page: browser Back once, re-verify, retry once, else stop.
-- Close the flow's own Chrome window at the end (`close_window`, verified window only; built and
-  reverted on 2026-11-06, commit 1d6cc6c).
+- **Next cycle (admin, 2026-11-06):** close the flow's own Chrome window at the end (`close_window`,
+  verified window only; built and reverted on 2026-11-06, commit 1d6cc6c).
 - Run the morning inbox flow under plan 2's governance.
 - Origin check after every click (today an unapproved origin is caught only by the post-click
   page check).
