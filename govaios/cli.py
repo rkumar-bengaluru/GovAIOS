@@ -133,7 +133,7 @@ def _audit_ui(args) -> int:
         print("not proven; audit UI not started", file=sys.stderr)
         return 1
     flows = Path(args.flows_dir).resolve() if args.flows_dir else None
-    server, code = make_server(home, args.port, flows_dir=flows)
+    server, code = make_server(home, args.port, flows_dir=flows, helper=args.helper)
     print(f"http://127.0.0.1:{server.server_address[1]}/login?c={code}", flush=True)
     import signal
 
@@ -353,8 +353,16 @@ def main(argv: list[str] | None = None) -> int:
     rp.set_defaults(fn=_review_powers)
     _write_shim_file("GOVAIOS_PID_FILE", os.getpid())  # lets the shim stop this run on Ctrl-C
     code = 1
+    helper = None
     try:
         args = p.parse_args(argv)
+        args.helper = None
+        if args.cmd in ("panel", "audit-ui") and args.flows_dir:   # before the sandbox and any thread: it runs the app
+            from pathlib import Path
+
+            from .home import data_home
+            from .panel import helper as launch_helper
+            args.helper = helper = launch_helper.start_helper(Path(args.flows_dir).resolve(), data_home())
         profile = PROFILES.get(args.cmd, sandbox.RUN_PROFILE)
         if profile:   # first, before anything can resolve a name: a resolver opened earlier outlives the sandbox
             try:
@@ -376,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException:
         _write_exit(1)
         raise
+    finally:
+        if helper is not None:
+            helper.close()   # ends the helper and any run it still has
     _write_exit(code)
     return code
 

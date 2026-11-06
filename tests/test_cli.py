@@ -505,10 +505,38 @@ def test_audit_ui_deny_and_allow(monkeypatch, capsys, govaios_home):
     class Srv:
         server_address = ("127.0.0.1", 1234)
         serve_forever = server_close = lambda self: None
-    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None: (Srv(), "CODE"))
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None: (Srv(), "CODE"))
     monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
     assert main(["audit-ui"]) == 0
     assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+
+
+class FakeHelper:
+    last = None
+
+    def __init__(self):
+        self.closed = False
+        FakeHelper.last = self
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("argv", [["panel", "FLOWS"], ["audit-ui", "FLOWS"], ["audit-ui"], ["panel"]])
+def test_cli_panel_starts_helper_before_sandbox(monkeypatch, tmp_path, govaios_home, argv):
+    from govaios import cli, sandbox
+    argv = [str(tmp_path) if a == "FLOWS" else a for a in argv]
+    order = []
+    monkeypatch.setattr("govaios.panel.helper.start_helper",
+                        lambda flows, home: order.append(("helper", flows, home)) or FakeHelper())
+    monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
+    monkeypatch.setattr(cli, "_audit_ui", lambda args: order.append(("handler", args.helper)) or 0)
+    assert main(argv) == 0
+    if len(argv) == 2:
+        assert order == [("helper", tmp_path.resolve(), govaios_home), ("apply", sandbox.UI_PROFILE),
+                         ("handler", FakeHelper.last)] and FakeHelper.last.closed
+    else:
+        assert order == [("apply", sandbox.UI_PROFILE), ("handler", None)]
 
 
 def test_panel_deny_and_allow(monkeypatch, capsys, govaios_home, tmp_path):
@@ -516,16 +544,20 @@ def test_panel_deny_and_allow(monkeypatch, capsys, govaios_home, tmp_path):
     from govaios.audit import web
     monkeypatch.setattr(web, "make_server", lambda *a, **k: pytest.fail("must not bind"))
     monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
+    monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
     assert main(["panel", str(tmp_path)]) == 1
+    assert FakeHelper.last.closed   # closed on the refused path too
     seen = []
 
     class Srv:
         server_address = ("127.0.0.1", 1234)
         serve_forever = server_close = lambda self: None
-    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None: seen.append((port, flows_dir)) or (Srv(), "CODE"))
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None:
+                        seen.append((port, flows_dir, helper)) or (Srv(), "CODE"))
     monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
     assert main(["panel", str(tmp_path), "--port", "7"]) == 0
-    assert seen == [(7, tmp_path.resolve())]
+    assert seen == [(7, tmp_path.resolve(), FakeHelper.last)] and FakeHelper.last.closed
     assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
 
 
@@ -543,7 +575,7 @@ def test_panel_sigterm_ends_session_and_stops_run(monkeypatch, govaios_home):
         done, ticket = False, "0" * 64
         stop = lambda self, why: stops.append(why)
 
-    def make(home, port, flows_dir=None):
+    def make(home, port, flows_dir=None, helper=None):
         srv, code = real(home, 0, flows_dir=flows_dir, tick_s=None)
         srv.panel.session.open()
         srv.panel.run = Run()

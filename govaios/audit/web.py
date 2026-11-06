@@ -101,10 +101,13 @@ NO_SESSION = "Enter the 6-digit code from your authenticator."
 LOGIN_TTL, SESSION_TTL = 60, 3600
 
 
-def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=RunLaunch, speak=_say,
-                name="Rupak", session=None, tick_s=1.0):
+def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
+                name="Rupak", session=None, tick_s=1.0, helper=None):
     """Returns (server, login code); server.panel holds the run session, current run and conversation.
-    The caller has already proven presence. tick_s=None starts no ticker (tests call server.panel.tick())."""
+    The caller has already proven presence. tick_s=None starts no ticker (tests call server.panel.tick()).
+    helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed."""
+    launcher = launcher or (helper.run if helper else RunLaunch)
+    speak = speak or (helper.say if helper else _say)
     home = Path(home)
     log = AuditLog(home)
     approvals_path = home / "approvals.json"
