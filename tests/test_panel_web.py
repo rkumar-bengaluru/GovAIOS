@@ -64,6 +64,8 @@ def panel(tmp_path, monkeypatch, ui):
     monkeypatch.setattr(auth, "screen_locked", lambda: False)
     monkeypatch.setattr(auth, "approve", lambda q, r, h, **k: (asked.append(q), (answers["approve"], "biometric"))[1])
     monkeypatch.setattr(auth, "prove", lambda r, h, **k: (asked.append(r), (answers["prove"], "biometric"))[1])
+    from govaios.panel import settings
+    settings.set_name(home, "Rupak")
     made = []
     launcher = type("L", (FakeLaunch,), {"made": made})
     spoken = []
@@ -725,3 +727,24 @@ def test_signin_lock_during_prompt_no_session(panel, monkeypatch):
     assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
     locked[0] = False
     assert P.srv.panel.tick() is None and "Sign in with Touch ID" in P.ui.raw(port, "GET", "/")[1]
+
+
+def test_name_change_used_in_speech(panel):
+    P = panel
+    assert P.post("/name", name="Asha")[0] == 303
+    e = _log(P.home, "setting")
+    assert len(e) == 1 and e[0]["field"] == "name" and "Asha" not in json.dumps(e[0])
+    L = _running(P)
+    L.code, L.summary, L.done = 0, "x", True
+    _tick(P)
+    assert P.spoken == ["Asha, the JobLens flow is complete, thank you."]
+    assert P.post("/name", name="")[0] == 400 and len(_log(P.home, "setting")) == 1
+    assert P.req("/name", "POST", body={"name": "Zed"})[0] == 403
+
+
+def test_name_escaped(panel):
+    P = panel
+    P.post("/name", name="<b>x")
+    page = P.get("/")[1]
+    assert "<b>x" not in page and "&lt;b&gt;x" in page
+    assert "Your name" in P.get("/approvals")[1]

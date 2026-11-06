@@ -21,7 +21,7 @@ from govaios import auth, runstate
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.audit.verify import verify
-from govaios.panel import tickets, totp
+from govaios.panel import settings, tickets, totp
 from govaios.panel.apps import list_apps, match
 from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
@@ -230,7 +230,7 @@ NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "paused": "Sign-in 
 
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
-                name="Rupak", session=None, tick_s=1.0, helper=None):
+                name=None, session=None, tick_s=1.0, helper=None):
     """Returns the server; server.panel holds the run session, current run and conversation.
     Browsers sign in on the page with Touch ID (POST /signin); the server never shuts itself down. tick_s=None starts no ticker (tests call server.panel.tick()).
     helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed."""
@@ -241,7 +241,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     approvals_path = home / "approvals.json"
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
-                            speak=speak, name=name, pending=None, lock=threading.RLock(),
+                            speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
                             told=None, voice=None)
 
     def tell(line):
@@ -403,6 +403,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         authn = "<h2>Authenticator</h2>" + (
             "<p><a href='/totp/setup'>Set up</a></p>" if store.load() is None else
             f"<form method=post action=/totp/reset>{hidden(csrf)}<button class=stop>Reset authenticator</button></form>")
+        authn = (f"<h2>Your name</h2><form method=post action=/name>{hidden(csrf)}<label for=nm>Your name</label> "
+                 f"<input id=nm name=name maxlength=40 value='{escape(panel.name)}'> <button>Save</button></form>") + authn
         bad = "<p class=fail>approvals.json unreadable</p>"
         try:
             d = json.loads(approvals_path.read_text())
@@ -569,6 +571,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     store.delete)
         return "/approvals"
 
+    def set_name(f):
+        v = f.get("name", "")
+        try:
+            settings.set_name(home, v)   # validates before anything is logged
+        except ValueError:
+            return None
+        audited("setting", {"field": "name"}, lambda: setattr(panel, "name", v.strip()))
+        return "/approvals"
+
     def end(f):
         end_session("ended")
         return "/"
@@ -588,7 +599,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/approvals"
 
     POSTS = {"/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
-             "/revoke": revoke}
+             "/revoke": revoke, "/name": set_name}
 
     # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
     SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
