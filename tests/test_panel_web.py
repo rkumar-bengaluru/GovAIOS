@@ -551,3 +551,11 @@ def test_pages_share_stylesheet(panel):
     for b in pages:
         assert "<main" in b and "<script" not in b.lower() and "http:" not in b and "https:" not in b
         assert 'name=viewport' in b
+
+
+def test_rail_marks_current_page(panel):
+    P = panel
+    for path, link in (("/", "href='/' aria-current=page>Talk"), ("/audit", "href='/audit' aria-current=page>Audit log"),
+                       ("/approvals", "href='/approvals' aria-current=page>Approvals")):
+        body = P.get(path)[1]
+        assert link in body and body.count("aria-current=page") == 1

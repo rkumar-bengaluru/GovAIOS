@@ -33,19 +33,20 @@ CSS = """
 :root{color-scheme:light dark;--bg:#E8ECF2;--paper:#F5F7FA;--card:#fff;--ink:#14213D;--steel:#2B3A55;
 --muted:#56627A;--line:#D9DEE7;--amber:#F2A93B;--amber-soft:#FDF1DC;--ok:#3E8E7E;--ok-soft:#E3F1EE;
 --stop:#C8473A;--stop-soft:#FBE9E7;--rail:#14213D;--rail-fg:#DCE3EE;--rail-mute:#A9B4C6;--me:#14213D;
---sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+--focus:#14213D;--sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
 @media (prefers-color-scheme:dark){:root{--bg:#0B1222;--paper:#101A2D;--card:#17223A;--ink:#E6EBF3;
 --steel:#BAC4D6;--muted:#9AA6BB;--line:#2C3A55;--amber-soft:#3A2E15;--ok:#5FB8A5;--ok-soft:#15302B;
---stop:#F07A6C;--stop-soft:#3A1C19;--rail:#070D1A;--me:#2B3A55}}
+--stop:#F07A6C;--stop-soft:#3A1C19;--rail:#070D1A;--me:#2B3A55;--focus:#F2A93B}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 var(--sans)}
 a{color:inherit}
-:focus-visible{outline:3px solid var(--amber);outline-offset:2px}
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.rail :focus-visible{outline-color:var(--amber)}
 .app{display:grid;grid-template-columns:260px minmax(0,1fr);min-height:100vh}
 .rail{background:var(--rail);color:var(--rail-fg);padding:18px 14px}
 .brand{display:flex;align-items:center;gap:10px;margin:0 6px 18px;font-weight:700;font-size:17px;color:#fff}
 .rail>a{display:block;padding:8px 10px;border-radius:8px;text-decoration:none;color:#fff}
-.rail>a:hover{background:rgba(255,255,255,.08)}
+.rail>a:hover,.rail>a[aria-current]{background:rgba(255,255,255,.08)}
 .rail h2{font-size:13px;font-weight:500;color:var(--rail-mute);margin:18px 6px 6px}
 .rail ul{list-style:none;margin:0;padding:0}
 .rail li{padding:9px 10px;border-radius:8px;margin-bottom:4px;font-weight:700;color:#fff}
@@ -106,7 +107,7 @@ td form{margin:0}
 .qr{display:inline-block;background:#fff;padding:10px;border-radius:8px;border:1px solid var(--line)}
 .qr svg{display:block;max-width:100%;height:auto}
 code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
-@media (max-width:820px){.app{grid-template-columns:minmax(0,1fr);min-height:0}main{padding:16px 16px 32px}
+@media (max-width:820px){.app{grid-template-columns:minmax(0,1fr);min-height:0}.rail{order:1}main{padding:16px 16px 32px}
 .top{margin:-16px -16px 16px;padding:12px 16px}}
 """
 BRAND = ("<div class=brand><svg width=30 height=30 viewBox='0 0 30 30' aria-hidden=true>"
@@ -161,11 +162,12 @@ def _td(v):
     return f"<td>{escape('' if v is None else str(v))}</td>"
 
 
-def _page(body, head="", rail=""):
+def _page(body, head="", rail="", here=None):
+    nav = "".join(f"<a href='{h}'{' aria-current=page' if h == here else ''}>{t}</a>"
+                  for h, t in (("/", "Talk"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
     return (f"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,"
             f"initial-scale=1'>{head}<title>GOV-AIOS</title><style>{CSS}</style><div class=app>"
-            f"<nav class=rail aria-label='GOV-AIOS'>{BRAND}<a href='/'>Talk</a><a href='/audit'>Audit log</a>"
-            f"<a href='/approvals'>Approvals</a>{rail}</nav><main>{body}</main></div>")
+            f"<nav class=rail aria-label='GOV-AIOS'>{BRAND}{nav}{rail}</nav><main>{body}</main></div>")
 
 
 def _tone(line):
@@ -320,7 +322,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             f"{_td(r[-1].get('outcome') or r[-1].get('kind'))}{_td(_started_by(r))}</tr>" for r in runs)
         table = (f"<table><tr><th>run</th><th>flow</th><th>time</th><th>steps</th><th>outcome</th><th>started by</th></tr>"
                  f"{rows}</table>" if runs else "<p>No runs yet.</p>")
-        return _page(f"<h1>Runs</h1>{banner()}{note}{table}<p><a href='/audit/log'>Full log</a></p>")
+        return _page(f"<h1>Runs</h1>{banner()}{note}{table}<p><a href='/audit/log'>Full log</a></p>", here="/audit")
 
     def run(seq):
         for r in _runs(_entries(log))[0]:
@@ -328,7 +330,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 head = "".join(f"<th>{c}</th>" for c in COLS)
                 rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in COLS) + "</tr>" for e in r)
                 return _page(f"<h1>Run {int(seq)}</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                             f"<p><a href='/audit'>Runs</a></p>")
+                             f"<p><a href='/audit'>Runs</a></p>", here="/audit")
         return None
 
     def fulllog():
@@ -337,7 +339,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             "<tr>" + "".join(_td(e.get(c)) for c in ["seq", "ts", *COLS]) + "</tr>" if e is not None
             else f"<tr><td colspan={len(COLS) + 2} class=fail>unparsed: {escape(raw)}</td></tr>" for e, raw in _entries(log))
         return _page(f"<h1>Full log</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                     f"<p><a href='/audit'>Runs</a></p>")
+                     f"<p><a href='/audit'>Runs</a></p>", here="/audit")
 
     def hidden(csrf):
         return f"<input type=hidden name=csrf value='{escape(csrf)}'>"
@@ -358,7 +360,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         flows, dests = (d or {}).get("flows", {}), (d or {}).get("destinations", {})
         if not (isinstance(d, dict) and isinstance(flows, dict) and isinstance(dests, dict)
                 and all(isinstance(v, list) for v in dests.values())):
-            return _page(f"<h1>Approvals</h1>{bad}{authn}")
+            return _page(f"<h1>Approvals</h1>{bad}{authn}", here="/approvals")
         def form(kind, flow="", dest="", label="Revoke", cls=""):
             return (f"<form method=post action=/revoke><input type=hidden name=csrf value='{escape(csrf)}'>"
                     f"<input type=hidden name=kind value={kind}><input type=hidden name=flow value='{escape(flow)}'>"
@@ -368,7 +370,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      for k, v in dests.items() for d in v)
         return _page(f"<h1>Approvals</h1><h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
                      f"<h2>Destinations</h2><table><tr><th>flow</th><th>destination</th><th></th></tr>{dr}</table>"
-                     f"{form('all', label='Revoke all', cls=' class=stop')}{authn}")
+                     f"{form('all', label='Revoke all', cls=' class=stop')}{authn}", here="/approvals")
 
     def talk(csrf):
         report()   # the page refresh stops once the run is done: show its result on that same load
@@ -397,7 +399,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"</label><input id=cmd name=text autocomplete=off autofocus placeholder='Type: run joblens'>"
                      f"<button class=go>Send</button></form>",
                      '<meta http-equiv="refresh" content="2">' if live() else "",
-                     f"<h2>Approved</h2><ul>{ok}</ul><h2>Drafts</h2><ul>{drafts}</ul>")
+                     f"<h2>Approved</h2><ul>{ok}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
 
     def setup(csrf, bad):
         if store.load() is not None:
