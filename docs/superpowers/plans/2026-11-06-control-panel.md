@@ -228,3 +228,46 @@
 - [ ] **Step 5 (admin):** type a code → `Session open: 30 min left`; type `run joblens` → no Touch ID; steps update every 2 s; window closes; result line and the spoken sentence.
 - [ ] **Step 6 (admin):** type `run inbox briefing` → the draft text. Lock the screen → after unlock the session is ended.
 - [ ] **Step 7 (admin):** terminal `bin/gov-aios run flows/himalayas_job_vetting.yaml` while a session is open → still asks Touch ID. `bin/gov-aios verify-audit` → OK.
+
+---
+
+## Addendum (live test 1): launching from the sandbox
+
+Live finding: any `sandbox_init` profile — even `(allow default)` — stops `open -a` from starting an app (returns 0 at once, app never runs) and makes `/usr/bin/say` fail (`Speaking failed: -241`). Admin decision: a helper process split off before the sandbox; then restyle to the mockups.
+
+### Task 9: launch helper (split off before the sandbox)
+
+**Files:**
+- Create: `govaios/panel/helper.py`
+- Modify: `govaios/cli.py` (`main`: for `panel`/`audit-ui` with a flows dir, start the helper before `sandbox.apply`), `govaios/audit/web.py` (`make_server` defaults: `launcher` and `speak` come from the helper when one is given; new param `helper=None`)
+- Test: `tests/test_panel_helper.py`, `tests/test_cli.py`
+
+**Interfaces:**
+- Produces:
+  - `start_helper(flows_dir: Path, home: Path) -> Helper` — `os.fork()` before the sandbox and before any thread; the child never imports or calls PyObjC, has no socket, and loops reading JSON lines from a pipe; it exits (stopping any live run with `"session ended"`) when the pipe closes. Parent side `Helper` has `.run(flow_path: Path, ticket: str) -> HelperRun`, `.say(text: str)`, `.close()`.
+  - Child accepts only: `{"op":"run","id":n,"flow":str,"ticket":str}`, `{"op":"stop","id":n,"reason":str}`, `{"op":"say","text":str}`. It refuses (`{"id":n,"done":true,"code":70,"error":"refused"}`) a flow whose `realpath` is not a `*.yaml` directly inside `realpath(flows_dir)`, a ticket not matching `^[0-9a-f]{64}$`, a second run while one is live; `say` text capped at 300 chars and passed as `["/usr/bin/say", "--", text]`. The child runs runs with the existing `RunLaunch` (unchanged argv rules).
+  - Child → parent events: `{"id":n,"line":str}`, `{"id":n,"done":true,"code":int|null,"summary":str|null,"stopped_reason":str|null}`.
+  - `HelperRun` has the same surface the panel uses from `RunLaunch`: `.start()`, `.stop(reason)`, `.lines()`, `.done`, `.code`, `.summary`, `.stopped_reason`, `.ticket`; state is filled by one reader thread in the parent.
+  - `make_server(..., helper=None)`: when `helper` is given, `launcher=helper.run` and `speak=helper.say` unless passed explicitly. Without a helper and with a flows dir, keep today's direct `RunLaunch`/`_say` (tests, dev).
+
+- [ ] **Step 1: Failing tests:** `test_helper_runs_with_fake_open` (child launches via a fake `open`, parent sees lines and done code 0); `test_helper_refuses_flow_outside_dir` (`../x.yaml`, a symlink pointing outside, a non-yaml) → code 70 `refused`, fake `open` never called; `test_helper_refuses_bad_ticket`; `test_helper_stop` (SIGTERM reaches the fake app, stopped_reason set); `test_helper_exits_and_stops_run_on_pipe_close`; `test_helper_say_uses_double_dash` (fake say binary records argv); `test_cli_panel_starts_helper_before_sandbox` (order: helper start, then `sandbox.apply`; `audit-ui` with no flows dir starts none).
+- [ ] **Step 2:** run → FAIL.
+- [ ] **Step 3:** implement.
+- [ ] **Step 4:** full suite → pass; also run the sandbox check: a Python process that calls `start_helper`, then `sandbox.apply(UI_PROFILE)`, then `helper.say("test")` returns without error (manual, controller).
+- [ ] **Step 5:** commit `feat(panel): launch helper split off before the sandbox`.
+
+### Task 10: restyle to the journey-v2 mockups
+
+**Files:**
+- Modify: `govaios/audit/web.py` (or `govaios/panel/pages.py` if rendering lives there): one shared stylesheet in `_page`, markup classes.
+- Test: `tests/test_panel_web.py`
+
+**Interfaces:**
+- Reference: `.superpowers/brainstorm/59204-1793959122/content/journey-v2.html` (palette, type, layout of Talk, apps lists, session ring, conversation, run steps, approvals, audit table).
+- Constraints: CSP unchanged (`default-src 'none'; style-src 'unsafe-inline'`): inline `<style>` only, system font stacks only (no web fonts, no images, no SVG files — inline SVG allowed, the QR already is), no JavaScript. All existing text, forms, fields and routes unchanged; the session ring is a CSS rendering of minutes left. Works at 375 px wide; visible keyboard focus; respects `prefers-color-scheme`.
+
+- [ ] **Step 1: Failing test:** `test_pages_share_stylesheet` (every page has the same `<style>` block and a `<main>`; no `<script`, no `http` URLs in the page).
+- [ ] **Step 2:** run → FAIL.
+- [ ] **Step 3:** implement.
+- [ ] **Step 4:** full suite → pass.
+- [ ] **Step 5:** commit `feat(panel): mockup styling`.
