@@ -514,6 +514,8 @@ class FakeHelper:
         self.closed = False
         FakeHelper.last = self
 
+    run = say = staticmethod(lambda *a, **k: None)
+
     def close(self):
         self.closed = True
 
@@ -691,3 +693,81 @@ def test_cli_empty_ticket_env_is_no_ticket(monkeypatch):
     monkeypatch.setenv("GOVAIOS_RUN_TICKET", "")
     main(["run", "x.yaml", "--dev"])
     assert seen["ticket"] is None
+
+
+def _agent_env(monkeypatch, govaios_home, port=0):
+    from govaios import cli, sandbox
+    monkeypatch.setattr(cli, "AGENT_PORT", port)
+    monkeypatch.setattr(sandbox, "apply", lambda p: None)
+    monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
+
+
+def test_agent_args(monkeypatch, govaios_home):
+    from govaios import cli, sandbox
+    from govaios.audit import web
+    order, seen = [], []
+
+    class Srv:
+        server_address = ("127.0.0.1", 8765)
+        serve_forever = server_close = lambda self: None
+    monkeypatch.setattr("govaios.panel.helper.start_helper",
+                        lambda flows, home: order.append(("helper", flows)) or FakeHelper())
+    monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None:
+                        seen.append((home, port, flows_dir)) or Srv())
+    assert cli.AGENT_PORT == 8765
+    assert main(["panel", "--agent"]) == 0
+    flows = (govaios_home / "apps" / "flows").resolve()
+    assert order == [("helper", flows), ("apply", sandbox.UI_PROFILE)]
+    assert seen == [(govaios_home, 8765, flows)]
+    assert "Control panel: http://127.0.0.1:8765/" in (govaios_home / "panel.log").read_text()
+
+
+def test_agent_missing_apps_dir(monkeypatch, govaios_home):
+    from govaios.audit import web
+    _agent_env(monkeypatch, govaios_home)
+    seen = {}
+
+    def make(home, port, flows_dir=None, helper=None):
+        srv = real(home, 0, flows_dir=flows_dir, tick_s=None)
+        seen["srv"] = srv
+        srv.serve_forever = lambda: None
+        return srv
+    real = web.make_server
+    monkeypatch.setattr(web, "make_server", make)
+    assert not (govaios_home / "apps").exists()
+    assert main(["panel", "--agent"]) == 0
+    assert seen["srv"].panel is not None   # started with the folder absent
+    from govaios.panel.apps import list_apps
+    assert list_apps(govaios_home / "apps" / "flows", govaios_home) == []
+
+
+def test_agent_port_busy_exits_1_and_logs_once(monkeypatch, govaios_home):
+    import socket
+    _agent_env(monkeypatch, govaios_home)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen()
+        monkeypatch.setattr("govaios.cli.AGENT_PORT", s.getsockname()[1])
+        assert main(["panel", "--agent"]) == 1
+        assert main(["panel", "--agent"]) == 1
+    lines = [l for l in (govaios_home / "panel.log").read_text().splitlines() if "in use" in l]
+    assert len(lines) == 1 and lines[0].startswith("panel: port ") and "Traceback" not in (govaios_home / "panel.log").read_text()
+
+
+def test_agent_no_ui_login_at_start(monkeypatch, govaios_home):
+    from govaios import auth
+    from govaios.audit import web
+    from govaios.audit.log import AuditLog
+    _agent_env(monkeypatch, govaios_home)
+    monkeypatch.setattr(auth, "prove", lambda *a, **k: pytest.fail("sign-in happens on the page"))
+    real = web.make_server
+
+    def make(home, port, flows_dir=None, helper=None):
+        srv = real(home, 0, flows_dir=flows_dir, tick_s=None)
+        srv.serve_forever = lambda: None
+        return srv
+    monkeypatch.setattr(web, "make_server", make)
+    assert main(["panel", "--agent"]) == 0
+    p = AuditLog(govaios_home).path
+    assert not p.exists() or "ui_login" not in p.read_text()

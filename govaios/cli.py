@@ -1,4 +1,5 @@
 import argparse
+import errno
 import os
 import stat
 import time
@@ -125,7 +126,15 @@ def _audit_ui(args) -> int:
 
     home = data_home()   # sign-in (Touch ID, audited ui_login) happens on the page
     flows = Path(args.flows_dir).resolve() if args.flows_dir else None
-    server = make_server(home, args.port, flows_dir=flows, helper=args.helper)
+    try:
+        server = make_server(home, args.port, flows_dir=flows, helper=args.helper)
+    except OSError as e:
+        if not args.agent:
+            raise
+        from .panel import agentlog   # a login agent has no terminal: one log line, not a traceback
+        agentlog.once(home, f"panel: port {args.port} is in use" if e.errno == errno.EADDRINUSE
+                      else f"panel: cannot start ({type(e).__name__})")
+        return 1
     print(f"Control panel: http://127.0.0.1:{server.server_address[1]}/", flush=True)
     import signal
 
@@ -306,6 +315,9 @@ def _selftest(args) -> int:
     return 0
 
 
+AGENT_PORT = 8765   # test seam: the agent port is not a CLI flag
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="gov-aios", allow_abbrev=False)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -330,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         a = sub.add_parser(name)
         a.add_argument("flows_dir", nargs="?")
         a.add_argument("--port", type=int, default=0)
+        a.add_argument("--agent", action="store_true")   # login LaunchAgent: fixed port, apps under the data home, log file
         a.set_defaults(fn=fn)
     x = sub.add_parser("dump")
     x.add_argument("--dev", action="store_true")
@@ -346,9 +359,18 @@ def main(argv: list[str] | None = None) -> int:
     _write_shim_file("GOVAIOS_PID_FILE", os.getpid())  # lets the shim stop this run on Ctrl-C
     code = 1
     helper = None
+    out_err = None
     try:
         args = p.parse_args(argv)
         args.helper = None
+        if getattr(args, "agent", False):
+            from .home import data_home
+            from .panel import agentlog
+            args.port = AGENT_PORT
+            args.flows_dir = str(data_home() / "apps" / "flows")   # may not exist: the panel shows "No apps yet."
+            log = agentlog.open_log(data_home())   # before the sandbox (it allows file writes; opened early anyway)
+            out_err = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = log
         if args.cmd in ("panel", "audit-ui") and args.flows_dir:   # before the sandbox and any thread: it runs the app
             from pathlib import Path
 
@@ -379,6 +401,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if helper is not None:
             helper.close()   # ends the helper and any run it still has
+        if out_err:
+            sys.stdout, sys.stderr = out_err
+            log.close()
     _write_exit(code)
     return code
 
