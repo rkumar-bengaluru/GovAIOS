@@ -56,7 +56,9 @@ def _line(v):
 
 
 _IST = timezone(timedelta(hours=5, minutes=30))   # no DST; avoids tz data in the frozen app
-_AGO = re.compile(r"(?:posted\s+)?(?:(\d+|an?)\s+(minute|hour|day)s?\s+ago|(just now|today|yesterday))")
+_AGO = re.compile(r"(?:posted\s+)?(?:(\d+|an?)\s*(sec|second|min|minute|hr|hour|day)s?\s+ago|(just now|today|yesterday))")
+_UNIT = {"sec": "seconds", "second": "seconds", "min": "minutes", "minute": "minutes", "hr": "hours", "hour": "hours",
+         "day": "days"}
 
 
 def _posted_on(posted, captured_at):
@@ -76,7 +78,7 @@ def _posted_on(posted, captured_at):
     else:
         k = 1 if n in ("a", "an") else int(n)
         try:
-            d = (at - timedelta(**{unit + "s": k})).date()
+            d = (at - timedelta(**{_UNIT[unit]: k})).date()
         except OverflowError:   # absurd age from the page
             return None
     if d > datetime.now(_IST).date():   # JobLens refuses a date after its today (Asia/Kolkata)
