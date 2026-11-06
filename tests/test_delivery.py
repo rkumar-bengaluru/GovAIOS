@@ -123,13 +123,14 @@ class Fake:
             def do_POST(self):
                 outer.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 code, body = outer.answers.pop(0)
-                data = json.dumps(body).encode()
-                self.send_response(code)
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
                 if on_answer:
                     on_answer()
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data) + (100 if body == "short" else 0)))
+                self.end_headers()
+                self.wfile.write(data)
+                self.close_connection = True
 
             def log_message(self, *a):
                 pass
@@ -261,3 +262,16 @@ def test_audit_has_no_content(govaios_home, fake):
         description="ZQXMARKER " * 40)
     batch(govaios_home)
     assert "ZQXMARKER" not in (govaios_home / "audit.jsonl").read_text()
+
+
+def test_truncated_response_is_retry(govaios_home, fake):
+    fake([(200, "short")])
+    job(govaios_home, "a.json")
+    assert batch(govaios_home)["retry"] == 1
+
+
+def test_fifo_not_opened_blocking(govaios_home, fake):
+    f = fake([(202, {"id": 1})])
+    job(govaios_home, "a.json")
+    os.mkfifo(govaios_home / "jd_selected" / "x.json")
+    assert batch(govaios_home)["delivered"] == 1 and len(f.bodies) == 1

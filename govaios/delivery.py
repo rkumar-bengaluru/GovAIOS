@@ -1,6 +1,7 @@
 """Delivery of a flow's saved job files to a local service (block check, payload, once-only tracking)."""
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -122,7 +123,7 @@ def send(url, payload, timeout=20):
             code, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         code, raw = e.code, e.read()
-    except (OSError, ValueError):  # refused, timeout, DNS
+    except (OSError, ValueError, http.client.HTTPException):  # refused, timeout, DNS, truncated body
         return None, None
     try:
         body = json.loads(raw)
@@ -161,7 +162,7 @@ MAX_BYTES = 1_000_000
 def _read(path):
     """Bytes of a regular, non-symlink file (None otherwise); at most MAX_BYTES + 1."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # NONBLOCK: a FIFO must not hang open
     except OSError:
         return None
     with os.fdopen(fd, "rb") as f:
