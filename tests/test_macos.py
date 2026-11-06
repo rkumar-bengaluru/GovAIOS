@@ -29,6 +29,7 @@ class AX:
     def __init__(self):
         self.focus_pid, self.window, self.hit_pid = CHROME, "win1", CHROME
         self.hit_window = "win1"
+        self.hit_parent = None
         self.focus_err = self.hit_err = 0
 
     def copy_attr(self, el, name, _):
@@ -38,6 +39,8 @@ class AX:
             return 0, self.window
         if (el, name) == ("hit", "AXWindow"):
             return 0, self.hit_window
+        if (el, name) == ("hit", "AXParent") and self.hit_parent:
+            return 0, self.hit_parent
         return -25212, None
 
     def get_pid(self, el, _):
@@ -134,15 +137,15 @@ def test_focused_window_id_requires_target_focus(env):
 def test_click_point_owned_by_other_app_refuses(env):
     env.ax.hit_pid = OTHER
     with pytest.raises(RuntimeError, match="click point"):
-        env.d.click(Node("link", "SECRET"))
+        env.d.click(Node("link", "SECRET", handle="hit"))
     env.ax.hit_pid, env.ax.hit_err = CHROME, -25200
     with pytest.raises(RuntimeError):
-        env.d.click(Node("link", "SECRET"))
+        env.d.click(Node("link", "SECRET", handle="hit"))
     assert env.posted == []
 
 
 def test_click_in_target_posts_mouse(env):
-    env.d.click(Node("link", "SECRET"))
+    env.d.click(Node("link", "SECRET", handle="hit"))
     assert len(env.posted) == 3
 
 
@@ -239,7 +242,7 @@ def test_click_rechecks_before_button_down(env, monkeypatch):
         env.ax.hit_pid = OTHER
     monkeypatch.setattr(macos.Q, "CGEventPost", move_then_steal)
     with pytest.raises(RuntimeError, match="click point"):
-        env.d.click(Node("link", "SECRET"))
+        env.d.click(Node("link", "SECRET", handle="hit"))
     assert [ev[1] for _, ev in env.posted] == [5]   # mouse moved only; no down/up
 
 
@@ -247,9 +250,9 @@ def test_click_point_in_other_window_of_target_refuses(env):
     env.d.pin_window(env.d.focused_window_id("chrome"))
     env.ax.hit_window = "win2"   # e.g. another Chrome window overlapping the element
     with pytest.raises(RuntimeError, match="verified window"):
-        env.d.click(Node("link", "SECRET"))
+        env.d.click(Node("link", "SECRET", handle="hit"))
     env.ax.hit_window = "win1"
-    env.d.click(Node("link", "SECRET"))
+    env.d.click(Node("link", "SECRET", handle="hit"))
     assert len(env.posted) == 3
 
 
@@ -279,3 +282,13 @@ def test_input_refused_is_a_readable_stop():
     from govaios.runstate import Stop
     e = InputRefused("input refused: target app is not frontmost")
     assert isinstance(e, Stop) and isinstance(e, RuntimeError)   # prints as STOPPED: <fixed text>, not ERROR: RuntimeError
+
+
+def test_click_refuses_when_something_else_is_under_the_point(env):
+    """An ad that slid over the job link after layout settled: same app and window, wrong element."""
+    with pytest.raises(RuntimeError, match="not on the target element"):
+        env.d.click(Node("link", "SECRET", handle="job_link"))
+    assert env.posted == []   # not even the pointer move
+    env.ax.hit_parent = "job_link"   # the hit is the link's text, inside the link
+    env.d.click(Node("link", "SECRET", handle="job_link"))
+    assert len(env.posted) == 3
