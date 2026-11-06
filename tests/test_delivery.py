@@ -1,4 +1,12 @@
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
+
+from govaios import delivery
+from govaios.runstate import Stop
 
 from govaios.audit.log import AuditLog
 from govaios.delivery import Deliveries, build_payload, check_block
@@ -87,3 +95,169 @@ def test_deliveries_once(tmp_path):
 def test_audit_accepts_delivery_entry(govaios_home):
     AuditLog(govaios_home).append("delivery", flow="f", target="joblens", file_hash="ab" * 32,
                                   response_code=202, listing_id=1, outcome="delivered")
+
+
+@pytest.mark.parametrize("code,body,want", [
+    (202, {"id": 5}, ("delivered", 5, None)),
+    (200, {"id": 6, "duplicate": True}, ("duplicate", 6, None)),
+    (202, {"id": "x"}, ("delivered", None, None)),
+    (400, {"error": {"message": "title: too long"}}, ("failed", None, "title")),
+    (400, {"error": {"message": "<b>x</b>: y"}}, ("failed", None, "bad_request")),
+    (400, None, ("failed", None, "bad_request")),
+    (409, None, ("retry", None, "conflict")),
+    (429, None, ("retry", None, "intake_cap")),
+    (None, None, ("retry", None, "unreachable")),
+    (503, None, ("retry", None, "server_error")),
+    (404, None, ("failed", None, "http_404")),
+])
+def test_classify_table(code, body, want):
+    assert delivery.classify(code, body) == want
+
+
+class Fake:
+    def __init__(self, answers, on_answer=None):
+        self.answers, self.bodies = list(answers), []
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                outer.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                code, body = outer.answers.pop(0)
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                if on_answer:
+                    on_answer()
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = "http://127.0.0.1:%d/x" % self.srv.server_port
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+@pytest.fixture
+def fake(monkeypatch):
+    made = []
+
+    def make(answers, on_answer=None):
+        f = Fake(answers, on_answer)
+        made.append(f)
+        monkeypatch.setitem(delivery.TARGETS["joblens"], "url", f.url)
+        return f
+
+    yield make
+    for f in made:
+        f.close()
+
+
+FLOW = {"id": "f1"}
+
+
+def job(home, name, at="2026-01-01", title="Engineer", flow="f1", **kw):
+    d = home / "jd_selected"
+    d.mkdir(parents=True, exist_ok=True)
+    rec = {"flow": flow, "captured_at": at, "job_title": title, "description": DESC, **kw}
+    (d / name).write_text(json.dumps(rec))
+    return d / name
+
+
+def batch(home):
+    return delivery.deliver_batch(home, FLOW, GOOD, AuditLog(home))
+
+
+def test_batch_sends_once(govaios_home, fake):
+    f = fake([(202, {"id": 1}), (200, {"id": 2, "duplicate": True})])
+    job(govaios_home, "a.json", at="1")
+    job(govaios_home, "b.json", at="2")
+    c = batch(govaios_home)
+    assert c["delivered"] == 1 and c["duplicate"] == 1
+    batch(govaios_home)
+    assert len(f.bodies) == 2
+
+
+def test_batch_changed_file_sent_again(govaios_home, fake):
+    f = fake([(202, {"id": 1}), (202, {"id": 2})])
+    p = job(govaios_home, "a.json")
+    batch(govaios_home)
+    job(govaios_home, "a.json", title="Other Engineer")
+    batch(govaios_home)
+    assert len(f.bodies) == 2
+
+
+def test_409_stops_batch_rest_pending(govaios_home, fake):
+    f = fake([(202, {"id": 1}), (409, {})])
+    for i in "abc":
+        job(govaios_home, i + ".json", at=i)
+    c = batch(govaios_home)
+    assert len(f.bodies) == 2 and c["retry"] == 1 and c["left"] == 1
+    f.answers = [(202, {"id": 2}), (202, {"id": 3})]
+    batch(govaios_home)
+    assert len(f.bodies) == 4
+
+
+def test_unreachable_is_retry(govaios_home, monkeypatch):
+    monkeypatch.setitem(delivery.TARGETS["joblens"], "url", "http://127.0.0.1:1/x")
+    job(govaios_home, "a.json")
+    assert batch(govaios_home)["retry"] == 1
+    assert not Deliveries(govaios_home / "deliveries.json")._load() or all(
+        not Deliveries(govaios_home / "deliveries.json").done(h) for h in Deliveries(govaios_home / "deliveries.json")._load())
+
+
+def test_order_oldest_captured_first(govaios_home, fake):
+    f = fake([(202, {"id": 1}), (202, {"id": 2})])
+    job(govaios_home, "a.json", at="2026-02", title="Newer Role")
+    job(govaios_home, "b.json", at="2026-01", title="Older Role")
+    batch(govaios_home)
+    assert [b["title"] for b in f.bodies] == ["Older Role", "Newer Role"]
+
+
+def test_other_flow_files_ignored(govaios_home, fake):
+    f = fake([])
+    job(govaios_home, "a.json", flow="other")
+    c = batch(govaios_home)
+    assert not f.bodies and not any(c.values())
+
+
+def test_corrupt_json_failed_and_batch_continues(govaios_home, fake):
+    f = fake([(202, {"id": 1})])
+    (govaios_home / "jd_selected").mkdir(parents=True)
+    (govaios_home / "jd_selected" / "a.json").write_text("{nope")
+    job(govaios_home, "b.json")
+    c = batch(govaios_home)
+    assert c["failed"] == 1 and c["delivered"] == 1 and len(f.bodies) == 1
+
+
+def test_symlink_not_followed(govaios_home, fake, tmp_path):
+    f = fake([])
+    out = job(tmp_path, "real.json")
+    d = govaios_home / "jd_selected"
+    d.mkdir(parents=True)
+    os.symlink(out, d / "link.json")
+    batch(govaios_home)
+    assert not f.bodies
+
+
+def test_stop_flag_stops_before_next_file(govaios_home, fake):
+    f = fake([(202, {"id": 1}), (202, {"id": 2})], on_answer=lambda: (govaios_home / "STOPPED").write_text(""))
+    job(govaios_home, "a.json", at="1")
+    job(govaios_home, "b.json", at="2")
+    with pytest.raises(Stop):
+        batch(govaios_home)
+    assert len(f.bodies) == 1
+    assert len(Deliveries(govaios_home / "deliveries.json")._load()) == 1
+
+
+def test_audit_has_no_content(govaios_home, fake):
+    fake([(202, {"id": 1})])
+    job(govaios_home, "a.json", job_title="ZQXMARKER", company="ZQXMARKER", url="https://ZQXMARKER.example/x",
+        description="ZQXMARKER " * 40)
+    batch(govaios_home)
+    assert "ZQXMARKER" not in (govaios_home / "audit.jsonl").read_text()
