@@ -87,3 +87,46 @@ def test_ticket_rejections(tmp_path, case):
         p.unlink()
     assert not tickets.consume(tmp_path, t, flow, dig, now=lambda: now)
     assert not p.exists() and not p.is_symlink()
+
+
+def test_ticket_race_only_one_wins(tmp_path, monkeypatch):
+    t = tickets.create(tmp_path, "f", "d", now=lambda: 100.0)
+    real_open, results = os.open, []
+
+    def racing_open(path, *a, **k):
+        if ".used-" in str(path) and not results:
+            results.append(tickets.consume(tmp_path, t, "f", "d", now=lambda: 101.0))  # rival
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(tickets.os, "open", racing_open)
+    assert tickets.consume(tmp_path, t, "f", "d", now=lambda: 101.0)
+    assert results == [False]
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dir"])
+def test_ticket_non_regular(tmp_path, kind):
+    (tmp_path / "tickets").mkdir()
+    t = "a" * 64
+    p = tmp_path / "tickets" / t
+    os.mkfifo(p) if kind == "fifo" else p.mkdir()
+    assert not tickets.consume(tmp_path, t, "f", "d")
+    assert not p.exists()
+
+
+@pytest.mark.parametrize("delta,ok", [(0, True), (60, True), (60.01, False), (-0.01, False)])
+def test_ticket_boundaries(tmp_path, delta, ok):
+    t = tickets.create(tmp_path, "f", "d", now=lambda: 100.0)
+    (tmp_path / "tickets" / t).write_text(json.dumps({"flow": "f", "digest": "d", "expires": 100.0 + delta}))
+    assert tickets.consume(tmp_path, t, "f", "d", now=lambda: 100.0) is ok
+
+
+def test_ticket_expires_equals_now(tmp_path):
+    t = tickets.create(tmp_path, "f", "d", now=lambda: 100.0)
+    assert tickets.consume(tmp_path, t, "f", "d", now=lambda: 160.0)
+
+
+def test_open_after_end():
+    s = Session(Clock())
+    s.open()
+    s.end("x")
+    assert s.open()

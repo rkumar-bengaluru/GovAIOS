@@ -3,10 +3,11 @@ import json
 import os
 import re
 import secrets
+import stat
 import time
 from pathlib import Path
 
-from govaios.panel.totp import _read_nofollow, _write_new
+from govaios.panel.totp import _write_new
 
 TICKET_S = 60
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -24,13 +25,22 @@ def consume(home: Path, token: str, flow_id: str, digest: str, now=time.time) ->
     if not isinstance(token, str) or not _HEX64.fullmatch(token):
         return False
     p = Path(home) / "tickets" / token
+    mine = p.with_name(p.name + ".used-" + secrets.token_hex(4))
     try:
-        raw = _read_nofollow(p)
-    finally:
-        p.unlink(missing_ok=True)
-    try:
-        t = json.loads(raw)
-        n = now()
-        return t["flow"] == flow_id and t["digest"] == digest and 0 <= t["expires"] - n <= TICKET_S
-    except (TypeError, ValueError, KeyError):
+        os.rename(p, mine)  # atomic claim: only one consumer wins
+    except OSError:
         return False
+    try:
+        fd = os.open(mine, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return False
+            t = json.loads(f.read())
+        return t["flow"] == flow_id and t["digest"] == digest and 0 <= t["expires"] - now() <= TICKET_S
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+    finally:
+        try:
+            mine.unlink()
+        except OSError:
+            pass
