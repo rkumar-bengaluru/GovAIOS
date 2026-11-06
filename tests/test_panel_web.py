@@ -5,6 +5,7 @@ import re
 import shutil
 import threading
 import time
+from http.cookies import SimpleCookie
 from urllib.parse import urlencode
 
 import pytest
@@ -19,8 +20,6 @@ from govaios.panel.totp import SecretStore, code_at
 
 CHAIN = {"seq", "ts", "prev", "hash", "sig"}   # chain metadata, not entry content
 CSP = "default-src 'none'; style-src 'unsafe-inline'"
-
-
 class FakeLaunch:
     gate = None   # a test sets an Event to hold __init__ (the run start) open
 
@@ -46,7 +45,7 @@ class FakeLaunch:
 
 
 @pytest.fixture
-def panel(tmp_path, monkeypatch):
+def panel(tmp_path, monkeypatch, ui):
     from govaios import auth
     flows = tmp_path / "flows"
     shutil.copytree(REPO / "flows", flows)
@@ -65,11 +64,13 @@ def panel(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "screen_locked", lambda: False)
     monkeypatch.setattr(auth, "approve", lambda q, r, h, **k: (asked.append(q), (answers["approve"], "biometric"))[1])
     monkeypatch.setattr(auth, "prove", lambda r, h, **k: (asked.append(r), (answers["prove"], "biometric"))[1])
+    from govaios.panel import settings
+    settings.set_name(home, "Rupak")
     made = []
     launcher = type("L", (FakeLaunch,), {"made": made})
     spoken = []
     mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
-    srv, code = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
+    srv = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
                             now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None)
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
@@ -85,10 +86,10 @@ def panel(tmp_path, monkeypatch):
         r = c.getresponse()
         return r.status, r.read().decode(), r
 
-    sid = req(f"/login?c={code}")[2].getheader("Set-Cookie").split(";")[0][2:]
+    sid = ui.signin(srv)
     P = type("P", (), {})()
     P.home, P.flows, P.srv, P.made, P.answers, P.asked, P.req, P.sid = home, flows, srv, made, answers, asked, req, sid
-    P.spoken, P.mono, P.wall, P.launcher = spoken, mono, wall, launcher
+    P.spoken, P.mono, P.wall, P.launcher, P.ui = spoken, mono, wall, launcher, ui
     P.get = lambda path: req(path, cookie=sid)
     P.csrf = lambda: re.search(r"name=csrf value='([^']+)'", P.get("/")[1])[1]
     P.post = lambda path, headers=None, **f: req(path, "POST", cookie=sid, headers=headers,
@@ -303,12 +304,12 @@ def test_audit_pages_moved(panel):
     log.append("request", action="run_start", channel="touch_id", auth="biometric")
     log.append("flow_end", flow="b", outcome="done")
     s, body, _ = P.get("/audit")
-    assert s == 200 and "<th>started by</th>" in body and "OK 6 entries" in body
-    assert "Panel, session code" in body and "Terminal, Touch ID" in body
-    assert P.get("/audit/run/1")[0] == 200 and P.get("/audit/log")[0] == 200
+    assert s == 200 and "<th>started by</th>" in body and "OK 7 entries" in body
+    assert "Panel" in P.get("/audit/app/a")[1] and "Terminal" in P.get("/audit/app/b")[1]
+    assert P.get("/audit/run/2")[0] == 200 and P.get("/audit/log")[0] == 200   # seq 1 is the sign-in
     assert P.get("/log")[0] == 404 and P.get("/run/1")[0] == 404
     talk = P.get("/")[1]
-    assert "started by" not in talk and "OK 6 entries" not in talk
+    assert "started by" not in talk and "OK 7 entries" not in talk
 
 
 def test_page_has_no_script_and_csp_unchanged(panel):
@@ -423,20 +424,18 @@ def test_stopped_run_speaks_reason(panel):
     assert P.spoken[-1] == "Rupak, the JobLens flow stopped: exit 3."
 
 
-def test_server_waits_for_live_run(panel, monkeypatch):
+def test_expiry_keeps_serving_and_run_reports(panel):
+    """No self-shutdown: an expired sign-in leaves the run going, and the ticker still reports it."""
     P = panel
     L = _running(P)
-    down = threading.Event()
-    real = P.srv.shutdown
-    monkeypatch.setattr(P.srv, "shutdown", lambda: (down.set(), real()))
-    P.wall[0] += 3601
-    assert P.get("/")[0] == 403   # browser session over
+    P.wall[0] += 8 * 3600
+    assert "Sign in with Touch ID" in P.get("/")[1]
     _tick(P)
-    assert not down.wait(0.3) and P.get("/")[0] == 403   # still serving while the run is live
     assert P.srv.panel.session.active() and L.stopped is None
     L.code, L.done = 0, True
     _tick(P)
-    assert down.wait(2) and P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
+    assert P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
+    assert P.get("/audit")[0] == 303   # expired sign-in: back to the Locked page
 
 
 def test_server_close_stops_live_run(panel):
@@ -482,28 +481,9 @@ def test_end_racing_run_start_stops_that_run(panel):
     assert not P.srv.panel.session.active()
 
 
-def test_shutdown_reports_finished_run_first(panel, monkeypatch):
-    P = panel
-    L = _running(P)
-    L.code, L.done = 0, True   # finished, not yet reported: no tick has run
-    down = threading.Event()
-    real = P.srv.shutdown
-    monkeypatch.setattr(P.srv, "shutdown", lambda: (down.set(), real()))
-    P.wall[0] += 3601
-    assert P.req("/audit", cookie=P.sid)[0] == 403
-    # the shutdown may find the speech still going: wait for it, then the next tick shuts down
-    while not down.is_set():
-        if P.srv.panel.voice:
-            P.srv.panel.voice.join(5)
-        P.srv.panel.tick()
-        down.wait(0.05)
-    assert P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
-    assert "GOV-AIOS -> JobLens finished: done" in P.srv.panel.convo
-
-
 def test_no_ticker_when_tick_s_none(tmp_path):
     before = threading.active_count()
-    srv, _ = make_server(tmp_path / "h", tick_s=None)
+    srv = make_server(tmp_path / "h", tick_s=None)
     assert threading.active_count() == before
     srv.server_close()
 
@@ -519,13 +499,11 @@ def test_say_uses_usr_bin_say(monkeypatch):
     web._say("hi")   # errors ignored
 
 
-def test_talk_without_apps_folder_says_how_to_start(tmp_path):
-    srv, code = make_server(tmp_path / "h", tick_s=None)
+def test_talk_without_apps_folder_says_how_to_start(tmp_path, ui):
+    srv = make_server(tmp_path / "h", tick_s=None)
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     try:
-        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-        c.request("GET", f"/login?c={code}")
-        sid = c.getresponse().getheader("Set-Cookie").split(";")[0][2:]
+        sid = ui.signin(srv)
         c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
         c.request("GET", "/", headers={"Cookie": f"s={sid}"})
         assert "No apps folder given. Start with: bin/gov-aios panel flows" in c.getresponse().read().decode()
@@ -559,3 +537,311 @@ def test_rail_marks_current_page(panel):
                        ("/approvals", "href='/approvals' aria-current=page>Approvals")):
         body = P.get(path)[1]
         assert link in body and body.count("aria-current=page") == 1
+
+
+# --- sign in from the page (v2 Task 1)
+
+def _port(P):
+    return P.srv.server_address[1]
+
+
+def test_signed_out_page_shows_code_and_button(panel):
+    P = panel
+    s, body, r = P.ui.raw(_port(P), "GET", "/")
+    assert s == 200 and "Sign in with Touch ID" in body and "Locked" in body and P.ui.WORD.search(body)
+    ck = r.getheader("Set-Cookie")
+    assert ck.startswith("pre=") and "HttpOnly" in ck and "SameSite=Strict" in ck and "Max-Age=120" in ck
+    assert re.search(r"name=pre value='([^']+)'", body)[1] == SimpleCookie(ck)["pre"].value
+    assert r.getheader("Content-Security-Policy") == CSP and "<script" not in body.lower()
+    assert "Type a command" not in body and "JobLens" not in body   # nothing of the panel while signed out
+
+
+def test_signin_reason_has_the_page_code(panel):
+    P = panel
+    _, pre, ck, word = P.ui.signed_out(_port(P))
+    P.ui.signed_out(_port(P))   # another page's code does not leak into this prompt
+    s, _, r = P.ui.signin_post(_port(P), ck, pre)
+    assert s == 303 and r.getheader("Location") == "/"
+    assert P.asked == [f"sign in to the GOV-AIOS panel, code {word}"]
+    sid = SimpleCookie(r.getheader("Set-Cookie"))["s"].value
+    assert "HttpOnly" in r.getheader("Set-Cookie") and "SameSite=Strict" in r.getheader("Set-Cookie")
+    assert "Type a command" in P.req("/", cookie=sid)[1]
+    e = _log(P.home, "ui_login")[-1]
+    assert (e["decision"], e["approver"], e["channel"], e["auth"]) == ("allow", "admin", "touch_id", "biometric")
+    s, _, r = P.ui.signin_post(_port(P), ck, pre)   # a pre pair is spent by its one prompt
+    assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None) and len(P.asked) == 1
+
+
+def test_signin_forged(panel):
+    P = panel
+    port = _port(P)
+    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre2, ck2, _ = P.ui.signed_out(port)
+    n = len(_log(P.home, "ui_login"))
+    for r in (P.ui.raw(port, "POST", "/signin", "", {"pre": pre})[2],                       # no pre cookie
+              P.ui.signin_post(port, ck2, pre)[2]):                                          # mismatched
+        assert (r.status, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
+    s, _, r = P.ui.signin_post(port, "made-up", "made-up")                               # never issued
+    assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)   # a fresh Locked page
+    assert P.ui.signin_post(port, ck, pre, {"Origin": "http://evil"})[0] == 403
+    assert P.ui.signin_post(port, ck, pre, {"Origin": "null"})[0] == 403
+    assert P.ui.signin_post(port, ck, pre, {"Host": "evil.example"})[0] == 403
+    assert P.asked == [] and len(_log(P.home, "ui_login")) == n
+    s, _, r = P.ui.signin_post(port, ck2, pre2, {"Origin": f"http://127.0.0.1:{port}"})   # the page's own form
+    assert s == 303 and "s=" in r.getheader("Set-Cookie")
+
+
+def test_signin_stale_pre_gets_fresh_page(panel):
+    P = panel
+    _, pre, ck, _ = P.ui.signed_out(_port(P))
+    P.wall[0] += 100
+    _, pre2, ck2, _ = P.ui.signed_out(_port(P))
+    P.wall[0] += 121
+    s, _, r = P.ui.signin_post(_port(P), ck, pre)
+    assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None) and P.asked == []
+    for _ in range(64):   # evicted by later page loads: also a fresh Locked page, not a bare 403
+        P.ui.signed_out(_port(P))
+    assert P.ui.signin_post(_port(P), ck2, pre2)[2].getheader("Location") == "/" and P.asked == []
+
+
+def test_signin_one_prompt_at_a_time(panel, monkeypatch):
+    from govaios import auth
+    P = panel
+    port = _port(P)
+    entered, release, calls = threading.Event(), threading.Event(), []
+
+    def prove(r, h, **k):
+        calls.append(r)
+        entered.set()
+        release.wait(5)
+        return True, "biometric"
+    monkeypatch.setattr(auth, "prove", prove)
+    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre2, ck2, _ = P.ui.signed_out(port)
+    got = []
+    t = threading.Thread(target=lambda: got.append(P.ui.signin_post(port, ck, pre)))
+    t.start()
+    assert entered.wait(5)
+    s, _, r = P.ui.signin_post(port, ck2, pre2)
+    assert s == 303 and r.getheader("Location") == "/?m=busy" and r.getheader("Set-Cookie") is None
+    assert "Another sign-in is waiting for Touch ID." in P.ui.raw(port, "GET", "/?m=busy")[1]
+    release.set()
+    t.join(5)
+    assert got[0][0] == 303 and "s=" in got[0][2].getheader("Set-Cookie") and len(calls) == 1
+
+
+def test_signin_pause_after_refusal(panel):
+    P = panel
+    port = _port(P)
+    P.answers["prove"] = False
+    _, pre, ck, _ = P.ui.signed_out(port)
+    s, _, r = P.ui.signin_post(port, ck, pre)
+    assert s == 303 and r.getheader("Location") == "/?m=no" and r.getheader("Set-Cookie") is None
+    e = _log(P.home, "ui_login")[-1]
+    assert (e["decision"], e["channel"], e["auth"]) == ("deny", "touch_id", "biometric")
+    P.answers["prove"] = True
+    P.wall[0] += 9.9
+    _, pre, ck, _ = P.ui.signed_out(port)
+    assert P.ui.signin_post(port, ck, pre)[2].getheader("Location") == "/" and len(P.asked) == 1
+    assert "Sign-in paused. Try again in 1 s." in P.ui.raw(port, "GET", "/")[1]
+    P.wall[0] += 0.1
+    _, pre, ck, _ = P.ui.signed_out(port)
+    r = P.ui.signin_post(port, ck, pre)[2]
+    assert len(P.asked) == 2 and "s=" in r.getheader("Set-Cookie")
+
+
+def test_signed_out_get_reuses_valid_pre(panel):
+    P = panel
+    port = _port(P)
+    _, pre, ck, word = P.ui.signed_out(port)
+    s, body, r = P.ui.raw(port, "GET", "/", f"pre={ck}")
+    assert (s, r.getheader("Set-Cookie")) == (200, None)
+    assert re.search(r"name=pre value='([^']+)'", body)[1] == pre and P.ui.WORD.search(body)[1] == word
+    P.wall[0] += 121   # expired: a fresh pair
+    assert P.ui.raw(port, "GET", "/", f"pre={ck}")[2].getheader("Set-Cookie").startswith("pre=")
+
+
+def test_signed_out_other_paths_404_no_cookie(panel):
+    P = panel
+    for path in ("/favicon.ico", "/log", "/auditx"):
+        s, _, r = P.ui.raw(_port(P), "GET", path)
+        assert (s, r.getheader("Set-Cookie")) == (404, None)
+
+
+def test_signed_out_panel_pages_go_to_locked_page_no_cookie(panel):
+    P = panel
+    for path in ("/audit", "/audit/log", "/audit/run/3", "/audit/app/joblens", "/approvals", "/totp/setup"):
+        s, _, r = P.ui.raw(_port(P), "GET", path)
+        assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
+
+
+def test_signin_backoff_doubles_caps_and_resets(panel):
+    P = panel
+    port = _port(P)
+    P.answers["prove"] = False
+
+    def attempt():
+        _, pre, ck, _ = P.ui.signed_out(port)
+        return P.ui.signin_post(port, ck, pre)[2].getheader("Location")
+    for n, secs in enumerate((10, 20, 40, 80, 160, 300, 300), 1):
+        assert attempt() == "/?m=no"
+        asked = len(P.asked)
+        P.wall[0] += secs - 0.5
+        assert attempt() == "/" and len(P.asked) == asked   # still paused: no prompt
+        assert f"Try again in 1 s." in P.ui.raw(port, "GET", "/")[1]
+        P.wall[0] += 0.5
+    P.answers["prove"] = True
+    assert "s=" in (lambda: (lambda t: P.ui.signin_post(port, t[2], t[1])[2])(P.ui.signed_out(port)))().getheader("Set-Cookie")
+    P.answers["prove"] = False
+    assert attempt() == "/?m=no"
+    P.wall[0] += 9.5
+    assert attempt() == "/"   # n restarted at 1: a 10 s pause
+    P.wall[0] += 0.5
+    assert attempt() == "/?m=no"
+
+
+def test_paused_page_shows_whole_seconds_rounded_up(panel):
+    P = panel
+    P.answers["prove"] = False
+    _, pre, ck, _ = P.ui.signed_out(_port(P))
+    P.ui.signin_post(_port(P), ck, pre)
+    P.wall[0] += 3.2
+    assert "Sign-in paused. Try again in 7 s." in P.ui.raw(_port(P), "GET", "/")[1]
+
+
+def test_signin_expires_after_8h(panel):
+    P = panel
+    P.wall[0] += 8 * 3600 - 1
+    assert "Type a command" in P.get("/")[1]
+    P.wall[0] += 1
+    s, body, _ = P.get("/")
+    assert s == 200 and "Sign in with Touch ID" in body and "Type a command" not in body
+    assert P.req("/end", "POST", cookie=P.sid, body={"csrf": "x"})[0] == 403
+    assert "Type a command" in P.req("/", cookie=P.ui.signin(P.srv))[1]   # still serving
+
+
+def test_lock_signs_out_all_and_keeps_serving(panel, monkeypatch):
+    from govaios import auth
+    P = panel
+    sid2 = P.ui.signin(P.srv)
+    L = _running(P)
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    _tick(P)   # the ticker sees the lock
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    for sid in (P.sid, sid2):
+        assert "Sign in with Touch ID" in P.req("/", cookie=sid)[1]
+    assert _log(P.home, "session_end")[-1]["reason"] == "screen_lock" and L.stopped == "session ended"
+    sid3, sid4 = P.ui.signin(P.srv), P.ui.signin(P.srv)
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    assert P.req("/", cookie=sid3)[0] == 403   # a request sees the lock
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    for sid in (sid3, sid4):
+        assert "Sign in with Touch ID" in P.req("/", cookie=sid)[1]
+    assert P.req("/")[0] == 200
+
+
+def test_signout(panel):
+    P = panel
+    _open(P)
+    sid2 = P.ui.signin(P.srv)
+    s, _, r = P.post("/signout")
+    assert s == 303 and r.getheader("Location") == "/"
+    assert "Sign in with Touch ID" in P.get("/")[1]
+    assert "Type a command" in P.req("/", cookie=sid2)[1]
+    assert P.srv.panel.session.active()   # signing one browser out leaves the code session open
+    assert P.req("/signout", "POST", cookie=sid2, body={"csrf": "wrong"})[0] == 403
+
+
+@pytest.mark.parametrize("how", ["busy", "none"])
+def test_signin_no_prompt_shown_is_busy_not_refused(panel, monkeypatch, how):
+    """auth's own busy/none: no sheet was shown, so nothing was refused: no deny audit and no pause."""
+    from govaios import auth
+    P = panel
+    port = _port(P)
+    calls = []
+    monkeypatch.setattr(auth, "prove", lambda r, h, **k: (calls.append(r), (False, how))[1])
+    n = len(_log(P.home, "ui_login"))
+    _, pre, ck, _ = P.ui.signed_out(port)
+    s, _, r = P.ui.signin_post(port, ck, pre)
+    assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/?m=busy", None)
+    assert len(_log(P.home, "ui_login")) == n
+    monkeypatch.setattr(auth, "prove", lambda r, h, **k: (calls.append(r), (True, "biometric"))[1])
+    _, pre, ck, _ = P.ui.signed_out(port)
+    r = P.ui.signin_post(port, ck, pre)[2]   # at once: no 10 s pause
+    assert len(calls) == 2 and "s=" in r.getheader("Set-Cookie")
+
+
+def test_signin_lock_during_prompt_no_session(panel, monkeypatch):
+    from govaios import auth
+    P = panel
+    port = _port(P)
+    locked = [False]
+    monkeypatch.setattr(auth, "screen_locked", lambda: locked[0])
+
+    def prove(r, h, **k):
+        locked[0] = True   # the screen locks while the approved prompt returns
+        return True, "biometric"
+    monkeypatch.setattr(auth, "prove", prove)
+    _, pre, ck, _ = P.ui.signed_out(port)
+    s, _, r = P.ui.signin_post(port, ck, pre)
+    assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
+    locked[0] = False
+    assert P.srv.panel.tick() is None and "Sign in with Touch ID" in P.ui.raw(port, "GET", "/")[1]
+
+
+def test_name_change_used_in_speech(panel):
+    P = panel
+    assert P.post("/name", name="Asha")[0] == 303
+    e = _log(P.home, "setting")
+    assert len(e) == 1 and e[0]["field"] == "name" and "Asha" not in json.dumps(e[0])
+    L = _running(P)
+    L.code, L.summary, L.done = 0, "x", True
+    _tick(P)
+    assert P.spoken == ["Asha, the JobLens flow is complete, thank you."]
+    assert P.post("/name", name="")[0] == 400 and len(_log(P.home, "setting")) == 1
+    assert P.req("/name", "POST", body={"name": "Zed"})[0] == 403
+
+
+def test_name_escaped(panel):
+    P = panel
+    P.post("/name", name="<b>x")
+    page = P.get("/")[1]
+    assert "<b>x" not in page and "&lt;b&gt;x" in page
+    assert "Your name" in P.get("/approvals")[1]
+
+
+def test_name_not_written_when_audit_fails(panel, monkeypatch):
+    P = panel
+    def boom(*a, **k):
+        raise OSError("disk")
+    monkeypatch.setattr(AuditLog, "append", boom)
+    assert P.post("/name", name="Asha")[0] == 500
+    assert json.loads((P.home / "panel.json").read_text())["name"] == "Rupak" and P.srv.panel.name == "Rupak"
+
+
+def test_name_forged_requests_403(panel):
+    P = panel
+    t = P.csrf()
+    assert P.req("/name", "POST", cookie=P.sid, headers={"Origin": "http://evil"}, body={"csrf": t, "name": "Zed"})[0] == 403
+    assert P.req("/name", "POST", cookie=P.sid, body={"csrf": "bad", "name": "Zed"})[0] == 403
+    assert P.srv.panel.name == "Rupak" and not _log(P.home, "setting")
+
+
+@pytest.mark.parametrize("gecos,shown", [("", "Admin"), ("<b>x Y", "&lt;b&gt;x")])
+def test_default_name_from_account_on_page(tmp_path, monkeypatch, ui, gecos, shown):
+    import pwd
+    from govaios import auth
+    real = pwd.getpwuid(__import__("os").getuid())
+    monkeypatch.setattr(pwd, "getpwuid", lambda u: type("E", (), {"pw_gecos": gecos})())
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    srv = make_server(tmp_path, tick_s=None, speak=lambda t: None)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    try:
+        sid = ui.signin(srv)
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        c.request("GET", "/", headers={"Cookie": f"s={sid}"})
+        page = c.getresponse().read().decode()
+        assert shown in page and "<b>x" not in page
+    finally:
+        srv.shutdown()
+        srv.server_close()

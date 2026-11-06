@@ -25,12 +25,12 @@ def no_auth(monkeypatch):
 
 
 def _start(home, clock):
-    srv, code = make_server(home, now=clock)
+    srv = make_server(home, now=clock)
     threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
-    return srv, code
+    return srv
 
 
-def _client(srv, code):
+def _client(srv, ui):
     port = srv.server_address[1]
 
     def req(path, method="GET", cookie=None, headers=None, body=None):
@@ -43,13 +43,11 @@ def _client(srv, code):
         c.request(method, path, body=urlencode(body) if body is not None else None, headers=h)
         r = c.getresponse()
         return r.status, r.read().decode(), r
-    r = req(f"/login?c={code}")
-    ck = r[2].getheader("Set-Cookie")
-    return req, ck.split(";")[0][2:] if ck else None
+    return req, ui.signin(srv)
 
 
 @pytest.fixture
-def web(tmp_path):
+def web(tmp_path, ui):
     home = tmp_path / "home"
     log = AuditLog(home)
     log.append("flow_start", flow="demo_flow")
@@ -57,48 +55,26 @@ def web(tmp_path):
                reason="<script>x</script>")
     log.append("flow_end", flow="demo_flow", outcome="done")
     Approvals(home / "approvals.json").approve_flow("demo_flow", "abc123")
-    srv, code = _start(home, Clock())
-    req, sid = _client(srv, code)
+    srv = _start(home, Clock())
+    req, sid = _client(srv, ui)
 
     def get(path, method="GET", tok=True):
         return req(path, method, cookie=sid if tok else None)
 
-    get.req, get.sid, get.code = req, sid, code
+    get.req, get.sid = req, sid
     yield home, srv, get
     srv.shutdown()
     srv.server_close()
 
 
-def test_login_code_single_use_and_expiry(tmp_path):
-    clock = Clock()
-    srv, code = _start(tmp_path / "h", clock)
-    req = _client(srv, code)[0]
-    s, _, r = req(f"/login?c={code}")
-    assert s == 403  # already used by _client
-    srv.shutdown(); srv.server_close()
-    srv, code = _start(tmp_path / "h", clock)
-    port = srv.server_address[1]
-    c = http.client.HTTPConnection("127.0.0.1", port)
-    c.request("GET", f"/login?c={code}")
-    r = c.getresponse()
-    ck = r.getheader("Set-Cookie")
-    assert r.status == 303 and r.getheader("Location") == "/"
-    assert ck.startswith("s=") and "HttpOnly" in ck and "SameSite=Strict" in ck and "Path=/" in ck
-    srv.shutdown(); srv.server_close()
-    clock2 = Clock()
-    srv, code = _start(tmp_path / "h", clock2)
-    clock2.t += 61
-    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-    c.request("GET", f"/login?c={code}")
-    assert c.getresponse().status == 403
-    srv.shutdown(); srv.server_close()
-
-
 def test_pages_need_cookie(web):
     get = web[2]
     for p in ("/", "/audit", "/audit/log", "/approvals"):
-        assert get(p, tok=False)[0] == 403 and get(p)[0] == 200
-    assert get(f"/?t={get.code}", tok=False)[0] == 403
+        s, body, _ = get(p, tok=False)
+        assert s == (200 if p == "/" else 303) and "demo_flow" not in body and "Revoke" not in body
+        assert ("Sign in with Touch ID" in body) == (p == "/")
+        assert get(p)[0] == 200 and "Sign in with Touch ID" not in get(p)[1]
+    assert "demo_flow" not in get.req("/audit", cookie="forged")[1]
 
 
 def test_host_header_checked(web):
@@ -106,27 +82,21 @@ def test_host_header_checked(web):
     assert s == 403
 
 
-def test_session_expires_and_lock_ends_server(tmp_path, monkeypatch):
+def test_signin_expires_and_lock_never_end_server(tmp_path, monkeypatch, ui):
     from govaios import auth
     clock = Clock()
-    srv, code = _start(tmp_path / "h", clock)
-    req, sid = _client(srv, code)
+    srv = _start(tmp_path / "h", clock)
+    monkeypatch.setattr(srv, "shutdown", lambda: pytest.fail("the panel never shuts itself down"))
+    req, sid = _client(srv, ui)
     assert req("/", cookie=sid)[0] == 200
-    clock.t += 3601
-    called = threading.Event()
-    real = srv.shutdown
-    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
-    assert req("/", cookie=sid)[0] == 403
-    assert called.wait(2)
-    srv.server_close()
-    srv, code = _start(tmp_path / "h2", Clock())
-    req, sid = _client(srv, code)
-    called = threading.Event()
-    real = srv.shutdown
-    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
+    clock.t += 8 * 3600
+    assert "Sign in with Touch ID" in req("/", cookie=sid)[1]
+    sid = _client(srv, ui)[1]
     monkeypatch.setattr(auth, "screen_locked", lambda: True)
     assert req("/", cookie=sid)[0] == 403
-    assert called.wait(2)
+    srv.panel.tick()
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert "Sign in with Touch ID" in req("/", cookie=sid)[1]
     srv.server_close()
 
 
@@ -197,7 +167,7 @@ def test_values_still_escaped(web):
 
 def test_index_lists_run(web):
     s, body, _ = web[2]("/audit")
-    assert s == 200 and "demo_flow" in body and "OK 3 entries" in body
+    assert s == 200 and "demo_flow" in body and "OK 4 entries" in body
 
 
 def test_run_and_approvals(web):
@@ -244,30 +214,33 @@ def test_no_store_headers(web):
         assert "default-src 'none'" in r.getheader("Content-Security-Policy")
 
 
-def test_missing_log_no_crash(tmp_path):
-    srv, code = _start(tmp_path / "empty", Clock())
-    req, sid = _client(srv, code)
+def test_missing_log_no_crash(tmp_path, ui):
+    srv = _start(tmp_path / "empty", Clock())
+    req, sid = _client(srv, ui)
+    p = AuditLog(tmp_path / "empty").path   # sign-in wrote ui_login; take the log away again
+    os.chflags(p, 0)
+    p.unlink()
     status, body, _ = req("/audit", cookie=sid)
     srv.shutdown(); srv.server_close()
-    assert status == 200 and "No runs yet" in body and "FAIL" in body
+    assert status == 200 and "No apps yet" in body and "FAIL" in body
 
 
-def _raw_server(tmp_path, lines, approvals=None):
+def _raw_server(tmp_path, ui, lines, approvals=None):
     import json as _j
     home = tmp_path / "h2"
     AuditLog(home).append("action", step=1)  # creates keys/home
+    srv = _start(home, Clock())
+    req, sid = _client(srv, ui)   # sign in (audits ui_login) before the log is replaced
     p = home / "audit.jsonl"
     os.chflags(p, 0)
     p.write_text("".join(l + "\n" for l in lines))
     if approvals is not None:
         (home / "approvals.json").write_text(approvals)
-    srv, code = _start(home, Clock())
-    req, sid = _client(srv, code)
     return srv, lambda path: req(path, cookie=sid)
 
 
-def test_missing_seq_and_hostile_seq(tmp_path):
-    srv, get = _raw_server(tmp_path, ['{"kind":"flow_start","flow":"f"}',
+def test_missing_seq_and_hostile_seq(tmp_path, ui):
+    srv, get = _raw_server(tmp_path, ui, ['{"kind":"flow_start","flow":"f"}',
                                       '{"seq":"\\"><b>x","kind":"flow_start","flow":"g"}'])
     for path in ("/audit", "/audit/log"):
         s, body, _ = get(path)
@@ -275,16 +248,16 @@ def test_missing_seq_and_hostile_seq(tmp_path):
     srv.shutdown(); srv.server_close()
 
 
-def test_malformed_approvals_notice(tmp_path):
+def test_malformed_approvals_notice(tmp_path, ui):
     for bad in ('{"flows":[1]}', "not json", '{"destinations":{"f":"x"}}', "[1]", '"x"'):
-        srv, get = _raw_server(tmp_path, [], bad)
+        srv, get = _raw_server(tmp_path, ui, [], bad)
         s, body, _ = get("/approvals")
         srv.shutdown(); srv.server_close()
         assert s == 200 and "approvals.json unreadable" in body
 
 
-def test_orphans_visible(tmp_path):
-    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"action","flow":"f","outcome":"ORPHANOUT"}', "garbage<i>",
+def test_orphans_visible(tmp_path, ui):
+    srv, get = _raw_server(tmp_path, ui, ['{"seq":1,"kind":"action","flow":"f","outcome":"ORPHANOUT"}', "garbage<i>",
                                       '{"seq":2,"kind":"flow_start","flow":"f"}'])
     assert "2 entries outside any run" in get("/audit")[1]
     body = get("/audit/log")[1]
@@ -311,16 +284,16 @@ def test_host_checked_on_post_and_other_methods(web):
     assert get.req("/", "PUT", cookie=get.sid)[0] == 405
 
 
-def test_locked_login_shuts_down(tmp_path, monkeypatch):
+def test_locked_signin_refused_and_server_stays(tmp_path, monkeypatch, ui):
     from govaios import auth
-    srv, code = _start(tmp_path / "h", Clock())
-    called = threading.Event()
-    real = srv.shutdown
-    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
+    srv = _start(tmp_path / "h", Clock())
+    monkeypatch.setattr(srv, "shutdown", lambda: pytest.fail("the panel never shuts itself down"))
+    port = srv.server_address[1]
+    _, pre, ck, _ = ui.signed_out(port)
     monkeypatch.setattr(auth, "screen_locked", lambda: True)
-    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-    c.request("GET", f"/login?c={code}")
-    assert c.getresponse().status == 403 and called.wait(2)
+    assert ui.signin_post(port, ck, pre)[0] == 403   # no_auth: prove would fail the test
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert ui.raw(port, "GET", "/")[0] == 200
     srv.server_close()
 
 
@@ -332,8 +305,8 @@ def test_revoke_303_has_security_headers(web):
     assert r.getheader("X-Content-Type-Options") == "nosniff"
 
 
-def test_command_and_auth_columns_escaped(tmp_path):
-    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"request","command":"echo <b>hi</b>","auth":"biometric"}',
+def test_command_and_auth_columns_escaped(tmp_path, ui):
+    srv, get = _raw_server(tmp_path, ui, ['{"seq":1,"kind":"request","command":"echo <b>hi</b>","auth":"biometric"}',
                                       "garbage"])
     body = get("/audit/log")[1]
     assert "<th>auth</th>" in body and "<th>command</th>" in body and "biometric" in body
@@ -342,9 +315,9 @@ def test_command_and_auth_columns_escaped(tmp_path):
     srv.shutdown(); srv.server_close()
 
 
-def test_normal_entries_outside_runs_not_flagged(tmp_path):
+def test_normal_entries_outside_runs_not_flagged(tmp_path, ui):
     """M-13: hook requests, stops, logins, revocations and dump are expected outside runs."""
-    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"request","flow":"claude_code","action":"Bash"}',
+    srv, get = _raw_server(tmp_path, ui, ['{"seq":1,"kind":"request","flow":"claude_code","action":"Bash"}',
                                       '{"seq":2,"kind":"emergency_stop"}', '{"seq":3,"kind":"ui_login"}',
                                       '{"seq":4,"kind":"request","action":"dump"}', '{"seq":5,"kind":"revoke"}',
                                       '{"seq":6,"kind":"request","flow":"f1","action":"deliver"}'])
@@ -372,11 +345,100 @@ def test_revoke_buttons_say_what_they_revoke(web):
     assert "Revoke flow</button>" in body and "Revoke site</button>" in body
 
 
-def test_delivery_entry_shows_its_fields(tmp_path):
-    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"delivery","flow":"f1","target":"joblens","file_hash":"ab12",'
+def test_delivery_entry_shows_its_fields(tmp_path, ui):
+    srv, get = _raw_server(tmp_path, ui, ['{"seq":1,"kind":"delivery","flow":"f1","target":"joblens","file_hash":"ab12",'
                                       '"response_code":202,"listing_id":4711,"outcome":"delivered"}'])
     body = get("/audit/log")[1]
     for c in ("flow", "response_code", "listing_id", "file_hash"):
         assert f"<th>{c}</th>" in body
     assert "<td>202</td>" in body and "<td>4711</td>" in body and "<td>ab12</td>" in body and "<td>f1</td>" in body
     srv.shutdown(); srv.server_close()
+
+
+def _app_server(tmp_path, ui, entries, flows=True):
+    home = tmp_path / "home"
+    log = AuditLog(home)
+    for kind, f in entries:
+        log.append(kind, **f)
+    fd = None
+    if flows:
+        fd = home / "apps" / "flows"
+        fd.mkdir(parents=True)
+        (home / "apps" / "pages").mkdir()
+        for i, n in (("alpha", "Alpha App"), ("beta", "Beta App")):
+            (fd / f"{i}.yaml").write_text(f"workflow:\n  id: {i}\n  name: {n}\n  app: {n}\n  steps: []\n")
+    srv = make_server(home, now=Clock(), flows_dir=fd)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    req, sid = _client(srv, ui)
+    return srv, lambda p: req(p, cookie=sid)
+
+
+RUNS = [("flow_start", {"flow": "alpha"}), ("request", {"action": "run_start", "channel": "totp_session"}),
+        ("delivery", {"flow": "alpha", "outcome": "delivered"}), ("delivery", {"flow": "alpha", "outcome": "delivered"}),
+        ("delivery", {"flow": "alpha", "outcome": "duplicate"}), ("flow_end", {"flow": "alpha", "outcome": "done"}),
+        ("flow_start", {"flow": "alpha"}), ("request", {"action": "run_start", "channel": "touch_id"}),
+        ("flow_end", {"flow": "alpha", "outcome": "failed"}),
+        ("flow_start", {"flow": "gone_app"}), ("flow_end", {"flow": "gone_app", "outcome": "done"})]
+
+
+def test_audit_lists_apps(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS)
+    body = get("/audit")[1]
+    assert body.index("Alpha App") < body.index("Beta App") < body.index("Removed apps") < body.index("gone_app")
+    assert "href='/audit/app/alpha'" in body and "<td>2</td>" in body and "failed" in body and "Terminal" in body
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_app_page_only_its_runs(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS)
+    s, body, _ = get("/audit/app/alpha")
+    assert s == 200 and "gone_app" not in body and "delivered 2, duplicate 1" in body
+    assert body.index("<td>failed") < body.index("<td>done") and "Panel" in body and "Terminal" in body
+    assert "href='/audit/run/" in body and "/audit/log" in body
+    assert get("/audit/app/gone_app")[0] == 200 and get("/audit/app/nosuch")[0] == 404
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_app_bad_id_404(tmp_path, ui):
+    extra = [x for f in ("A", "a" * 65) for x in (("flow_start", {"flow": f}), ("flow_end", {"flow": f, "outcome": "done"}))]
+    srv, get = _app_server(tmp_path, ui, RUNS + extra)
+    for bad in ("../x", "A", "%2e%2e", "a" * 65):   # A and a*65 have runs: only the id check can 404 them
+        assert get(f"/audit/app/{bad}")[0] == 404
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_rows_exact_and_hostile_names(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS + [("flow_start", {"flow": "<b>"}), ("flow_end", {"flow": "<b>", "outcome": "done"})])
+    f = tmp_path / "home" / "apps" / "flows" / "beta.yaml"
+    f.write_text(f.read_text().replace("Beta App", "Beta <i>App"))
+    body = get("/audit")[1]
+    assert "<tr><td><a href='/audit/app/beta'>Beta &lt;i&gt;App</a></td><td>Draft</td><td>0</td><td></td><td></td><td>\u2014</td></tr>" in body
+    assert "<td>Draft</td><td>2</td>" in body
+    assert "<td>&lt;b&gt;</td><td>Removed</td>" in body and "<b>" not in body and "<i>App" not in body
+    srv.shutdown(); srv.server_close()
+
+
+def test_old_runs_started_by_dash(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, [("flow_start", {"flow": "alpha"}), ("flow_end", {"flow": "alpha", "outcome": "done"})])
+    assert "<td>—</td>" in get("/audit/app/alpha")[1]
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_without_flows_dir_state_dash(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS, flows=False)
+    body = get("/audit")[1]
+    assert "gone_app" in body and "Removed" not in body
+    srv.shutdown(); srv.server_close()
+
+
+def test_runs_exclude_panel_entries_and_other_flows():
+    from govaios.audit.web import _outcome, _runs
+    es = [{"seq": 1, "kind": "flow_start", "flow": "a"}, {"seq": 2, "kind": "ui_login", "decision": "allow"},
+          {"seq": 3, "kind": "action", "flow": "a"}, {"seq": 4, "kind": "setting", "field": "name"},
+          {"seq": 5, "kind": "session_open"}, {"seq": 6, "kind": "totp_fail"}, {"seq": 7, "kind": "session_end"},
+          {"seq": 8, "kind": "action", "flow": "claude_code"}, {"seq": 9, "kind": "stop"}]
+    runs, odd = _runs([(e, "") for e in es])
+    assert [e["seq"] for e in runs[0]] == [1, 3, 9]
+    assert odd == 0 and _outcome(runs[0]) == "stop"
+    open_run = _runs([(e, "") for e in es[:8]])[0][0]   # no flow_end: never decided by a panel entry
+    assert [e["seq"] for e in open_run] == [1, 3] and _outcome(open_run) == "action"

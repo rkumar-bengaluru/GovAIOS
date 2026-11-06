@@ -1,0 +1,17 @@
+# Control panel v2 — rulings made during the build
+
+Each line: what was decided — why — cost if wrong.
+
+- **R1** Task 1 keeps `name="Rupak"` as the `make_server` default; Task 3 changes it to None, taking `settings.name(home)` — the plan put the final signature in Task 1 — trivial.
+- **R2** Seeding lives in `packaging/seed-apps.sh SRC_REPO DEST_APPS` — the plan said "e.g." — trivial.
+- **Task 4, dup2 after fork** The panel process dup2s `panel.log` onto fd 1 and 2 after the helper fork; the helper and the apps it runs keep launchd's fds (no `Std*Path`, so /dev/null) — keeps run output, which may be personal, out of `panel.log` — helper crash output is not captured.
+- **Task 5, ordering** Hand-back, the 0700 data-home mkdir and the seeding run before any `launchctl bootout` and the swap — a seed failure aborts before the old install is touched — an upgrade can be blocked by a seed failure, the safe side.
+- **F1** The `pre` cookie and code are issued only on a signed-out `GET /` and reused while valid (unused, under 120 s). Other signed-out GET paths return 404 with no cookie. A missing, mismatched or stale pair on `POST /signin` is a 303 to `/` with no Touch ID prompt; a bad Host/Origin stays 403 — fixes everyday sign-in, where a second tab or a favicon request replaced the token — tests that expected the Locked page on `/audit` now expect 404.
+- **F2** The panel-wide pause after consecutive refused, cancelled or timed-out prompts is 10 s x 2^(n-1), capped at 300 s; success resets n; busy/none do not count. The Locked page says `Sign-in paused. Try again in {s} s.` — overrides the flat 10 s, because the no-prompt-spam goal binds — a legitimate admin who cancels repeatedly waits longer.
+- **F3 (accepted residual)** Browsers do not scope cookies by port. Another program listening on 127.0.0.1 that the admin's browser visits can read the `pre` and `s` cookies. With `pre` it can get its own cookie signed in using the admin's own code; with `s` it holds the panel for up to 8 h. Same class of risk as v1 ruling 5 (a same-user local process). Accepted until the Keychain/Secure Enclave work.
+- **F4** `Server.handle_error` writes one line, `panel: request error (<ExceptionClass>)`, through `agentlog.once`: no traceback, no client address. `agentlog.once` drops its line (returns False) when `panel.log` is at or over the 1 MB cap; rotation stays at startup only — a running panel cannot grow the log without bound — the stdout/stderr stream itself is not capped.
+- **M1** `install.sh` copies and validates `$SETTINGS` (JSON and "hooks" checks) into the root-owned temp file before the first `launchctl bootout`; only the final `mv` stays after the swap — a bad settings file no longer aborts a half-swapped install — none.
+- **M2 (accepted residual)** An app the admin deleted from the apps folder is copied back on the next install. To remove one for good, revoke it in Approvals.
+- **M3** A run's steps are only entries of that run's flow (or with no `flow`); `ui_login`, `session_open`, `session_end`, `setting` and `totp_*` entries are never steps of a run and never decide its outcome — a sign-in during a run showed as the run's outcome — none.
+- **M4 (accepted residual)** A crash at startup writes a traceback to `panel.log` on each 30 s restart. The startup rotation bounds this to about 2 MB.
+- **M5** `com.govaios.panel.plist` sets `AbandonProcessGroup` true, so if the panel dies the helper is not killed with it and still stops its run when the pipe closes — none.
