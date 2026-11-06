@@ -1,20 +1,29 @@
-"""Localhost-only web UI over the signed audit log: cookie session after a Touch ID login; the only write is revocation."""
+"""Localhost-only control panel: cookie session after a Touch ID login; Talk page (TOTP session, typed commands),
+the signed audit log under /audit, approvals with revocation and the authenticator."""
+import base64
 import hmac
 import json
+import math
 import re
 import secrets
 import threading
 import time
+from collections import deque
 from http.cookies import SimpleCookie
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from govaios import auth
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.audit.verify import verify
+from govaios.panel import tickets, totp
+from govaios.panel.apps import list_apps, match
+from govaios.panel.launch import RunLaunch
+from govaios.panel.session import Session
 
 COLS = ["kind", "flow", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason",
         "response_code", "listing_id", "auth", "command", "file_hash"]
@@ -68,17 +77,67 @@ def _td(v):
     return f"<td>{escape('' if v is None else str(v))}</td>"
 
 
-def _page(body):
-    return f"<!doctype html><meta charset=utf-8><title>GOV-AIOS audit</title><style>{CSS}</style>{body}"
+def _page(body, head=""):
+    return f"<!doctype html><meta charset=utf-8>{head}<title>GOV-AIOS</title><style>{CSS}</style>{body}"
+
+
+def _started_by(run):
+    panel = any(e.get("kind") == "request" and e.get("action") == "run_start" and e.get("channel") == "totp_session"
+                for e in run)
+    return "Panel, session code" if panel else "Terminal, Touch ID"
+
+
+def _say(text):
+    pass  # shortcut: silent until Task 6 speaks via /usr/bin/say
+
+
+NO_SESSION = "Enter the 6-digit code from your authenticator."
 
 
 LOGIN_TTL, SESSION_TTL = 60, 3600
 
 
-def make_server(home: Path, port: int = 0, now=time.time):
-    """Returns (server, login code). The caller has already proven presence."""
+def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=RunLaunch, speak=_say,
+                name="Rupak", session=None):
+    """Returns (server, login code); server.panel holds the run session, current run and conversation.
+    The caller has already proven presence."""
+    home = Path(home)
     log = AuditLog(home)
-    approvals_path = Path(home) / "approvals.json"
+    approvals_path = home / "approvals.json"
+    store = totp.SecretStore(home)
+    panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
+                            speak=speak, name=name, pending=None, lock=threading.Lock())
+
+    def tell(line):
+        panel.convo.append(f"GOV-AIOS -> {line}")
+
+    def live():
+        return panel.run is not None and not panel.run.done
+
+    def end_session(reason):
+        """End the run session (stopping its run), then audit; None when none was open."""
+        sid = panel.session.end(reason)
+        if sid is None:
+            return None
+        if live():
+            panel.run.stop("session ended")
+        log.append("session_end", session=sid, reason=reason)
+        return sid
+    panel.end_session = end_session
+
+    def apps():
+        return list_apps(flows_dir, home) if flows_dir else []
+
+    def audited(kind, fields, apply):
+        log.append(kind, **fields)   # audit first, then apply
+        try:
+            apply()
+        except Exception:   # the log must not be left saying it happened when it did not
+            try:
+                log.append(kind, outcome="error", **fields)
+            except Exception:
+                pass   # already answering 500; nothing more can be recorded
+            raise
     code = secrets.token_urlsafe(32)
     state = {"code_ts": now(), "code_used": False, "sessions": {}}  # sid -> (created, csrf)
 
@@ -95,12 +154,13 @@ def make_server(home: Path, port: int = 0, now=time.time):
         runs, orphans = _runs(_entries(log))
         note = f"<p class=fail>{orphans} entries outside any run</p>" if orphans else ""
         rows = "".join(
-            f"<tr><td><a href='/run/{int(r[0]['seq'])}'>{int(r[0]['seq'])}</a></td>{_td(r[0].get('flow'))}"
+            f"<tr><td><a href='/audit/run/{int(r[0]['seq'])}'>{int(r[0]['seq'])}</a></td>{_td(r[0].get('flow'))}"
             f"{_td(r[0].get('ts'))}{_td(sum(1 for e in r if e.get('kind') == 'action'))}"
-            f"{_td(r[-1].get('outcome') or r[-1].get('kind'))}</tr>" for r in runs)
-        table = (f"<table><tr><th>run</th><th>flow</th><th>time</th><th>steps</th><th>outcome</th></tr>{rows}</table>"
-                 if runs else "<p>No runs yet.</p>")
-        return _page(f"<h1>Runs</h1>{banner()}{note}{table}<p><a href='/log'>Full log</a> <a href='/approvals'>Approvals</a></p>")
+            f"{_td(r[-1].get('outcome') or r[-1].get('kind'))}{_td(_started_by(r))}</tr>" for r in runs)
+        table = (f"<table><tr><th>run</th><th>flow</th><th>time</th><th>steps</th><th>outcome</th><th>started by</th></tr>"
+                 f"{rows}</table>" if runs else "<p>No runs yet.</p>")
+        return _page(f"<h1>Runs</h1>{banner()}{note}{table}<p><a href='/audit/log'>Full log</a> "
+                     f"<a href='/approvals'>Approvals</a> <a href='/'>Talk</a></p>")
 
     def run(seq):
         for r in _runs(_entries(log))[0]:
@@ -108,7 +168,7 @@ def make_server(home: Path, port: int = 0, now=time.time):
                 head = "".join(f"<th>{c}</th>" for c in COLS)
                 rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in COLS) + "</tr>" for e in r)
                 return _page(f"<h1>Run {int(seq)}</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                             f"<p><a href='/'>Runs</a></p>")
+                             f"<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
         return None
 
     def fulllog():
@@ -117,9 +177,15 @@ def make_server(home: Path, port: int = 0, now=time.time):
             "<tr>" + "".join(_td(e.get(c)) for c in ["seq", "ts", *COLS]) + "</tr>" if e is not None
             else f"<tr><td colspan={len(COLS) + 2} class=fail>unparsed: {escape(raw)}</td></tr>" for e, raw in _entries(log))
         return _page(f"<h1>Full log</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                     f"<p><a href='/'>Runs</a></p>")
+                     f"<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
+
+    def hidden(csrf):
+        return f"<input type=hidden name=csrf value='{escape(csrf)}'>"
 
     def approvals(csrf):
+        authn = "<h2>Authenticator</h2>" + (
+            "<p><a href='/totp/setup'>Set up</a></p>" if store.load() is None else
+            f"<form method=post action=/totp/reset>{hidden(csrf)}<button>Reset authenticator</button></form>")
         bad = "<p class=fail>approvals.json unreadable</p>"
         try:
             d = json.loads(approvals_path.read_text())
@@ -132,7 +198,7 @@ def make_server(home: Path, port: int = 0, now=time.time):
         flows, dests = (d or {}).get("flows", {}), (d or {}).get("destinations", {})
         if not (isinstance(d, dict) and isinstance(flows, dict) and isinstance(dests, dict)
                 and all(isinstance(v, list) for v in dests.values())):
-            return _page(f"<h1>Approvals</h1>{bad}<p><a href='/'>Runs</a></p>")
+            return _page(f"<h1>Approvals</h1>{bad}{authn}<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
         def form(kind, flow="", dest="", label="Revoke"):
             return (f"<form method=post action=/revoke><input type=hidden name=csrf value='{escape(csrf)}'>"
                     f"<input type=hidden name=kind value={kind}><input type=hidden name=flow value='{escape(flow)}'>"
@@ -142,8 +208,131 @@ def make_server(home: Path, port: int = 0, now=time.time):
                      for k, v in dests.items() for d in v)
         return _page(f"<h1>Approvals</h1><h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
                      f"<h2>Destinations</h2><table><tr><th>flow</th><th>destination</th><th></th></tr>{dr}</table>"
-                     f"{form('all', label='Revoke all')}"
-                     f"<p><a href='/'>Runs</a></p>")
+                     f"{form('all', label='Revoke all')}{authn}"
+                     f"<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
+
+    def talk(csrf):
+        s, run, al = panel.session, panel.run, apps()
+        ring = f"Session open: {math.ceil(s.remaining() / 60)} min left" if s.active() else "No session"
+        lines = lambda xs: "<ul>" + "".join(f"<li>{escape(x)}</li>" for x in xs) + "</ul>"
+        drafts = "".join(f"<li>{escape(a.name)}<form method=post action=/approve>{hidden(csrf)}"
+                         f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form></li>"
+                         for a in al if not a.approved)
+        end = f"<form method=post action=/end>{hidden(csrf)}<button>End session</button></form>" if s.active() else ""
+        steps = f"<h2>{escape(panel.app.name)}</h2>{lines(run.lines())}" if live() else ""
+        return _page(f"<h1>{escape(panel.name)}</h1><p>{ring}</p>{end}{lines(panel.convo)}{steps}"
+                     f"<form method=post action=/say>{hidden(csrf)}<input name=text autocomplete=off autofocus>"
+                     f"<button>Send</button></form><h2>Approved</h2>{lines(a.name for a in al if a.approved)}"
+                     f"<h2>Drafts</h2><ul>{drafts}</ul><p><a href='/audit'>Audit log</a> <a href='/approvals'>Approvals</a></p>",
+                     '<meta http-equiv="refresh" content="2">' if live() else "")
+
+    def setup(csrf, bad):
+        if store.load() is not None:
+            return None
+        with panel.lock:
+            panel.pending = panel.pending or totp.new_secret()   # held in memory only until confirmed
+            secret = panel.pending
+        key = base64.b32encode(secret).decode().rstrip("=")
+        return _page(f"<h1>Set up the authenticator</h1>{'<p class=fail>That code did not work.</p>' if bad else ''}"
+                     f"{totp.qr_svg(totp.otpauth_uri(secret))}<p>Key: <code>{key}</code></p>"
+                     f"<form method=post action=/totp/setup>{hidden(csrf)}<input name=code inputmode=numeric "
+                     f"autocomplete=off><button>Confirm</button></form><p><a href='/approvals'>Approvals</a></p>")
+
+    def say(f):
+        text = " ".join(f.get("text", "").split())[:200]
+        if not text:
+            return "/"
+        code = re.fullmatch(r"[0-9]{6}", text) is not None
+        with panel.lock:   # check-and-act: one session open, one run start at a time
+            panel.convo.append("Admin -> " + ("••••••" if code else text))   # never the code
+            if not panel.session.active():
+                if panel.session.id:
+                    end_session("expired")
+                if not code:
+                    tell(NO_SESSION)
+                    return "/"
+                r = totp.Verifier(home / "totp.state").verify(text)
+                if r != "ok":
+                    log.append("session_open", decision="deny", reason=r)
+                    tell("Too many wrong codes. Try again in 15 minutes." if r == "locked_out" else "That code did not work.")
+                    return "/"
+                sid = panel.session.open()
+                try:
+                    log.append("session_open", decision="allow", session=sid)
+                except Exception:
+                    panel.session.end("error")   # an unrecorded session must not stay open
+                    raise
+                tell("Session open for 30 minutes.")
+                return "/"
+            kind, hit = match(text, al := apps())
+            if kind == "run" and live():
+                tell(f"{panel.app.name} is still running.")
+            elif kind == "run":
+                r = launcher(hit.path, tickets.create(home, hit.id, hit.digest, panel.session.id))
+                r.start()
+                panel.run, panel.app = r, hit
+                tell(f"Starting {hit.name}.")
+            elif kind == "draft":
+                tell(f"{hit.name} is a draft. Get it approved first.")
+            elif kind == "ambiguous":
+                tell(f"Which app: {', '.join(a.name for a in hit)}?")
+            else:
+                tell(f"I don't know that app. Approved apps: {', '.join(a.name for a in al if a.approved) or 'none'}.")
+        return "/"
+
+    def approve(f):
+        from govaios.engine import Runner, Stop
+        hit = next((a for a in apps() if a.id == f.get("flow") and not a.approved), None)
+        if hit is None:
+            return None
+        try:   # the CLI's own path: native dialog + Touch ID, flow_approval audited, then approvals.json
+            Runner(hit.path, None, home).approve_flow()
+            tell(f"{hit.name} is approved.")
+        except Stop:
+            tell(f"{hit.name} was not approved.")
+        return "/"
+
+    def setup_post(f):
+        secret = panel.pending
+        if secret is None or store.load() is not None:
+            return None
+        if not totp.matches(secret, f.get("code", ""), time.time()):
+            return "/totp/setup?bad=1"
+        ok, how = auth.approve("Set up the authenticator for GOV-AIOS?", "set up authenticator", home)
+        if ok:
+            audited("totp_setup", {"decision": "allow", "approver": "admin", "channel": "touch_id", "auth": how},
+                    lambda: store.save(secret))
+            panel.pending = None
+        return "/approvals"
+
+    def reset(f):
+        ok, how = auth.prove("reset the authenticator", home)
+        if ok:
+            end_session("reset")
+            audited("totp_reset", {"decision": "allow", "approver": "admin", "channel": "touch_id", "auth": how},
+                    store.delete)
+        return "/approvals"
+
+    def end(f):
+        end_session("ended")
+        return "/"
+
+    def revoke(f):
+        kind, flow, dest = f.get("kind"), f.get("flow", ""), f.get("destination", "")
+        ap = Approvals(approvals_path)
+        if kind == "flow" and flow:
+            fields, apply = {"flow": flow}, lambda: ap.revoke_flow(flow)
+        elif kind == "destination" and flow and dest:
+            fields, apply = {"flow": flow, "destination": dest}, lambda: ap.revoke_destination(flow, dest)
+        elif kind == "all":
+            fields, apply = {"reason": "all"}, ap.revoke_all
+        else:
+            return None
+        audited("revoke", fields, apply)
+        return "/approvals"
+
+    POSTS = {"/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+             "/revoke": revoke}
 
     # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
     SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
@@ -157,6 +346,10 @@ def make_server(home: Path, port: int = 0, now=time.time):
                 return self._send(403)
             if auth.screen_locked():
                 state["sessions"].clear()
+                try:
+                    end_session("screen_lock")
+                except Exception:
+                    pass   # the session is already ended; only its audit line failed
                 threading.Thread(target=self.server.shutdown, daemon=True).start()  # not from the handler thread
                 return self._send(403)
             return fn(self)
@@ -215,16 +408,19 @@ def make_server(home: Path, port: int = 0, now=time.time):
             if not sess:
                 return self._send(403)
             try:
-                m = re.fullmatch(r"/run/([0-9]{1,9})", u.path)
-                page = (index() if u.path == "/" else approvals(sess[1]) if u.path == "/approvals"
-                        else fulllog() if u.path == "/log" else run(int(m[1])) if m else None)
+                m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
+                page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
+                        else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
+                        else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
+                        else run(int(m[1])) if m else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed
                 return self._send(500, "internal error")
             self._send(200, page) if page else self._send(404)
 
         @guarded
         def do_POST(self):
-            if urlsplit(self.path).path != "/revoke":
+            act = POSTS.get(urlsplit(self.path).path)
+            if act is None:
                 return self._send(405)
             sess = self._session()
             origin = self.headers.get("Origin")  # absent is fine (row 37); a wrong one is not
@@ -239,30 +435,14 @@ def make_server(home: Path, port: int = 0, now=time.time):
             f = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "replace")).items()}
             if not hmac.compare_digest(f.get("csrf", "").encode(), sess[1].encode()):
                 return self._send(403)
-            kind, flow, dest = f.get("kind"), f.get("flow", ""), f.get("destination", "")
-            ap = Approvals(approvals_path)
-            if kind == "flow" and flow:
-                fields, apply = {"flow": flow}, lambda: ap.revoke_flow(flow)
-            elif kind == "destination" and flow and dest:
-                fields, apply = {"flow": flow, "destination": dest}, lambda: ap.revoke_destination(flow, dest)
-            elif kind == "all":
-                fields, apply = {"reason": "all"}, ap.revoke_all
-            else:
+            try:
+                loc = act(f)
+            except Exception:   # body stays fixed; nothing about the failure reaches the page
+                return self._send(500, "internal error")
+            if loc is None:
                 return self._send(400)
-            try:
-                log.append("revoke", **fields)   # audit first, then apply
-            except Exception:
-                return self._send(500, "internal error")
-            try:
-                apply()
-            except Exception:   # the log must not be left saying "revoked" while the approval stands
-                try:
-                    log.append("revoke", outcome="error", **fields)
-                except Exception:
-                    pass   # already answering 500; nothing more can be recorded
-                return self._send(500, "internal error")
             self.send_response(303)
-            for k, v in (("Location", "/approvals"), ("Content-Length", "0"), *SEC):
+            for k, v in (("Location", loc), ("Content-Length", "0"), *SEC):
                 self.send_header(k, v)
             self.end_headers()
 
@@ -272,4 +452,6 @@ def make_server(home: Path, port: int = 0, now=time.time):
 
         do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _no
 
-    return ThreadingHTTPServer(("127.0.0.1", port), H), code
+    server = ThreadingHTTPServer(("127.0.0.1", port), H)
+    server.panel = panel
+    return server, code

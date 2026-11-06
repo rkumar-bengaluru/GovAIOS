@@ -96,7 +96,7 @@ def test_login_code_single_use_and_expiry(tmp_path):
 
 def test_pages_need_cookie(web):
     get = web[2]
-    for p in ("/", "/log", "/approvals"):
+    for p in ("/", "/audit", "/audit/log", "/approvals"):
         assert get(p, tok=False)[0] == 403 and get(p)[0] == 200
     assert get(f"/?t={get.code}", tok=False)[0] == 403
 
@@ -196,16 +196,16 @@ def test_values_still_escaped(web):
 
 
 def test_index_lists_run(web):
-    s, body, _ = web[2]("/")
+    s, body, _ = web[2]("/audit")
     assert s == 200 and "demo_flow" in body and "OK 3 entries" in body
 
 
 def test_run_and_approvals(web):
-    s, body, _ = web[2]("/run/1")
+    s, body, _ = web[2]("/audit/run/1")
     assert s == 200 and "click" in body
     s, body, _ = web[2]("/approvals")
     assert s == 200 and "demo_flow" in body and "abc123" in body
-    assert web[2]("/run/x")[0] == 404 and web[2]("/run/999")[0] == 404
+    assert web[2]("/audit/run/x")[0] == 404 and web[2]("/audit/run/999")[0] == 404
 
 
 def test_tampered_log_banner(web):
@@ -213,7 +213,7 @@ def test_tampered_log_banner(web):
     p = AuditLog(home).path
     os.chflags(p, 0)
     p.write_text(p.read_text().replace("click", "clack"))
-    assert "FAIL line" in get("/")[1]
+    assert "FAIL line" in get("/audit")[1]
 
 
 def test_post_rejected(web):
@@ -228,7 +228,7 @@ def test_unknown_path_404(web):
 
 
 def test_escapes_html(web):
-    body = web[2]("/run/1")[1]
+    body = web[2]("/audit/run/1")[1]
     assert "<script>x</script>" not in body and "&lt;script&gt;" in body
 
 
@@ -247,7 +247,7 @@ def test_no_store_headers(web):
 def test_missing_log_no_crash(tmp_path):
     srv, code = _start(tmp_path / "empty", Clock())
     req, sid = _client(srv, code)
-    status, body, _ = req("/", cookie=sid)
+    status, body, _ = req("/audit", cookie=sid)
     srv.shutdown(); srv.server_close()
     assert status == 200 and "No runs yet" in body and "FAIL" in body
 
@@ -269,7 +269,7 @@ def _raw_server(tmp_path, lines, approvals=None):
 def test_missing_seq_and_hostile_seq(tmp_path):
     srv, get = _raw_server(tmp_path, ['{"kind":"flow_start","flow":"f"}',
                                       '{"seq":"\\"><b>x","kind":"flow_start","flow":"g"}'])
-    for path in ("/", "/log"):
+    for path in ("/audit", "/audit/log"):
         s, body, _ = get(path)
         assert s == 200 and "FAIL" in body and "<b>x" not in body
     srv.shutdown(); srv.server_close()
@@ -286,8 +286,8 @@ def test_malformed_approvals_notice(tmp_path):
 def test_orphans_visible(tmp_path):
     srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"action","flow":"f","outcome":"ORPHANOUT"}', "garbage<i>",
                                       '{"seq":2,"kind":"flow_start","flow":"f"}'])
-    assert "2 entries outside any run" in get("/")[1]
-    body = get("/log")[1]
+    assert "2 entries outside any run" in get("/audit")[1]
+    body = get("/audit/log")[1]
     assert "ORPHANOUT" in body and "unparsed: garbage&lt;i&gt;" in body
     srv.shutdown(); srv.server_close()
 
@@ -298,7 +298,7 @@ def test_render_exception_500(web, monkeypatch):
     def boom(*a):
         raise RuntimeError("secret")
     monkeypatch.setattr(w, "_page", boom)
-    s, body, r = web[2]("/")
+    s, body, r = web[2]("/audit")
     assert s == 500 and body == "internal error" and "secret" not in body
     assert r.getheader("Cache-Control") == "no-store"
 
@@ -335,7 +335,7 @@ def test_revoke_303_has_security_headers(web):
 def test_command_and_auth_columns_escaped(tmp_path):
     srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"request","command":"echo <b>hi</b>","auth":"biometric"}',
                                       "garbage"])
-    body = get("/log")[1]
+    body = get("/audit/log")[1]
     assert "<th>auth</th>" in body and "<th>command</th>" in body and "biometric" in body
     assert "<b>hi" not in body and "echo &lt;b&gt;hi&lt;/b&gt;" in body
     assert "colspan=17 " in body   # seq, ts and every COLS column
@@ -348,7 +348,7 @@ def test_normal_entries_outside_runs_not_flagged(tmp_path):
                                       '{"seq":2,"kind":"emergency_stop"}', '{"seq":3,"kind":"ui_login"}',
                                       '{"seq":4,"kind":"request","action":"dump"}', '{"seq":5,"kind":"revoke"}',
                                       '{"seq":6,"kind":"request","flow":"f1","action":"deliver"}'])
-    assert "outside any run" not in get("/")[1]
+    assert "outside any run" not in get("/audit")[1]
     srv.shutdown(); srv.server_close()
 
 
@@ -375,7 +375,7 @@ def test_revoke_buttons_say_what_they_revoke(web):
 def test_delivery_entry_shows_its_fields(tmp_path):
     srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"delivery","flow":"f1","target":"joblens","file_hash":"ab12",'
                                       '"response_code":202,"listing_id":4711,"outcome":"delivered"}'])
-    body = get("/log")[1]
+    body = get("/audit/log")[1]
     for c in ("flow", "response_code", "listing_id", "file_hash"):
         assert f"<th>{c}</th>" in body
     assert "<td>202</td>" in body and "<td>4711</td>" in body and "<td>ab12</td>" in body and "<td>f1</td>" in body

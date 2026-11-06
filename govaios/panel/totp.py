@@ -37,6 +37,12 @@ def code_at(secret: bytes, t: float) -> str:
     return _hotp(secret, int(t // 30))
 
 
+def matches(secret: bytes, code: str, t: float) -> bool:
+    """Setup check against a secret not yet stored: steps -1/0/+1, every window compared (no early exit)."""
+    step = int(t // 30)
+    return any([hmac.compare_digest(_hotp(secret, s).encode(), str(code).encode()) for s in (step - 1, step, step + 1)])
+
+
 def _read_nofollow(path: Path) -> bytes | None:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
