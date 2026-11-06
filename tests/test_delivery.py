@@ -275,3 +275,9 @@ def test_fifo_not_opened_blocking(govaios_home, fake):
     job(govaios_home, "a.json")
     os.mkfifo(govaios_home / "jd_selected" / "x.json")
     assert batch(govaios_home)["delivered"] == 1 and len(f.bodies) == 1
+
+
+def test_truncated_error_body_is_retry(govaios_home, fake):
+    fake([(503, "short")])
+    job(govaios_home, "a.json")
+    assert batch(govaios_home)["retry"] == 1

@@ -119,10 +119,11 @@ class Deliveries:
 def send(url, payload, timeout=20):
     req = urllib.request.Request(url, json.dumps(payload).encode(), {"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            code, raw = r.status, r.read()
-    except urllib.error.HTTPError as e:
-        code, raw = e.code, e.read()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                code, raw = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            code, raw = e.code, e.read()
     except (OSError, ValueError, http.client.HTTPException):  # refused, timeout, DNS, truncated body
         return None, None
     try:
