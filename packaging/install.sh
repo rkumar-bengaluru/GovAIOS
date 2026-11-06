@@ -54,12 +54,7 @@ codesign --verify --strict "-R=$REQ" "$STAGE/gov-aios.app" || { echo "installed 
 sudo -u "$SUDO_USER" /bin/bash -c 'umask 077; /bin/mkdir -p "$1"' _ "$DATA" || { echo "cannot create the data home" >&2; exit 1; }
 sudo -u "$SUDO_USER" /bin/bash packaging/seed-apps.sh . "$DATA/apps" || { echo "seeding the apps folder failed" >&2; exit 1; }
 
-# Stop the old guard just before the swap (errors ignored: it may not be loaded).
-launchctl bootout "gui/$UID_N/com.govaios.guard" 2>/dev/null || true
-launchctl bootout "gui/$UID_N/com.govaios.panel" 2>/dev/null || true
-rm -rf "/Applications/gov-aios.app"
-mv "$STAGE/gov-aios.app" /Applications/gov-aios.app
-
+# Settings are copied and validated before anything is stopped: a bad file must not leave a half-swapped install.
 if [ -n "$SETTINGS" ]; then
   mkdir -p "$MS_DIR"
   cp "$SETTINGS" "$MS_TMP"
@@ -68,6 +63,15 @@ if [ -n "$SETTINGS" ]; then
   /usr/bin/python3 -I -m json.tool "$MS_TMP" >/dev/null || { echo "settings are not valid JSON" >&2; exit 1; }
   /usr/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d,dict) and "hooks" in d else 1)' "$MS_TMP" \
     || { echo "settings must be a JSON object with \"hooks\"" >&2; exit 1; }
+fi
+
+# Stop the old guard just before the swap (errors ignored: it may not be loaded).
+launchctl bootout "gui/$UID_N/com.govaios.guard" 2>/dev/null || true
+launchctl bootout "gui/$UID_N/com.govaios.panel" 2>/dev/null || true
+rm -rf "/Applications/gov-aios.app"
+mv "$STAGE/gov-aios.app" /Applications/gov-aios.app
+
+if [ -n "$SETTINGS" ]; then
   mv -f "$MS_TMP" "$MS_DIR/managed-settings.json"
 elif [ -e "$MS_DIR/managed-settings.json" ]; then
   echo "note: --no-claude keeps the existing managed settings"

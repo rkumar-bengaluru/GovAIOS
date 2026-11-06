@@ -134,6 +134,7 @@ def test_panel_plist_shape():
     assert p["RunAtLoad"] is True
     assert p["KeepAlive"] == {"SuccessfulExit": False}
     assert p["ThrottleInterval"] == 30
+    assert p["AbandonProcessGroup"] is True   # the helper outlives a dead panel and stops its run when the pipe closes
     assert "StandardOutPath" not in p and "StandardErrorPath" not in p
 
 
@@ -274,3 +275,10 @@ def test_seed_failed_write_leaves_no_partial_file(tmp_path):
     assert p.returncode == 0
     assert "not updated: flows/x.yaml" in p.stdout.splitlines()
     assert not (dest / "flows/x.yaml").exists()
+
+
+def test_install_validates_settings_before_first_bootout():
+    s = (PK / "install.sh").read_text()
+    first = s.index("launchctl bootout")
+    assert s.index('cp "$SETTINGS" "$MS_TMP"') < s.index("-m json.tool") < s.index('"hooks" in d') < first
+    assert s.index('mv -f "$MS_TMP"') > first
