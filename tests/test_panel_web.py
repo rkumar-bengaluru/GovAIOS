@@ -52,6 +52,8 @@ def panel(tmp_path, monkeypatch):
     Approvals(home / "approvals.json").approve_flow(jl.id, jl.digest)
     answers = {"approve": True, "prove": True}
     asked = []
+    from govaios import identity
+    monkeypatch.setattr(identity, "check", lambda: {"bundle_id": "com.govaios.cli"})
     monkeypatch.setattr(auth, "screen_locked", lambda: False)
     monkeypatch.setattr(auth, "approve", lambda q, r, h, **k: (asked.append(q), (answers["approve"], "biometric"))[1])
     monkeypatch.setattr(auth, "prove", lambda r, h, **k: (asked.append(r), (answers["prove"], "biometric"))[1])
@@ -221,8 +223,12 @@ def test_setup_requires_code_then_touch_id(panel):
     P.post("/totp/setup", code=code_at(secret, time.time()))
     assert store.load() is None and P.asked == ["Set up the authenticator for GOV-AIOS?"] and not _log(P.home, "totp_setup")
     P.answers["approve"] = True
-    assert P.post("/totp/setup", code=code_at(secret, time.time()))[0] == 303
+    used = code_at(secret, time.time())
+    assert P.post("/totp/setup", code=used)[0] == 303
     assert store.load() == secret and len(_log(P.home, "totp_setup")) == 1
+    assert (P.home / "totp.state").stat().st_mode & 0o777 == 0o600
+    P.say(used)   # the setup code is spent: it cannot also open a session
+    assert _log(P.home, "session_open")[-1]["reason"] == "replay" and not P.srv.panel.session.active()
     assert P.get("/totp/setup")[0] == 404
     assert "Reset authenticator</button>" in P.get("/approvals")[1]
 
@@ -260,7 +266,8 @@ def test_approve_draft_uses_native_dialog(panel):
     P.answers["approve"] = True
     P.post("/approve", flow="morning_inbox_briefing")
     assert all(a.approved for a in list_apps(P.flows, P.home))
-    assert [e["decision"] for e in _log(P.home, "flow_approval")] == ["deny", "allow"]
+    fa = _log(P.home, "flow_approval")
+    assert [e["decision"] for e in fa] == ["deny", "allow"] and {e["executor"] for e in fa} == {"gov_runner"}
     P.post("/approve", flow="no_such_flow")
     assert len(P.asked) == 2
 
@@ -306,3 +313,13 @@ def test_no_content_in_page(panel):
     assert "step 3 &lt;script&gt;alert(1)&lt;/script&gt;" in body and "ZQXMARKER" not in body
     for path in ("/audit", "/audit/log", "/approvals"):
         assert "ZQXMARKER" not in P.get(path)[1]
+
+
+def test_digits_masked_in_admin_line(panel):
+    P = panel
+    _open(P)
+    for text in ("code 123 456", "code 123456 now", "x9876543y"):
+        P.say(text)
+    body = P.get("/")[1]
+    assert "Admin -&gt; code •••••• now" in body and "Admin -&gt; code ••••••<" in body and "x••••••3y" in body
+    assert "123" not in body and "456" not in body and "987654" not in body

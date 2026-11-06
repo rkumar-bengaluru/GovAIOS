@@ -37,10 +37,21 @@ def code_at(secret: bytes, t: float) -> str:
     return _hotp(secret, int(t // 30))
 
 
-def matches(secret: bytes, code: str, t: float) -> bool:
-    """Setup check against a secret not yet stored: steps -1/0/+1, every window compared (no early exit)."""
+def _hits(secret: bytes, code: str, t: float) -> list[int]:
+    """Matching steps among -1/0/+1; every window compared (no early exit) so timing does not reveal which matched."""
     step = int(t // 30)
-    return any([hmac.compare_digest(_hotp(secret, s).encode(), str(code).encode()) for s in (step - 1, step, step + 1)])
+    return [s for s in (step - 1, step, step + 1) if hmac.compare_digest(_hotp(secret, s).encode(), str(code).encode())]
+
+
+def matches(secret: bytes, code: str, t: float) -> int | None:
+    """Setup check against a secret not yet stored: the matched step, else None."""
+    hits = _hits(secret, code, t)
+    return hits[0] if hits else None
+
+
+def mark_used(home: Path, step: int) -> None:
+    """After setup: the setup code's step counts as used, so it cannot also open a session."""
+    _replace(Path(home) / "totp.state", json.dumps({"last_step": step}).encode())
 
 
 def _read_nofollow(path: Path) -> bytes | None:
@@ -109,10 +120,7 @@ class Verifier:
         now = self.clock()
         if now < st.get("locked_until", 0):
             return "locked_out"
-        step = int(now // 30)
-        # compare every window (no early exit) so timing does not reveal which matched
-        hits = [s for s in (step - 1, step, step + 1)
-                if hmac.compare_digest(_hotp(secret, s).encode(), str(code).encode())]
+        hits = _hits(secret, code, now)
         if not hits:
             fails = st.get("fails", 0) + 1
             st["fails"] = fails

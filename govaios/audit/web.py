@@ -213,6 +213,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     def talk(csrf):
         s, run, al = panel.session, panel.run, apps()
+        with panel.lock:
+            convo = list(panel.convo)
         ring = f"Session open: {math.ceil(s.remaining() / 60)} min left" if s.active() else "No session"
         lines = lambda xs: "<ul>" + "".join(f"<li>{escape(x)}</li>" for x in xs) + "</ul>"
         drafts = "".join(f"<li>{escape(a.name)}<form method=post action=/approve>{hidden(csrf)}"
@@ -220,7 +222,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                          for a in al if not a.approved)
         end = f"<form method=post action=/end>{hidden(csrf)}<button>End session</button></form>" if s.active() else ""
         steps = f"<h2>{escape(panel.app.name)}</h2>{lines(run.lines())}" if live() else ""
-        return _page(f"<h1>{escape(panel.name)}</h1><p>{ring}</p>{end}{lines(panel.convo)}{steps}"
+        return _page(f"<h1>{escape(panel.name)}</h1><p>{ring}</p>{end}{lines(convo)}{steps}"
                      f"<form method=post action=/say>{hidden(csrf)}<input name=text autocomplete=off autofocus>"
                      f"<button>Send</button></form><h2>Approved</h2>{lines(a.name for a in al if a.approved)}"
                      f"<h2>Drafts</h2><ul>{drafts}</ul><p><a href='/audit'>Audit log</a> <a href='/approvals'>Approvals</a></p>",
@@ -244,7 +246,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return "/"
         code = re.fullmatch(r"[0-9]{6}", text) is not None
         with panel.lock:   # check-and-act: one session open, one run start at a time
-            panel.convo.append("Admin -> " + ("••••••" if code else text))   # never the code
+            # never a code: any run of 6 digits, spaces allowed between them, is masked
+            panel.convo.append("Admin -> " + re.sub(r"[0-9](?: ?[0-9]){5}", "••••••", text))
             if not panel.session.active():
                 if panel.session.id:
                     end_session("expired")
@@ -281,29 +284,38 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/"
 
     def approve(f):
+        from govaios import identity
         from govaios.engine import Runner, Stop
         hit = next((a for a in apps() if a.id == f.get("flow") and not a.approved), None)
         if hit is None:
             return None
         try:   # the CLI's own path: native dialog + Touch ID, flow_approval audited, then approvals.json
-            Runner(hit.path, None, home).approve_flow()
+            # the executor the panel's runs use: cli.py's rule, packaged and never --dev from the panel
+            packaged = identity.check()["bundle_id"] == "com.govaios.cli"
+            Runner(hit.path, None, home, "gov_runner" if packaged else "gov_runner_dev").approve_flow()
             tell(f"{hit.name} is approved.")
         except Stop:
             tell(f"{hit.name} was not approved.")
         return "/"
 
     def setup_post(f):
-        secret = panel.pending
+        with panel.lock:   # take-and-clear: two concurrent POSTs cannot both reach the dialog
+            secret, panel.pending = panel.pending, None
         if secret is None or store.load() is not None:
             return None
-        if not totp.matches(secret, f.get("code", ""), time.time()):
-            return "/totp/setup?bad=1"
-        ok, how = auth.approve("Set up the authenticator for GOV-AIOS?", "set up authenticator", home)
-        if ok:
-            audited("totp_setup", {"decision": "allow", "approver": "admin", "channel": "touch_id", "auth": how},
-                    lambda: store.save(secret))
-            panel.pending = None
-        return "/approvals"
+        step = totp.matches(secret, f.get("code", ""), time.time())
+        if step is not None:
+            ok, how = auth.approve("Set up the authenticator for GOV-AIOS?", "set up authenticator", home)
+            if ok:
+                def save():
+                    store.save(secret)
+                    totp.mark_used(home, step)
+                audited("totp_setup", {"decision": "allow", "approver": "admin", "channel": "touch_id", "auth": how},
+                        save)
+                return "/approvals"
+        with panel.lock:   # not set up: the shown QR stays valid unless a newer one was made
+            panel.pending = panel.pending or secret
+        return "/totp/setup?bad=1" if step is None else "/approvals"
 
     def reset(f):
         ok, how = auth.prove("reset the authenticator", home)
