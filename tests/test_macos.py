@@ -272,3 +272,10 @@ def test_launch_handoff_stop_during_wait_kills_child(env, monkeypatch):
     with pytest.raises(Stop, match="^emergency stop$"):
         env.d.launch_application("chrome", "Profile 2")
     assert proc.killed
+
+
+def test_input_refused_is_a_readable_stop():
+    from govaios.desktop.macos import InputRefused
+    from govaios.runstate import Stop
+    e = InputRefused("input refused: target app is not frontmost")
+    assert isinstance(e, Stop) and isinstance(e, RuntimeError)   # prints as STOPPED: <fixed text>, not ERROR: RuntimeError

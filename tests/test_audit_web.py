@@ -362,3 +362,10 @@ def test_revoke_failure_audited_as_error(web, monkeypatch):
     assert s == 500 and Approvals(home / "approvals.json").flow_ok("demo_flow", "abc123")
     e = _revokes(home)
     assert [x.get("outcome") for x in e] == [None, "error"] and e[1]["flow"] == "demo_flow"
+
+
+def test_revoke_buttons_say_what_they_revoke(web):
+    home, _, get = web
+    Approvals(home / "approvals.json").approve_destination("demo_flow", "org1")
+    body = get("/approvals")[1]
+    assert "Revoke flow</button>" in body and "Revoke site</button>" in body

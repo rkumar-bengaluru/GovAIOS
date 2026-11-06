@@ -135,8 +135,8 @@ def make_server(home: Path, port: int = 0, now=time.time):
             return (f"<form method=post action=/revoke><input type=hidden name=csrf value='{escape(csrf)}'>"
                     f"<input type=hidden name=kind value={kind}><input type=hidden name=flow value='{escape(flow)}'>"
                     f"<input type=hidden name=destination value='{escape(dest)}'><button>{label}</button></form>")
-        fr = "".join(f"<tr>{_td(k)}{_td(v)}<td>{form('flow', str(k))}</td></tr>" for k, v in flows.items())
-        dr = "".join(f"<tr>{_td(k)}{_td(d)}<td>{form('destination', str(k), str(d))}</td></tr>"
+        fr = "".join(f"<tr>{_td(k)}{_td(v)}<td>{form('flow', str(k), label='Revoke flow')}</td></tr>" for k, v in flows.items())
+        dr = "".join(f"<tr>{_td(k)}{_td(d)}<td>{form('destination', str(k), str(d), label='Revoke site')}</td></tr>"
                      for k, v in dests.items() for d in v)
         return _page(f"<h1>Approvals</h1><h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
                      f"<h2>Destinations</h2><table><tr><th>flow</th><th>destination</th><th></th></tr>{dr}</table>"

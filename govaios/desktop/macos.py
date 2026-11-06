@@ -38,6 +38,10 @@ def _s(v):
     return str(v).replace("\n", " ").strip() if isinstance(v, str) else ""
 
 
+
+class InputRefused(Stop, RuntimeError):
+    """A safety refusal with fixed text (never page content), so the run prints and audits it as a stop."""
+
 class MacDesktop:
     platform = "macos"
 
@@ -51,7 +55,7 @@ class MacDesktop:
     def _target_pid(self):
         running = self._app(self._target) if self._target else None
         if running is None:
-            raise RuntimeError("input refused: target app is not running")
+            raise InputRefused("input refused: target app is not running")
         return running.processIdentifier()
 
     def _focused(self):
@@ -70,9 +74,9 @@ class MacDesktop:
         pid = self._target_pid()
         fpid, win = self._focused()
         if fpid is None or fpid != pid:
-            raise RuntimeError("input refused: target app is not frontmost")
+            raise InputRefused("input refused: target app is not frontmost")
         if self._window is not None and (win is None or not CFEqual(win, self._window)):
-            raise RuntimeError("input refused: focused window is not the verified window")
+            raise InputRefused("input refused: focused window is not the verified window")
         return pid
 
     def focused_window_id(self, app):
@@ -231,9 +235,9 @@ class MacDesktop:
         err, hit = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), pt[0], pt[1], None)
         hit_pid = AXUIElementGetPid(hit, None) if err == 0 and hit is not None else (1, None)
         if hit_pid[0] != 0 or hit_pid[1] != pid:
-            raise RuntimeError("input refused: click point is not in the target app")
+            raise InputRefused("input refused: click point is not in the target app")
         if self._window is not None and not CFEqual(_attr(hit, "AXWindow"), self._window):
-            raise RuntimeError("input refused: click point is not in the verified window")
+            raise InputRefused("input refused: click point is not in the verified window")
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.
