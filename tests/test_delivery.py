@@ -66,7 +66,7 @@ def test_payload_bad_types_fail():
     assert build_payload(rec(company=5), "S") == (None, "failed", "company")
 
 
-@pytest.mark.parametrize("url", ["javascript:x", None, "https://a b", "x" * 5])
+@pytest.mark.parametrize("url", ["javascript:x", None, "https://a b", "x" * 5, "http://[x"])
 def test_payload_drops_bad_url(url):
     assert "url" not in build_payload(rec(url=url), "S")[0]
 

@@ -70,7 +70,11 @@ def build_payload(rec, source):
     url = (raw["url"] or "").strip()
     if len(url) > 2000:
         return fail("url")
-    if urlsplit(url).scheme in ("http", "https") and not any(c.isspace() or _bad_char(c) for c in url):
+    try:
+        scheme = urlsplit(url).scheme
+    except ValueError:  # malformed host, e.g. "http://[x"
+        scheme = ""
+    if scheme in ("http", "https") and not any(c.isspace() or _bad_char(c) for c in url):
         p["url"] = url
     return p, None, None
 
