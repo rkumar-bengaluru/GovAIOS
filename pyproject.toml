@@ -13,6 +13,7 @@ dependencies = [
   "pyobjc-framework-LocalAuthentication",
   "pyyaml",
   "cryptography",
+  "segno",
 ]
 
 [project.optional-dependencies]
