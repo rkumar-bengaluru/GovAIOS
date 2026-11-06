@@ -5,7 +5,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from pathlib import Path
+
 from govaios import delivery
+from govaios.approvals import flow_hash
+from govaios.engine import Runner
 from govaios.runstate import Stop
 
 from govaios.audit.log import AuditLog
@@ -396,3 +400,20 @@ def test_unreachable_message(govaios_home, setup, monkeypatch, capsys):
     out = capsys.readouterr()
     assert out.err == "JobLens not reachable at 127.0.0.1:8100 (is it running?)\n"
     assert out.out.splitlines()[1:] == ["1 files left for the next delivery"]
+
+
+# ---------- real flows ----------
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def test_real_flows_load(tmp_path):
+    him = Runner(REPO / "flows" / "himalayas_job_vetting.yaml", None, tmp_path)
+    assert him.deliver == {"to": "joblens", "from": "jd_selected", "source": "Himalayas"}
+    morning = Runner(REPO / "flows" / "morning_inbox_briefing.yaml", None, tmp_path)
+    assert morning.deliver is None
+
+
+def test_morning_digest_unchanged():
+    assert flow_hash(REPO / "flows" / "morning_inbox_briefing.yaml", REPO / "pages") == \
+        "a1dca44ed9e272377fe86987aca8bece3a1dcd7c4ef797e6ed40d4e8386ff4ae"

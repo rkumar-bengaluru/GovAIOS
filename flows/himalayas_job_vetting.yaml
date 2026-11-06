@@ -1,7 +1,7 @@
 workflow:
   id: himalayas_job_vetting
-  name: "Himalayas Job Vetting (spike: JSON to jd_selected/ instead of the vetting service)"
-  version: 1
+  name: "Himalayas Job Vetting → JobLens"
+  version: 2
   site_terms: { reviewed: 2026-11-05, basis: "Himalayas Terms cl. 30A (Personal Agent)" }
 
   browser:
@@ -10,9 +10,10 @@ workflow:
     account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
 
   permissions:                          # Rule 9: unlisted = denied
-    allow: [launch_application, navigate, read_page, click, extract_visible_text, write_file, report]
+    allow: [launch_application, navigate, read_page, click, extract_visible_text, write_file, report, deliver]
     max_element_risk: navigate          # Save job / Apply now are submit
   destinations: ["https://www.google.com", "https://himalayas.app"]   # Rule 11
+  deliver: { to: joblens, from: jd_selected, source: Himalayas }
 
   steps:
     - { id: launch_chrome, action: launch_application }
