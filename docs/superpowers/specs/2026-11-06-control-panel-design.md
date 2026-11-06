@@ -72,10 +72,14 @@ and approvals.
 ### 5.1 Opening the panel
 `bin/gov-aios panel` (the `audit-ui` command stays as an alias) proves presence with Touch ID,
 starts the server and prints the single-use link, exactly as `audit-ui` does today. The browser
-session lasts at most 60 minutes (today's `SESSION_TTL`), independent of the run session.
+session lasts at most 60 minutes (today's `SESSION_TTL`), independent of the run session. The server
+never shuts itself down while a run it launched is live (today the browser-session expiry stops the
+server); it stops once that run has ended.
 
 ### 5.2 Apps
-The panel reads `flows/*.yaml` from the repo the app was started for, computes each flow's digest
+The panel reads `*.yaml` from a flows directory given on the command line (`bin/gov-aios panel flows`;
+the shim makes it absolute, as it does for `run`); pages come from its sibling `pages/`, as for runs.
+It computes each flow's digest
 with `read_bound` and compares it with `approvals.json`:
 - **Approved:** `flow_ok(id, digest)` is true.
 - **Draft:** anything else (never approved, or changed since approval).
@@ -172,7 +176,8 @@ New audit kinds: `totp_setup`, `totp_reset`, `session_open` (decision, reason on
 
 ## 8. Calls I made (admin to check)
 
-- Command name `panel`; `audit-ui` stays as an alias.
+- Command name `panel <flows dir>`; `audit-ui` stays as an alias.
+- The panel server waits for a live run to end before it stops on browser-session expiry.
 - Run tickets on disk (one use, 60 s) are how a run knows it came from the panel; the session
   itself lives only in the panel server's memory.
 - A lock at any moment during the session ends it.
