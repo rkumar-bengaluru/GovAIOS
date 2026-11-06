@@ -14,6 +14,7 @@ from govaios.audit.log import AuditLog
 from govaios.audit.web import make_server
 from govaios.engine import REPO, approval_question
 from govaios.panel.apps import list_apps
+from govaios.panel.session import Session
 from govaios.panel.totp import SecretStore, code_at
 
 CHAIN = {"seq", "ts", "prev", "hash", "sig"}   # chain metadata, not entry content
@@ -24,6 +25,7 @@ class FakeLaunch:
     def __init__(self, flow_path, ticket):
         self.flow_path, self.ticket = flow_path, ticket
         self.done, self.started, self.stopped = False, False, None
+        self.code, self.summary, self.stopped_reason = None, None, None
         self._lines = ["step 3 <script>alert(1)</script>"]
         self.made.append(self)
 
@@ -34,7 +36,7 @@ class FakeLaunch:
         return list(self._lines)
 
     def stop(self, reason):
-        self.stopped = reason
+        self.stopped = self.stopped_reason = reason
 
 
 @pytest.fixture
@@ -60,7 +62,9 @@ def panel(tmp_path, monkeypatch):
     made = []
     launcher = type("L", (FakeLaunch,), {"made": made})
     spoken = []
-    srv, code = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append)
+    mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
+    srv, code = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
+                            now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]))
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
 
@@ -78,6 +82,7 @@ def panel(tmp_path, monkeypatch):
     sid = req(f"/login?c={code}")[2].getheader("Set-Cookie").split(";")[0][2:]
     P = type("P", (), {})()
     P.home, P.flows, P.srv, P.made, P.answers, P.asked, P.req, P.sid = home, flows, srv, made, answers, asked, req, sid
+    P.spoken, P.mono, P.wall = spoken, mono, wall
     P.get = lambda path: req(path, cookie=sid)
     P.csrf = lambda: re.search(r"name=csrf value='([^']+)'", P.get("/")[1])[1]
     P.post = lambda path, headers=None, **f: req(path, "POST", cookie=sid, headers=headers,
@@ -323,3 +328,116 @@ def test_digits_masked_in_admin_line(panel):
     body = P.get("/")[1]
     assert "Admin -&gt; code •••••• now" in body and "Admin -&gt; code ••••••<" in body and "x••••••3y" in body
     assert "123" not in body and "456" not in body and "987654" not in body
+
+
+def _running(P):
+    _open(P)
+    P.say("run joblens")
+    assert len(P.made) == 1
+    return P.made[0]
+
+
+def _tick(P):
+    P.srv.panel.tick()
+    if P.srv.panel.voice:
+        P.srv.panel.voice.join(5)
+
+
+def test_expiry_stops_run(panel):
+    P = panel
+    L = _running(P)
+    sid = P.srv.panel.session.id
+    P.mono[0] += 30 * 60
+    _tick(P)
+    assert L.stopped == "session ended"
+    assert [(e["session"], e["reason"]) for e in _log(P.home, "session_end")] == [(sid, "expired")]
+    _tick(P)   # ended once: a second tick (or a racing request) adds nothing
+    P.say("run joblens")
+    assert len(_log(P.home, "session_end")) == 1 and len(P.made) == 1
+
+
+def test_lock_then_unlock_between_requests_ends_session(panel, monkeypatch):
+    from govaios import auth
+    P = panel
+    L = _running(P)
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    _tick(P)
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert not P.srv.panel.session.active() and L.stopped == "session ended"
+    assert _log(P.home, "session_end")[-1]["reason"] == "screen_lock"
+
+
+def test_stopped_flag_ends_session(panel):
+    P = panel
+    L = _running(P)
+    (P.home / "STOPPED").write_text("")
+    _tick(P)
+    assert not P.srv.panel.session.active() and L.stopped == "session ended"
+    assert _log(P.home, "session_end")[-1]["reason"] == "emergency_stop"
+    L.done = True   # hotkey stop: the run ends and the page says stopped
+    _tick(P)
+    assert "JobLens stopped: session ended" in P.get("/")[1]
+
+
+def test_done_run_speaks_complete(panel):
+    P = panel
+    L = _running(P)
+    L.code, L.summary, L.done = 0, "deliver joblens: delivered 2, duplicate 3", True
+    _tick(P)
+    _tick(P)
+    assert P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
+    body = P.get("/")[1]
+    assert body.count("JobLens finished: delivered 2, duplicate 3") == 1
+
+
+def test_stopped_run_speaks_reason(panel):
+    P = panel
+    L = _running(P)
+    P.post("/end")
+    assert L.stopped == "session ended"
+    L.code, L.done = 143, True
+    _tick(P)
+    assert P.spoken == ["Rupak, the JobLens flow stopped: session ended."]
+    assert "JobLens stopped: session ended" in P.get("/")[1]
+    P.say(code_at(SecretStore(P.home).load(), time.time() + 30))   # the first code is spent
+    P.say("run joblens")
+    L2 = P.made[-1]
+    L2.code, L2.done = 3, True
+    _tick(P)
+    assert P.spoken[-1] == "Rupak, the JobLens flow stopped: exit 3."
+
+
+def test_server_waits_for_live_run(panel, monkeypatch):
+    P = panel
+    L = _running(P)
+    down = threading.Event()
+    real = P.srv.shutdown
+    monkeypatch.setattr(P.srv, "shutdown", lambda: (down.set(), real()))
+    P.wall[0] += 3601
+    assert P.get("/")[0] == 403   # browser session over
+    _tick(P)
+    assert not down.wait(0.3) and P.get("/")[0] == 403   # still serving while the run is live
+    assert P.srv.panel.session.active() and L.stopped is None
+    L.code, L.done = 0, True
+    _tick(P)
+    assert down.wait(2) and P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
+
+
+def test_server_close_stops_live_run(panel):
+    P = panel
+    L = _running(P)
+    P.srv.shutdown()
+    P.srv.server_close()
+    assert L.stopped == "session ended" and not P.srv.panel.session.active()
+    assert _log(P.home, "session_end")[-1]["reason"] == "ended"
+
+
+def test_say_uses_usr_bin_say(monkeypatch):
+    import subprocess
+    from govaios.audit import web
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)))
+    web._say("hi")
+    assert calls == [((["/usr/bin/say", "hi"],), {"timeout": 60})]
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: 1 / 0)
+    web._say("hi")   # errors ignored

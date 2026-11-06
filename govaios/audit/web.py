@@ -6,6 +6,7 @@ import json
 import math
 import re
 import secrets
+import subprocess
 import threading
 import time
 from collections import deque
@@ -16,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
-from govaios import auth
+from govaios import auth, runstate
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.audit.verify import verify
@@ -88,7 +89,10 @@ def _started_by(run):
 
 
 def _say(text):
-    pass  # shortcut: silent until Task 6 speaks via /usr/bin/say
+    try:
+        subprocess.run(["/usr/bin/say", text], timeout=60)
+    except Exception:
+        pass   # a missing voice must not break the panel
 
 
 NO_SESSION = "Enter the 6-digit code from your authenticator."
@@ -106,7 +110,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     approvals_path = home / "approvals.json"
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
-                            speak=speak, name=name, pending=None, lock=threading.Lock())
+                            speak=speak, name=name, pending=None, lock=threading.Lock(),
+                            told=None, voice=None)
 
     def tell(line):
         panel.convo.append(f"GOV-AIOS -> {line}")
@@ -125,6 +130,44 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return sid
     panel.end_session = end_session
 
+    def report():
+        """Once per run, when it is done: the result line, then speech on its own thread (say blocks)."""
+        with panel.lock:
+            r = panel.run
+            if r is None or not r.done or panel.told is r:
+                return
+            panel.told, app = r, panel.app.name
+            if r.code == 0 and r.stopped_reason is None:
+                tell(f"{app} finished: {(r.summary or 'done').split(': ', 1)[-1]}")
+                text = f"{panel.name}, the {app} flow is complete, thank you."
+            else:
+                why = r.stopped_reason or f"exit {r.code}"
+                tell(f"{app} stopped: {why}")
+                text = f"{panel.name}, the {app} flow stopped: {why}."
+            panel.voice = threading.Thread(target=panel.speak, args=(text,), daemon=True)
+            panel.voice.start()
+
+    def close():
+        """Shut the server down, but never while its run is live or its result is still being spoken."""
+        state["closing"] = True
+        with panel.lock:
+            busy = live() or (panel.voice is not None and panel.voice.is_alive()) or state["down"]
+            state["down"] = state["down"] or not busy
+        if not busy:
+            threading.Thread(target=server.shutdown, daemon=True).start()   # never from a handler thread
+
+    def tick():
+        s = panel.session
+        if s.id is not None:
+            reason = ("expired" if not s.active() else "screen_lock" if auth.screen_locked()
+                      else "emergency_stop" if runstate.stopped(home) else None)
+            if reason:
+                end_session(reason)   # Session.end hands the id out once: a racing request cannot end it twice
+        report()
+        if state["closing"]:
+            close()
+    panel.tick = tick
+
     def apps():
         return list_apps(flows_dir, home) if flows_dir else []
 
@@ -139,7 +182,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 pass   # already answering 500; nothing more can be recorded
             raise
     code = secrets.token_urlsafe(32)
-    state = {"code_ts": now(), "code_used": False, "sessions": {}}  # sid -> (created, csrf)
+    state = {"code_ts": now(), "code_used": False, "sessions": {}, "closing": False, "down": False}  # sid -> (created, csrf)
 
     def banner():
         try:
@@ -212,6 +255,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
 
     def talk(csrf):
+        report()   # the page refresh stops once the run is done: show its result on that same load
         s, run, al = panel.session, panel.run, apps()
         with panel.lock:
             convo = list(panel.convo)
@@ -362,7 +406,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     end_session("screen_lock")
                 except Exception:
                     pass   # the session is already ended; only its audit line failed
-                threading.Thread(target=self.server.shutdown, daemon=True).start()  # not from the handler thread
+                close()   # the stopped run still finishes and reports first
                 return self._send(403)
             return fn(self)
         return wrapper
@@ -388,7 +432,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             """(created, csrf) of a live session, else None. Expiry ends the server."""
             if any(now() - c > SESSION_TTL for c, _ in state["sessions"].values()):
                 state["sessions"].clear()
-                threading.Thread(target=self.server.shutdown, daemon=True).start()  # not from the handler thread
+                close()   # a live run keeps the server up until it is done
                 return None
             try:
                 sid = SimpleCookie(self.headers.get("Cookie", ""))["s"].value
@@ -464,6 +508,26 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
         do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _no
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), H)
+    halt = threading.Event()
+
+    class Server(ThreadingHTTPServer):
+        def server_close(self):
+            halt.set()
+            try:
+                end_session("ended")
+            finally:
+                if live():
+                    panel.run.stop("session ended")
+                super().server_close()
+
+    def ticker():
+        while not halt.wait(1):
+            try:
+                tick()
+            except Exception:
+                pass   # one bad tick (an audit write, a lock probe) must not end the watch
+
+    server = Server(("127.0.0.1", port), H)
     server.panel = panel
+    threading.Thread(target=ticker, daemon=True).start()
     return server, code
