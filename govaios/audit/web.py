@@ -24,12 +24,95 @@ from govaios.audit.verify import verify
 from govaios.panel import tickets, totp
 from govaios.panel.apps import list_apps, match
 from govaios.panel.launch import RunLaunch
-from govaios.panel.session import Session
+from govaios.panel.session import SESSION_S, Session
 
 COLS = ["kind", "flow", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason",
         "response_code", "listing_id", "auth", "command", "file_hash"]
-CSS = ("body{font:14px system-ui;margin:2em}table{border-collapse:collapse}td,th{border:1px solid #bbb;"
-       "padding:3px 8px;text-align:left}.ok{background:#d8f5d8;padding:6px}.fail{background:#f8d0d0;padding:6px}")
+# the journey-v2 mockup in one stylesheet: system fonts, no images, no script (CSP allows inline style only)
+CSS = """
+:root{color-scheme:light dark;--bg:#E8ECF2;--paper:#F5F7FA;--card:#fff;--ink:#14213D;--steel:#2B3A55;
+--muted:#56627A;--line:#D9DEE7;--amber:#F2A93B;--amber-soft:#FDF1DC;--ok:#3E8E7E;--ok-soft:#E3F1EE;
+--stop:#C8473A;--stop-soft:#FBE9E7;--rail:#14213D;--rail-fg:#DCE3EE;--rail-mute:#A9B4C6;--me:#14213D;
+--sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0B1222;--paper:#101A2D;--card:#17223A;--ink:#E6EBF3;
+--steel:#BAC4D6;--muted:#9AA6BB;--line:#2C3A55;--amber-soft:#3A2E15;--ok:#5FB8A5;--ok-soft:#15302B;
+--stop:#F07A6C;--stop-soft:#3A1C19;--rail:#070D1A;--me:#2B3A55}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 var(--sans)}
+a{color:inherit}
+:focus-visible{outline:3px solid var(--amber);outline-offset:2px}
+.app{display:grid;grid-template-columns:260px minmax(0,1fr);min-height:100vh}
+.rail{background:var(--rail);color:var(--rail-fg);padding:18px 14px}
+.brand{display:flex;align-items:center;gap:10px;margin:0 6px 18px;font-weight:700;font-size:17px;color:#fff}
+.rail>a{display:block;padding:8px 10px;border-radius:8px;text-decoration:none;color:#fff}
+.rail>a:hover{background:rgba(255,255,255,.08)}
+.rail h2{font-size:13px;font-weight:500;color:var(--rail-mute);margin:18px 6px 6px}
+.rail ul{list-style:none;margin:0;padding:0}
+.rail li{padding:9px 10px;border-radius:8px;margin-bottom:4px;font-weight:700;color:#fff}
+.rail li::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;
+background:var(--ok);vertical-align:1px}
+.rail li.ok{background:rgba(62,142,126,.18)}
+.rail li.draft{border:1px dashed #4A5A78}
+.rail li.draft::before{background:#8B97AD}
+.rail .m{display:block;font-size:13px;font-weight:400;color:var(--rail-mute)}
+.rail form{margin-top:6px}
+.rail button{background:transparent;color:#fff;border:1px solid #4A5A78}
+main{min-width:0;padding:20px 22px 40px;background:var(--paper)}
+h1{font-size:26px;line-height:1.15;font-weight:800;margin:0 0 14px;letter-spacing:-.01em}
+h2{font-size:17px;margin:22px 0 8px}
+.top{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin:-20px -22px 18px;
+padding:14px 22px;background:var(--card);border-bottom:1px solid var(--line)}
+.who{display:flex;align-items:center;gap:12px}
+.who h1{font-size:17px;margin:0}.who .s{font-size:14px;color:var(--steel)}
+.ring{flex:none;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;
+background:conic-gradient(var(--ok) var(--p,0%),var(--line) 0)}
+.ring b{width:34px;height:34px;border-radius:50%;background:var(--me);color:#fff;display:grid;place-items:center;font-size:14px}
+button{font:inherit;font-weight:700;border-radius:10px;padding:9px 14px;cursor:pointer;
+background:var(--card);color:var(--steel);border:1px solid var(--line)}
+button.go{background:var(--me);color:#fff;border-color:var(--me)}
+button.stop{color:var(--stop);border:2px solid var(--stop)}
+input{font:inherit;color:var(--ink);background:var(--card);padding:10px 14px;border:1px solid var(--line);border-radius:10px;min-width:0}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.talk{list-style:none;margin:0;padding:0}
+.talk li{max-width:640px;width:fit-content;margin:0 0 12px;padding:10px 14px;border-radius:12px;
+background:var(--card);border:1px solid var(--line);overflow-wrap:anywhere}
+.talk li.admin{margin-left:auto;background:var(--me);color:#fff;border-color:var(--me)}
+.talk li.ask{background:var(--amber-soft);border-color:var(--amber)}
+.talk li.done{background:var(--ok-soft);border-color:var(--ok)}
+.talk li.no{background:var(--stop-soft);border-color:var(--stop)}
+.run{max-width:640px;padding:10px 14px;border:1px dashed var(--muted);border-radius:12px;margin:0 0 12px}
+.run h2{margin:0;font-size:13px;font-weight:500;color:var(--muted)}
+.run ul{list-style:none;padding:0;margin:6px 0 0;font-size:15px}
+.run li{padding:4px 0 4px 26px;position:relative;color:var(--ink);overflow-wrap:anywhere}
+.run li::before{content:"";position:absolute;left:4px;top:11px;width:10px;height:10px;border-radius:50%;
+background:var(--ok);border:2px solid var(--ok)}
+.run li:last-child{font-weight:700}
+.run li:last-child::before{background:var(--amber);border-color:var(--amber)}
+.cmd{display:flex;gap:10px;margin:18px 0 0;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+.cmd input{flex:1}
+.note{background:var(--card);border-left:4px solid var(--amber);padding:10px 14px}
+p.ok,p.fail{display:inline-block;padding:8px 12px;border-radius:8px;border:1px solid}
+p.ok{background:var(--ok-soft);border-color:var(--ok)}
+.fail{background:var(--stop-soft);border-color:var(--stop)}
+table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;font-size:14px;
+background:var(--card);border:1px solid var(--line);border-radius:8px}
+th{color:var(--steel);font-weight:700}
+td,th{padding:8px;text-align:left;vertical-align:top;border-top:1px solid var(--line)}
+td button{padding:6px 10px;font-size:14px}
+form{margin:10px 0}
+td form{margin:0}
+.card{max-width:640px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+.card label{display:block;font-weight:700;margin-bottom:6px}
+.qr{display:inline-block;background:#fff;padding:10px;border-radius:8px;border:1px solid var(--line)}
+.qr svg{display:block;max-width:100%;height:auto}
+code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
+@media (max-width:820px){.app{grid-template-columns:minmax(0,1fr);min-height:0}main{padding:16px 16px 32px}
+.top{margin:-16px -16px 16px;padding:12px 16px}}
+"""
+BRAND = ("<div class=brand><svg width=30 height=30 viewBox='0 0 30 30' aria-hidden=true>"
+         "<path d='M15 2 26 6v8c0 7-4.6 11.6-11 14C8.6 25.6 4 21 4 14V6z' fill='#F2A93B'/>"
+         "<path d='m10 15 3.5 3.5L20.5 11' stroke='#14213D' stroke-width='2.6' fill=none stroke-linecap=round "
+         "stroke-linejoin=round /></svg>GOV-AIOS</div>")
 
 
 def _entries(log: AuditLog):
@@ -78,8 +161,24 @@ def _td(v):
     return f"<td>{escape('' if v is None else str(v))}</td>"
 
 
-def _page(body, head=""):
-    return f"<!doctype html><meta charset=utf-8>{head}<title>GOV-AIOS</title><style>{CSS}</style>{body}"
+def _page(body, head="", rail=""):
+    return (f"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,"
+            f"initial-scale=1'>{head}<title>GOV-AIOS</title><style>{CSS}</style><div class=app>"
+            f"<nav class=rail aria-label='GOV-AIOS'>{BRAND}<a href='/'>Talk</a><a href='/audit'>Audit log</a>"
+            f"<a href='/approvals'>Approvals</a>{rail}</nav><main>{body}</main></div>")
+
+
+def _tone(line):
+    """Bubble style for one conversation line: who said it, and whether it asks, succeeds or refuses."""
+    if line.startswith("Admin -> "):
+        return "admin"
+    if line.endswith(NO_SESSION):
+        return "ask"
+    if " finished: " in line or line.endswith((" is approved.", "Session open for 30 minutes.")):
+        return "done"
+    refused = (" stopped: ", " is a draft.", "did not work.", "Too many wrong codes", "Emergency stop is on",
+               " was not approved.", "know that app")
+    return "no" if any(r in line for r in refused) else ""
 
 
 def _started_by(run):
@@ -221,8 +320,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             f"{_td(r[-1].get('outcome') or r[-1].get('kind'))}{_td(_started_by(r))}</tr>" for r in runs)
         table = (f"<table><tr><th>run</th><th>flow</th><th>time</th><th>steps</th><th>outcome</th><th>started by</th></tr>"
                  f"{rows}</table>" if runs else "<p>No runs yet.</p>")
-        return _page(f"<h1>Runs</h1>{banner()}{note}{table}<p><a href='/audit/log'>Full log</a> "
-                     f"<a href='/approvals'>Approvals</a> <a href='/'>Talk</a></p>")
+        return _page(f"<h1>Runs</h1>{banner()}{note}{table}<p><a href='/audit/log'>Full log</a></p>")
 
     def run(seq):
         for r in _runs(_entries(log))[0]:
@@ -230,7 +328,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 head = "".join(f"<th>{c}</th>" for c in COLS)
                 rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in COLS) + "</tr>" for e in r)
                 return _page(f"<h1>Run {int(seq)}</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                             f"<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
+                             f"<p><a href='/audit'>Runs</a></p>")
         return None
 
     def fulllog():
@@ -239,7 +337,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             "<tr>" + "".join(_td(e.get(c)) for c in ["seq", "ts", *COLS]) + "</tr>" if e is not None
             else f"<tr><td colspan={len(COLS) + 2} class=fail>unparsed: {escape(raw)}</td></tr>" for e, raw in _entries(log))
         return _page(f"<h1>Full log</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
-                     f"<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
+                     f"<p><a href='/audit'>Runs</a></p>")
 
     def hidden(csrf):
         return f"<input type=hidden name=csrf value='{escape(csrf)}'>"
@@ -247,7 +345,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def approvals(csrf):
         authn = "<h2>Authenticator</h2>" + (
             "<p><a href='/totp/setup'>Set up</a></p>" if store.load() is None else
-            f"<form method=post action=/totp/reset>{hidden(csrf)}<button>Reset authenticator</button></form>")
+            f"<form method=post action=/totp/reset>{hidden(csrf)}<button class=stop>Reset authenticator</button></form>")
         bad = "<p class=fail>approvals.json unreadable</p>"
         try:
             d = json.loads(approvals_path.read_text())
@@ -260,18 +358,17 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         flows, dests = (d or {}).get("flows", {}), (d or {}).get("destinations", {})
         if not (isinstance(d, dict) and isinstance(flows, dict) and isinstance(dests, dict)
                 and all(isinstance(v, list) for v in dests.values())):
-            return _page(f"<h1>Approvals</h1>{bad}{authn}<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
-        def form(kind, flow="", dest="", label="Revoke"):
+            return _page(f"<h1>Approvals</h1>{bad}{authn}")
+        def form(kind, flow="", dest="", label="Revoke", cls=""):
             return (f"<form method=post action=/revoke><input type=hidden name=csrf value='{escape(csrf)}'>"
                     f"<input type=hidden name=kind value={kind}><input type=hidden name=flow value='{escape(flow)}'>"
-                    f"<input type=hidden name=destination value='{escape(dest)}'><button>{label}</button></form>")
+                    f"<input type=hidden name=destination value='{escape(dest)}'><button{cls}>{label}</button></form>")
         fr = "".join(f"<tr>{_td(k)}{_td(v)}<td>{form('flow', str(k), label='Revoke flow')}</td></tr>" for k, v in flows.items())
         dr = "".join(f"<tr>{_td(k)}{_td(d)}<td>{form('destination', str(k), str(d), label='Revoke site')}</td></tr>"
                      for k, v in dests.items() for d in v)
         return _page(f"<h1>Approvals</h1><h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
                      f"<h2>Destinations</h2><table><tr><th>flow</th><th>destination</th><th></th></tr>{dr}</table>"
-                     f"{form('all', label='Revoke all')}{authn}"
-                     f"<p><a href='/audit'>Runs</a> <a href='/'>Talk</a></p>")
+                     f"{form('all', label='Revoke all', cls=' class=stop')}{authn}")
 
     def talk(csrf):
         report()   # the page refresh stops once the run is done: show its result on that same load
@@ -279,18 +376,28 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         with panel.lock:
             convo = list(panel.convo)
         ring = f"Session open: {math.ceil(s.remaining() / 60)} min left" if s.active() else "No session"
+        pct = round(100 * s.remaining() / SESSION_S) if s.active() else 0
         lines = lambda xs: "<ul>" + "".join(f"<li>{escape(x)}</li>" for x in xs) + "</ul>"
-        drafts = "".join(f"<li>{escape(a.name)}<form method=post action=/approve>{hidden(csrf)}"
+        talked = "".join(f"<li class='{_tone(x)}'>{escape(x)}</li>" for x in convo)
+        ok = "".join(f"<li class=ok>{escape(a.name)}<span class=m>Can run</span></li>" for a in al if a.approved)
+        drafts = "".join(f"<li class=draft>{escape(a.name)}<span class=m>Needs approval</span>"
+                         f"<form method=post action=/approve>{hidden(csrf)}"
                          f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form></li>"
                          for a in al if not a.approved)
-        end = f"<form method=post action=/end>{hidden(csrf)}<button>End session</button></form>" if s.active() else ""
-        steps = f"<h2>{escape(panel.app.name)}</h2>{lines(run.lines())}" if live() else ""
-        nodir = "" if flows_dir else "<p>No apps folder given. Start with: bin/gov-aios panel flows</p>"
-        return _page(f"<h1>{escape(panel.name)}</h1><p>{ring}</p>{nodir}{end}{lines(convo)}{steps}"
-                     f"<form method=post action=/say>{hidden(csrf)}<input name=text autocomplete=off autofocus>"
-                     f"<button>Send</button></form><h2>Approved</h2>{lines(a.name for a in al if a.approved)}"
-                     f"<h2>Drafts</h2><ul>{drafts}</ul><p><a href='/audit'>Audit log</a> <a href='/approvals'>Approvals</a></p>",
-                     '<meta http-equiv="refresh" content="2">' if live() else "")
+        end = (f"<form method=post action=/end>{hidden(csrf)}<button class=stop>End session</button></form>"
+               if s.active() else "")
+        steps = (f"<section class=run><h2>{escape(panel.app.name)}</h2>{lines(run.lines())}</section>"
+                 if live() else "")
+        nodir = "" if flows_dir else "<p class=note>No apps folder given. Start with: bin/gov-aios panel flows</p>"
+        who = (f"<header class=top><div class=who><div class=ring style='--p:{pct}%' aria-hidden=true>"
+               f"<b>{escape(panel.name[:1])}</b></div><div><h1>{escape(panel.name)}</h1>"
+               f"<div class=s>{ring}</div></div></div>{end}</header>")
+        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{steps}"
+                     f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
+                     f"</label><input id=cmd name=text autocomplete=off autofocus placeholder='Type: run joblens'>"
+                     f"<button class=go>Send</button></form>",
+                     '<meta http-equiv="refresh" content="2">' if live() else "",
+                     f"<h2>Approved</h2><ul>{ok}</ul><h2>Drafts</h2><ul>{drafts}</ul>")
 
     def setup(csrf, bad):
         if store.load() is not None:
@@ -299,10 +406,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             panel.pending = panel.pending or totp.new_secret()   # held in memory only until confirmed
             secret = panel.pending
         key = base64.b32encode(secret).decode().rstrip("=")
-        return _page(f"<h1>Set up the authenticator</h1>{'<p class=fail>That code did not work.</p>' if bad else ''}"
-                     f"{totp.qr_svg(totp.otpauth_uri(secret))}<p>Key: <code>{key}</code></p>"
-                     f"<form method=post action=/totp/setup>{hidden(csrf)}<input name=code inputmode=numeric "
-                     f"autocomplete=off><button>Confirm</button></form><p><a href='/approvals'>Approvals</a></p>")
+        return _page(f"<section class=card><h1>Set up the authenticator</h1>"
+                     f"{'<p class=fail>That code did not work.</p>' if bad else ''}"
+                     f"<div class=qr role=img aria-label='QR code for your authenticator app'>"
+                     f"{totp.qr_svg(totp.otpauth_uri(secret))}</div><p>Key: <code>{key}</code></p>"
+                     f"<form method=post action=/totp/setup>{hidden(csrf)}<label for=code>6-digit code</label>"
+                     f"<input id=code name=code inputmode=numeric autocomplete=off> <button class=go>Confirm</button>"
+                     f"</form></section>")
 
     def say(f):
         later = []   # an expired session's run stop, run once the lock is released

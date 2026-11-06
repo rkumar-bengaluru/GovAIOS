@@ -532,3 +532,22 @@ def test_talk_without_apps_folder_says_how_to_start(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_pages_share_stylesheet(panel):
+    P = panel
+    _open(P)
+    P.say("run joblens")
+    log = AuditLog(P.home)
+    log.append("flow_start", flow="a")
+    log.append("flow_end", flow="a", outcome="done")
+    pages = [P.get(p)[1] for p in ("/", "/audit", "/audit/log", "/audit/run/" + str(_log(P.home, "flow_start")[0]["seq"]),
+                                   "/approvals")]
+    SecretStore(P.home).delete()
+    pages.append(P.get("/totp/setup")[1])
+    styles = {re.findall(r"<style>.*?</style>", b, re.S)[0] for b in pages}
+    assert len(styles) == 1 and all(len(re.findall(r"<style", b)) == 1 for b in pages)
+    assert "prefers-color-scheme" in styles.pop()
+    for b in pages:
+        assert "<main" in b and "<script" not in b.lower() and "http:" not in b and "https:" not in b
+        assert 'name=viewport' in b
