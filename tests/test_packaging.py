@@ -213,4 +213,53 @@ def test_uninstall_removes_panel_agent():
     s = (PK / "uninstall.sh").read_text()
     assert 'launchctl bootout "gui/$UID_N/com.govaios.panel"' in s
     assert 'sudo -u "$SUDO_USER" rm -f "$UHOME/Library/LaunchAgents/com.govaios.panel.plist"' in s
-    assert "apps" not in s.replace("apps folder", "")
+    for line in s.splitlines():
+        if line.lstrip().startswith("#") or "rm " not in line:
+            continue
+        assert "apps" not in line and "Application Support/GOV-AIOS" not in line and "$DATA" not in line
+
+
+def test_install_seeds_before_swap():
+    s = (PK / "install.sh").read_text()
+    seed_i = s.index("packaging/seed-apps.sh")
+    assert s.index("packaging/handback.py") < s.index("umask 077; /bin/mkdir -p") < seed_i < s.index("launchctl bootout")
+    assert seed_i < s.index('rm -rf "/Applications/gov-aios.app"')
+    assert s.index("codesign --verify --strict \"-R=$REQ\"") < seed_i
+    assert 'boot guard "$PLIST"' in s
+
+
+def test_seed_creates_missing_parents_0700(tmp_path):
+    dest = tmp_path / "a/b/apps"
+    assert seed(repo(tmp_path), dest).returncode == 0
+    for d in (tmp_path / "a", tmp_path / "a/b", dest, dest / "flows", dest / "pages"):
+        assert d.stat().st_mode & 0o777 == 0o700, d
+
+
+def test_seed_existing_0755_apps_ends_0700(tmp_path):
+    dest = tmp_path / "apps"
+    dest.mkdir(mode=0o755)
+    os.chmod(dest, 0o755)
+    assert seed(repo(tmp_path), dest).returncode == 0
+    assert dest.stat().st_mode & 0o777 == 0o700
+
+
+def test_seed_dangling_symlink_not_written_through(tmp_path):
+    dest = tmp_path / "apps"
+    (dest / "flows").mkdir(parents=True)
+    target = tmp_path / "nowhere"
+    os.symlink(target, dest / "flows/x.yaml")
+    p = seed(repo(tmp_path), dest)
+    assert p.returncode == 0 and "not updated: flows/x.yaml" in p.stdout
+    assert not target.exists() and os.readlink(dest / "flows/x.yaml") == str(target)
+    assert (dest / "flows/y.yaml").read_text() == "same"  # the rest still copied
+
+
+def test_seed_odd_names(tmp_path):
+    r = repo(tmp_path)
+    (r / "flows/-dash.yaml").write_text("d")
+    (r / "flows/with space.yaml").write_text("s")
+    dest = tmp_path / "apps"
+    assert seed(r, dest).returncode == 0
+    assert (dest / "flows/-dash.yaml").read_text() == "d"
+    assert (dest / "flows/with space.yaml").read_text() == "s"
+    assert (dest / "flows/x.yaml").stat().st_mode & 0o777 == 0o600

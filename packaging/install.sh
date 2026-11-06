@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run by the admin: sudo packaging/install.sh --no-claude | sudo packaging/install.sh <managed-settings.json>
-# Decision rows 18, 26, 34. Never runs gov-aios, never creates anything in the data home.
+# Decision rows 18, 26, 34. Never runs gov-aios. The data home (0700) and the apps folder are created as the user.
 # Root writes nothing under the user's home except the guarded chown of root-owned data-home files.
 set -euo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -45,6 +45,15 @@ STAGE=$(/usr/bin/mktemp -d /Applications/.gov-aios.XXXXXX)
 chown -R root:wheel "$STAGE/gov-aios.app"
 chmod -R go-w "$STAGE/gov-aios.app"
 codesign --verify --strict "-R=$REQ" "$STAGE/gov-aios.app" || { echo "installed copy fails signer check ($SIGNER_CN)" >&2; exit 1; }
+# Hand back root-owned data-home files via fds (no path races, no symlinks, hard links fail closed).
+# The helper is also the assertion: non-zero aborts the install.
+/usr/bin/python3 -I packaging/handback.py "$UHOME" "$SUDO_USER" || { echo "data home hand-back failed; fix by hand, then re-run" >&2; exit 1; }
+
+# Create the data home as the user at 0700 (an existing one is not loosened), then seed the apps folder as the user.
+# Seeding never overwrites and lists files it left alone. Any failure here aborts before the old install is touched.
+sudo -u "$SUDO_USER" /bin/bash -c 'umask 077; /bin/mkdir -p "$1"' _ "$DATA" || { echo "cannot create the data home" >&2; exit 1; }
+sudo -u "$SUDO_USER" /bin/bash packaging/seed-apps.sh . "$DATA/apps" || { echo "seeding the apps folder failed" >&2; exit 1; }
+
 # Stop the old guard just before the swap (errors ignored: it may not be loaded).
 launchctl bootout "gui/$UID_N/com.govaios.guard" 2>/dev/null || true
 launchctl bootout "gui/$UID_N/com.govaios.panel" 2>/dev/null || true
@@ -68,12 +77,6 @@ fi
 sudo -u "$SUDO_USER" /bin/mkdir -p "$AGENTS"
 sudo -u "$SUDO_USER" /usr/bin/install -m 0644 packaging/com.govaios.guard.plist "$PLIST"
 sudo -u "$SUDO_USER" /usr/bin/install -m 0644 packaging/com.govaios.panel.plist "$PANEL_PLIST"
-# Seed the apps folder as the user; it never overwrites and lists files it left alone.
-sudo -u "$SUDO_USER" /bin/bash packaging/seed-apps.sh . "$DATA/apps" || { echo "seeding the apps folder failed" >&2; exit 1; }
-
-# Hand back root-owned data-home files via fds (no path races, no symlinks, hard links fail closed).
-# The helper is also the assertion: non-zero aborts the install.
-/usr/bin/python3 -I packaging/handback.py "$UHOME" "$SUDO_USER" || { echo "data home hand-back failed; fix by hand, then re-run" >&2; exit 1; }
 
 cat <<MSG
 Installed $APP${SETTINGS:+ and managed settings}.
