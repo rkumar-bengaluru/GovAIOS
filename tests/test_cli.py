@@ -603,3 +603,10 @@ def test_cli_run_passes_ticket_env(monkeypatch):
     monkeypatch.setenv("GOVAIOS_RUN_TICKET", "abc")
     main(["run", "x.yaml", "--dev"])
     assert seen["ticket"] == "abc"
+
+
+def test_cli_empty_ticket_env_is_no_ticket(monkeypatch):
+    seen = _fake_run(monkeypatch, None)
+    monkeypatch.setenv("GOVAIOS_RUN_TICKET", "")
+    main(["run", "x.yaml", "--dev"])
+    assert seen["ticket"] is None

@@ -238,11 +238,12 @@ class Runner:
             approved = self.approvals.flow_ok(self.flow["id"], self.digest)
             if self.ticket is not None:   # panel run: never a prompt; the ticket is the start proof
                 from .panel import tickets
-                ok = approved and tickets.consume(self.home, self.ticket, self.flow["id"], self.digest)
+                sid = approved and tickets.consume(self.home, self.ticket, self.flow["id"], self.digest)
                 if approved:
-                    self._audit("request", action="run_start", decision="allow" if ok else "deny",
-                                approver="admin", channel="totp_session", auth="ticket")
-                if not ok:
+                    extra = {"session": sid} if sid else {}
+                    self._audit("request", action="run_start", decision="allow" if sid else "deny",
+                                approver="admin", channel="totp_session", auth="ticket", **extra)
+                if not sid:
                     raise Stop("run ticket not valid")
             elif approved:   # approved flow: Touch ID is the start proof
                 ok, how = auth.prove(f"run {self.flow['id']}", self.home)

@@ -69,7 +69,7 @@ def _run(args) -> int:
     try:
         preflight(home, dev=not packaged)
         runner = Runner(Path(args.flow).resolve(), get_desktop(), home, executor,
-                        ticket=os.environ.get("GOVAIOS_RUN_TICKET"))
+                        ticket=os.environ.get("GOVAIOS_RUN_TICKET") or None)
         runner.run()
         if runner.deliver:   # only after flow_end: the shim then starts `deliver`, which re-checks everything
             _write_shim_file("GOVAIOS_NEXT_FILE", "deliver")

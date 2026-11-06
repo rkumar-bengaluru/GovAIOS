@@ -122,7 +122,7 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, d
         r.approvals.approve_flow(r.flow["id"], r.digest)
     if mint:   # a panel would mint this for the approved flow
         from govaios.panel import tickets
-        r.ticket = tickets.create(tmp_path, r.flow["id"], r.digest)
+        r.ticket = tickets.create(tmp_path, r.flow["id"], r.digest, "sess1")
     try:
         r.run()
         err = None
@@ -530,12 +530,15 @@ def test_ticket_run_skips_touch_id(tmp_path, monkeypatch):
     req = [x for x in e if x.get("action") == "run_start"]
     assert len(req) == 1 and req[0]["decision"] == "allow" and req[0]["approver"] == "admin"
     assert req[0]["channel"] == "totp_session" and req[0]["auth"] == "ticket"
+    assert req[0]["session"] == "sess1"
 
 
 def test_bad_ticket_stops_without_prompt(tmp_path, monkeypatch):
     _no_prompts(monkeypatch)
     r, e, err = run(tmp_path, [], preapprove=True, ticket="0" * 64)
     assert isinstance(err, Stop) and str(err) == "run ticket not valid" and "launch" not in r.d.calls
+    rs = [x for x in e if x.get("action") == "run_start"]
+    assert [x["decision"] for x in rs] == ["deny"] and "session" not in rs[0]
 
 
 def test_ticket_for_unapproved_flow_stops(tmp_path, monkeypatch):
