@@ -123,18 +123,10 @@ def _audit_ui(args) -> int:
     from .audit.web import make_server
     from .home import data_home
 
-    from . import auth
-    from .audit.log import AuditLog
-
-    home = data_home()
-    ok, how = auth.prove("open the audit log", home)
-    AuditLog(home).append("ui_login", decision="allow" if ok else "deny", approver="admin", channel="touch_id", auth=how)
-    if not ok:
-        print("not proven; audit UI not started", file=sys.stderr)
-        return 1
+    home = data_home()   # sign-in (Touch ID, audited ui_login) happens on the page
     flows = Path(args.flows_dir).resolve() if args.flows_dir else None
-    server, code = make_server(home, args.port, flows_dir=flows, helper=args.helper)
-    print(f"http://127.0.0.1:{server.server_address[1]}/login?c={code}", flush=True)
+    server = make_server(home, args.port, flows_dir=flows, helper=args.helper)
+    print(f"Control panel: http://127.0.0.1:{server.server_address[1]}/", flush=True)
     import signal
 
     def _term(*_):

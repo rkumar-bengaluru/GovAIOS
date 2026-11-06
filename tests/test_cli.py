@@ -490,25 +490,21 @@ def test_cli_hook_passes_exit2(monkeypatch):
     assert main(["hook"]) == 2
 
 
-def test_audit_ui_deny_and_allow(monkeypatch, capsys, govaios_home):
-    import json
+def test_audit_ui_no_prove_at_start_prints_panel_address(monkeypatch, capsys, govaios_home):
     from govaios import auth
     from govaios.audit import web
     from govaios.audit.log import AuditLog
-    monkeypatch.setattr(web, "make_server", lambda *a, **k: pytest.fail("must not bind"))
-    monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
-    assert main(["audit-ui"]) == 1
-    e = json.loads(AuditLog(govaios_home).path.read_text().splitlines()[-1])
-    assert e["kind"] == "ui_login" and e["channel"] == "touch_id" and e["auth"] == "failed"
-    assert (e["decision"], e["approver"]) == ("deny", "admin") and "outcome" not in e
+    monkeypatch.setattr(auth, "prove", lambda *a, **k: pytest.fail("sign-in happens on the page"))
 
     class Srv:
         server_address = ("127.0.0.1", 1234)
         serve_forever = server_close = lambda self: None
-    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None: (Srv(), "CODE"))
-    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None: Srv())
     assert main(["audit-ui"]) == 0
-    assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Control panel: http://127.0.0.1:1234/\n" in out and "login" not in out
+    p = AuditLog(govaios_home).path
+    assert not p.exists() or '"ui_login"' not in p.read_text()
 
 
 class FakeHelper:
@@ -539,26 +535,21 @@ def test_cli_panel_starts_helper_before_sandbox(monkeypatch, tmp_path, govaios_h
         assert order == [("apply", sandbox.UI_PROFILE), ("handler", None)]
 
 
-def test_panel_deny_and_allow(monkeypatch, capsys, govaios_home, tmp_path):
+def test_panel_starts_without_prove(monkeypatch, capsys, govaios_home, tmp_path):
     from govaios import auth
     from govaios.audit import web
-    monkeypatch.setattr(web, "make_server", lambda *a, **k: pytest.fail("must not bind"))
-    monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
-    monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
-    assert main(["panel", str(tmp_path)]) == 1
-    assert FakeHelper.last.closed   # closed on the refused path too
+    monkeypatch.setattr(auth, "prove", lambda *a, **k: pytest.fail("sign-in happens on the page"))
     seen = []
 
     class Srv:
         server_address = ("127.0.0.1", 1234)
         serve_forever = server_close = lambda self: None
     monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None:
-                        seen.append((port, flows_dir, helper)) or (Srv(), "CODE"))
-    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+                        seen.append((port, flows_dir, helper)) or Srv())
     monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
     assert main(["panel", str(tmp_path), "--port", "7"]) == 0
     assert seen == [(7, tmp_path.resolve(), FakeHelper.last)] and FakeHelper.last.closed
-    assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+    assert "Control panel: http://127.0.0.1:1234/" in capsys.readouterr().out
 
 
 def test_panel_sigterm_ends_session_and_stops_run(monkeypatch, govaios_home):
@@ -576,7 +567,7 @@ def test_panel_sigterm_ends_session_and_stops_run(monkeypatch, govaios_home):
         stop = lambda self, why: stops.append(why)
 
     def make(home, port, flows_dir=None, helper=None):
-        srv, code = real(home, 0, flows_dir=flows_dir, tick_s=None)
+        srv = real(home, 0, flows_dir=flows_dir, tick_s=None)
         srv.panel.session.open()
         srv.panel.run = Run()
 
@@ -584,9 +575,8 @@ def test_panel_sigterm_ends_session_and_stops_run(monkeypatch, govaios_home):
             got["h"] = signal.getsignal(signal.SIGTERM)
             got["h"](signal.SIGTERM, None)   # what the shim's kill -TERM delivers
         srv.serve_forever = serve
-        return srv, code
+        return srv
     monkeypatch.setattr(web, "make_server", make)
-    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
     before = signal.getsignal(signal.SIGTERM)
     assert main(["panel"]) == 0
     assert got["h"] is not before and signal.getsignal(signal.SIGTERM) is before   # restored

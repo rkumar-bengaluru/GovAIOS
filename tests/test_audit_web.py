@@ -8,6 +8,7 @@ import pytest
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.audit.web import make_server
+from test_panel_web import _raw, _signed_out, _signin_post, signin
 
 
 class Clock:
@@ -25,12 +26,12 @@ def no_auth(monkeypatch):
 
 
 def _start(home, clock):
-    srv, code = make_server(home, now=clock)
+    srv = make_server(home, now=clock)
     threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
-    return srv, code
+    return srv
 
 
-def _client(srv, code):
+def _client(srv):
     port = srv.server_address[1]
 
     def req(path, method="GET", cookie=None, headers=None, body=None):
@@ -43,9 +44,7 @@ def _client(srv, code):
         c.request(method, path, body=urlencode(body) if body is not None else None, headers=h)
         r = c.getresponse()
         return r.status, r.read().decode(), r
-    r = req(f"/login?c={code}")
-    ck = r[2].getheader("Set-Cookie")
-    return req, ck.split(";")[0][2:] if ck else None
+    return req, signin(srv)
 
 
 @pytest.fixture
@@ -57,48 +56,25 @@ def web(tmp_path):
                reason="<script>x</script>")
     log.append("flow_end", flow="demo_flow", outcome="done")
     Approvals(home / "approvals.json").approve_flow("demo_flow", "abc123")
-    srv, code = _start(home, Clock())
-    req, sid = _client(srv, code)
+    srv = _start(home, Clock())
+    req, sid = _client(srv)
 
     def get(path, method="GET", tok=True):
         return req(path, method, cookie=sid if tok else None)
 
-    get.req, get.sid, get.code = req, sid, code
+    get.req, get.sid = req, sid
     yield home, srv, get
     srv.shutdown()
     srv.server_close()
 
 
-def test_login_code_single_use_and_expiry(tmp_path):
-    clock = Clock()
-    srv, code = _start(tmp_path / "h", clock)
-    req = _client(srv, code)[0]
-    s, _, r = req(f"/login?c={code}")
-    assert s == 403  # already used by _client
-    srv.shutdown(); srv.server_close()
-    srv, code = _start(tmp_path / "h", clock)
-    port = srv.server_address[1]
-    c = http.client.HTTPConnection("127.0.0.1", port)
-    c.request("GET", f"/login?c={code}")
-    r = c.getresponse()
-    ck = r.getheader("Set-Cookie")
-    assert r.status == 303 and r.getheader("Location") == "/"
-    assert ck.startswith("s=") and "HttpOnly" in ck and "SameSite=Strict" in ck and "Path=/" in ck
-    srv.shutdown(); srv.server_close()
-    clock2 = Clock()
-    srv, code = _start(tmp_path / "h", clock2)
-    clock2.t += 61
-    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-    c.request("GET", f"/login?c={code}")
-    assert c.getresponse().status == 403
-    srv.shutdown(); srv.server_close()
-
-
 def test_pages_need_cookie(web):
     get = web[2]
     for p in ("/", "/audit", "/audit/log", "/approvals"):
-        assert get(p, tok=False)[0] == 403 and get(p)[0] == 200
-    assert get(f"/?t={get.code}", tok=False)[0] == 403
+        s, body, _ = get(p, tok=False)
+        assert s == 200 and "Sign in with Touch ID" in body and "demo_flow" not in body and "Revoke" not in body
+        assert get(p)[0] == 200 and "Sign in with Touch ID" not in get(p)[1]
+    assert "demo_flow" not in get.req("/audit", cookie="forged")[1]
 
 
 def test_host_header_checked(web):
@@ -106,27 +82,21 @@ def test_host_header_checked(web):
     assert s == 403
 
 
-def test_session_expires_and_lock_ends_server(tmp_path, monkeypatch):
+def test_signin_expires_and_lock_never_end_server(tmp_path, monkeypatch):
     from govaios import auth
     clock = Clock()
-    srv, code = _start(tmp_path / "h", clock)
-    req, sid = _client(srv, code)
+    srv = _start(tmp_path / "h", clock)
+    monkeypatch.setattr(srv, "shutdown", lambda: pytest.fail("the panel never shuts itself down"))
+    req, sid = _client(srv)
     assert req("/", cookie=sid)[0] == 200
-    clock.t += 3601
-    called = threading.Event()
-    real = srv.shutdown
-    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
-    assert req("/", cookie=sid)[0] == 403
-    assert called.wait(2)
-    srv.server_close()
-    srv, code = _start(tmp_path / "h2", Clock())
-    req, sid = _client(srv, code)
-    called = threading.Event()
-    real = srv.shutdown
-    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
+    clock.t += 8 * 3600
+    assert "Sign in with Touch ID" in req("/", cookie=sid)[1]
+    sid = _client(srv)[1]
     monkeypatch.setattr(auth, "screen_locked", lambda: True)
     assert req("/", cookie=sid)[0] == 403
-    assert called.wait(2)
+    srv.panel.tick()
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert "Sign in with Touch ID" in req("/", cookie=sid)[1]
     srv.server_close()
 
 
@@ -197,7 +167,7 @@ def test_values_still_escaped(web):
 
 def test_index_lists_run(web):
     s, body, _ = web[2]("/audit")
-    assert s == 200 and "demo_flow" in body and "OK 3 entries" in body
+    assert s == 200 and "demo_flow" in body and "OK 4 entries" in body
 
 
 def test_run_and_approvals(web):
@@ -245,8 +215,11 @@ def test_no_store_headers(web):
 
 
 def test_missing_log_no_crash(tmp_path):
-    srv, code = _start(tmp_path / "empty", Clock())
-    req, sid = _client(srv, code)
+    srv = _start(tmp_path / "empty", Clock())
+    req, sid = _client(srv)
+    p = AuditLog(tmp_path / "empty").path   # sign-in wrote ui_login; take the log away again
+    os.chflags(p, 0)
+    p.unlink()
     status, body, _ = req("/audit", cookie=sid)
     srv.shutdown(); srv.server_close()
     assert status == 200 and "No runs yet" in body and "FAIL" in body
@@ -256,13 +229,13 @@ def _raw_server(tmp_path, lines, approvals=None):
     import json as _j
     home = tmp_path / "h2"
     AuditLog(home).append("action", step=1)  # creates keys/home
+    srv = _start(home, Clock())
+    req, sid = _client(srv)   # sign in (audits ui_login) before the log is replaced
     p = home / "audit.jsonl"
     os.chflags(p, 0)
     p.write_text("".join(l + "\n" for l in lines))
     if approvals is not None:
         (home / "approvals.json").write_text(approvals)
-    srv, code = _start(home, Clock())
-    req, sid = _client(srv, code)
     return srv, lambda path: req(path, cookie=sid)
 
 
@@ -311,16 +284,16 @@ def test_host_checked_on_post_and_other_methods(web):
     assert get.req("/", "PUT", cookie=get.sid)[0] == 405
 
 
-def test_locked_login_shuts_down(tmp_path, monkeypatch):
+def test_locked_signin_refused_and_server_stays(tmp_path, monkeypatch):
     from govaios import auth
-    srv, code = _start(tmp_path / "h", Clock())
-    called = threading.Event()
-    real = srv.shutdown
-    monkeypatch.setattr(srv, "shutdown", lambda: (called.set(), real()))
+    srv = _start(tmp_path / "h", Clock())
+    monkeypatch.setattr(srv, "shutdown", lambda: pytest.fail("the panel never shuts itself down"))
+    port = srv.server_address[1]
+    _, pre, ck, _ = _signed_out(port)
     monkeypatch.setattr(auth, "screen_locked", lambda: True)
-    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-    c.request("GET", f"/login?c={code}")
-    assert c.getresponse().status == 403 and called.wait(2)
+    assert _signin_post(port, ck, pre)[0] == 403   # no_auth: prove would fail the test
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert _raw(port, "GET", "/")[0] == 200
     srv.server_close()
 
 

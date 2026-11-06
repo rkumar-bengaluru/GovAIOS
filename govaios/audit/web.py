@@ -104,6 +104,7 @@ form{margin:10px 0}
 td form{margin:0}
 .card{max-width:640px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
 .card label{display:block;font-weight:700;margin-bottom:6px}
+.word{font:700 28px var(--mono);letter-spacing:.2em}
 .qr{display:inline-block;background:#fff;padding:10px;border-radius:8px;border:1px solid var(--line)}
 .qr svg{display:block;max-width:100%;height:auto}
 code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
@@ -199,13 +200,16 @@ def _say(text):
 NO_SESSION = "Enter the 6-digit code from your authenticator."
 
 
-LOGIN_TTL, SESSION_TTL = 60, 3600
+SIGNIN_S, SIGNIN_PAUSE_S, PRE_S = 8 * 3600, 10, 120
+WORD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "paused": "Sign-in is paused for 10 seconds.",
+         "no": "Touch ID did not sign you in."}
 
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
                 name="Rupak", session=None, tick_s=1.0, helper=None):
-    """Returns (server, login code); server.panel holds the run session, current run and conversation.
-    The caller has already proven presence. tick_s=None starts no ticker (tests call server.panel.tick()).
+    """Returns the server; server.panel holds the run session, current run and conversation.
+    Browsers sign in on the page with Touch ID (POST /signin); the server never shuts itself down. tick_s=None starts no ticker (tests call server.panel.tick()).
     helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed."""
     launcher = launcher or (helper.run if helper else RunLaunch)
     speak = speak or (helper.say if helper else _say)
@@ -266,26 +270,21 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             panel.voice = threading.Thread(target=panel.speak, args=(text,), daemon=True)
             panel.voice.start()
 
-    def close():
-        """Shut the server down, but never while its run is live or its result is still being spoken."""
-        state["closing"] = True
-        report()   # a finished, unreported run gets its line and speech before any shutdown
-        with panel.lock:
-            busy = live() or (panel.voice is not None and panel.voice.is_alive()) or state["down"]
-            state["down"] = state["down"] or not busy
-        if not busy:
-            threading.Thread(target=server.shutdown, daemon=True).start()   # never from a handler thread
+    def signout_all():
+        with sign_lock:
+            state["sessions"].clear()
 
     def tick():
+        locked = auth.screen_locked()
+        if locked:
+            signout_all()
         s = panel.session
         if s.id is not None:
-            reason = ("expired" if not s.active() else "screen_lock" if auth.screen_locked()
+            reason = ("expired" if not s.active() else "screen_lock" if locked
                       else "emergency_stop" if runstate.stopped(home) else None)
             if reason:
                 end_session(reason)   # Session.end hands the id out once: a racing request cannot end it twice
         report()
-        if state["closing"]:
-            close()
     panel.tick = tick
 
     def apps():
@@ -301,8 +300,17 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             except Exception:
                 pass   # already answering 500; nothing more can be recorded
             raise
-    code = secrets.token_urlsafe(32)
-    state = {"code_ts": now(), "code_used": False, "sessions": {}, "closing": False, "down": False}  # sid -> (created, csrf)
+    # sessions: sid -> (signed in at, csrf); pre: token -> (issued at, code word); refused: last refused prompt
+    state = {"sessions": {}, "pre": {}, "refused": float("-inf")}
+    sign_lock, prompt = threading.Lock(), threading.Lock()   # prompt: one Touch ID sign-in sheet at a time
+
+    def signed_out(pre, word, m):
+        note = NOTES.get(m, "")
+        return _page(f"<section class=card><h1>Locked</h1>{f'<p class=fail>{note}</p>' if note else ''}"
+                     f"<p>Code <b class=word>{word}</b></p>"
+                     f"<p>The Touch ID prompt shows this same code. If it shows another, cancel it.</p>"
+                     f"<form method=post action=/signin><input type=hidden name=pre value='{pre}'>"
+                     f"<button class=go>Sign in with Touch ID</button></form></section>")
 
     def banner():
         try:
@@ -393,7 +401,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         nodir = "" if flows_dir else "<p class=note>No apps folder given. Start with: bin/gov-aios panel flows</p>"
         who = (f"<header class=top><div class=who><div class=ring style='--p:{pct}%' aria-hidden=true>"
                f"<b>{escape(panel.name[:1])}</b></div><div><h1>{escape(panel.name)}</h1>"
-               f"<div class=s>{ring}</div></div></div>{end}</header>")
+               f"<div class=s>{ring}</div></div></div>{end}<form method=post action=/signout>{hidden(csrf)}"
+               f"<button>Sign out</button></form></header>")
         return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{steps}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
                      f"</label><input id=cmd name=text autocomplete=off autofocus placeholder='Type: run joblens'>"
@@ -537,20 +546,17 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
     SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
            ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'"))
-    code_lock = threading.Lock()
-
     def guarded(fn):
-        """Host and lock checks run first on every method and path; a locked screen ends the server."""
+        """Host and lock checks run first on every method and path; a locked screen signs every browser out."""
         def wrapper(self):
             if self.headers.get("Host") != f"127.0.0.1:{self.server.server_address[1]}":
                 return self._send(403)
             if auth.screen_locked():
-                state["sessions"].clear()
+                signout_all()
                 try:
                     end_session("screen_lock")
                 except Exception:
                     pass   # the session is already ended; only its audit line failed
-                close()   # the stopped run still finishes and reports first
                 return self._send(403)
             return fn(self)
         return wrapper
@@ -558,10 +564,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     class H(BaseHTTPRequestHandler):
         timeout = 10  # a short body must not hold a thread forever
 
-        def _send(self, status, body=""):
+        def _send(self, status, body="", extra=()):
             data = body.encode() if body else f"{status}".encode()
             self.send_response(status)
-            for k, v in (("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(data))), *SEC):
+            for k, v in (("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(data))), *SEC, *extra):
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
@@ -569,44 +575,81 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         def send_error(self, code, message=None, explain=None):  # parse-level errors keep the headers too
             self._send(code)
 
-        def log_message(self, *a):  # default logging would print the login code
+        def log_message(self, *a):  # default logging would print request paths and their tokens
             pass
 
-        def _session(self):
-            """(created, csrf) of a live session, else None. Expiry ends the server."""
-            if any(now() - c > SESSION_TTL for c, _ in state["sessions"].values()):
-                state["sessions"].clear()
-                close()   # a live run keeps the server up until it is done
-                return None
+        def _cookie(self, name):
             try:
-                sid = SimpleCookie(self.headers.get("Cookie", ""))["s"].value
+                return SimpleCookie(self.headers.get("Cookie", ""))[name].value
             except (KeyError, ValueError):
                 return None
-            for k, v in state["sessions"].items():
-                if hmac.compare_digest(k.encode(), sid.encode()):
-                    return v
+
+        def _redirect(self, loc, extra=()):
+            self.send_response(303)
+            for k, v in (("Location", loc), ("Content-Length", "0"), *SEC, *extra):
+                self.send_header(k, v)
+            self.end_headers()
+
+        def _session(self):
+            """(signed in at, csrf, sid) of this browser's live sign-in, else None. A sign-in lasts SIGNIN_S."""
+            sid = self._cookie("s")
+            with sign_lock:
+                for k, (c, _) in list(state["sessions"].items()):
+                    if now() - c >= SIGNIN_S:
+                        del state["sessions"][k]
+                for k, v in state["sessions"].items():
+                    if sid is not None and hmac.compare_digest(k.encode(), sid.encode()):
+                        return (*v, k)
             return None
+
+        def _signed_out(self, query):
+            """The Locked page: a fresh pre-login token (cookie + form field) and the code word for its prompt."""
+            pre, word = secrets.token_urlsafe(32), "".join(secrets.choice(WORD_ABC) for _ in range(4))
+            with sign_lock:
+                pres = state["pre"]
+                for k in [k for k, (t, _) in pres.items() if now() - t >= PRE_S] + list(pres)[:max(0, len(pres) - 63)]:
+                    pres.pop(k, None)   # expired, and at most 64 kept: a page loaded in a loop cannot grow it
+                pres[pre] = (now(), word)
+            m = parse_qs(query).get("m", [""])[0]
+            self._send(200, signed_out(pre, word, m),
+                       (("Set-Cookie", f"pre={pre}; HttpOnly; SameSite=Strict; Path=/; Max-Age={PRE_S}"),))
+
+        def _signin(self, f):
+            """POST /signin: the pre pair must match a token this server issued; one Touch ID prompt at a time,
+            paused SIGNIN_PAUSE_S after a refusal. The prompt names the code word shown on that page."""
+            ck, field = self._cookie("pre"), f.get("pre", "")
+            if ck is None or not hmac.compare_digest(ck.encode(), field.encode()):
+                return self._send(403)
+            with sign_lock:   # spent by this one attempt
+                hit = next((k for k in state["pre"] if hmac.compare_digest(k.encode(), ck.encode())), None)
+                issued, word = state["pre"].pop(hit) if hit is not None else (None, None)
+            if issued is None or now() - issued >= PRE_S:
+                return self._send(403)
+            if not prompt.acquire(blocking=False):
+                return self._redirect("/?m=busy")
+            try:
+                if now() - state["refused"] < SIGNIN_PAUSE_S:
+                    return self._redirect("/?m=paused")
+                ok, how = auth.prove(f"sign in to the GOV-AIOS panel, code {word}", home)
+                if not ok:
+                    state["refused"] = now()
+                log.append("ui_login", decision="allow" if ok else "deny", approver="admin", channel="touch_id",
+                           auth=how)   # audit first, then the cookie
+            finally:
+                prompt.release()
+            if not ok:
+                return self._redirect("/?m=no")
+            sid = secrets.token_urlsafe(32)
+            with sign_lock:
+                state["sessions"][sid] = (now(), secrets.token_urlsafe(32))
+            self._redirect("/", (("Set-Cookie", f"s={sid}; HttpOnly; SameSite=Strict; Path=/"),))
 
         @guarded
         def do_GET(self):
             u = urlsplit(self.path)
-            if u.path == "/login":
-                c = parse_qs(u.query).get("c", [""])[0]
-                with code_lock:  # check-and-set: two concurrent requests cannot both log in
-                    fresh = not state["code_used"] and now() - state["code_ts"] < LOGIN_TTL
-                    if not (hmac.compare_digest(c.encode(), code.encode()) and fresh):
-                        return self._send(403)
-                    state["code_used"] = True
-                sid = secrets.token_urlsafe(32)
-                state["sessions"][sid] = (now(), secrets.token_urlsafe(32))
-                self.send_response(303)
-                for k, v in (("Set-Cookie", f"s={sid}; HttpOnly; SameSite=Strict; Path=/"), ("Location", "/"),
-                             ("Content-Length", "0"), *SEC):
-                    self.send_header(k, v)
-                return self.end_headers()
             sess = self._session()
             if not sess:
-                return self._send(403)
+                return self._signed_out(u.query)
             try:
                 m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
@@ -619,12 +662,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
         @guarded
         def do_POST(self):
-            act = POSTS.get(urlsplit(self.path).path)
-            if act is None:
+            path = urlsplit(self.path).path
+            act = POSTS.get(path)
+            if act is None and path not in ("/signin", "/signout"):
                 return self._send(405)
             sess = self._session()
             origin = self.headers.get("Origin")  # absent is fine (row 37); a wrong one is not
-            if not sess or (origin is not None and origin != f"http://127.0.0.1:{self.server.server_address[1]}"):
+            if origin is not None and origin != f"http://127.0.0.1:{self.server.server_address[1]}":
+                return self._send(403)
+            if not sess and path != "/signin":
                 return self._send(403)
             try:
                 n = int(self.headers.get("Content-Length", "0"))
@@ -633,18 +679,24 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if not 0 <= n <= 65536:
                 return self._send(400)
             f = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "replace")).items()}
+            if path == "/signin":
+                try:
+                    return self._signin(f)
+                except Exception:   # body stays fixed; nothing about the failure reaches the page
+                    return self._send(500, "internal error")
             if not hmac.compare_digest(f.get("csrf", "").encode(), sess[1].encode()):
                 return self._send(403)
+            if path == "/signout":   # this browser only; the code session stays open
+                with sign_lock:
+                    state["sessions"].pop(sess[2], None)
+                return self._redirect("/")
             try:
                 loc = act(f)
             except Exception:   # body stays fixed; nothing about the failure reaches the page
                 return self._send(500, "internal error")
             if loc is None:
                 return self._send(400)
-            self.send_response(303)
-            for k, v in (("Location", loc), ("Content-Length", "0"), *SEC):
-                self.send_header(k, v)
-            self.end_headers()
+            self._redirect(loc)
 
         @guarded
         def _no(self):
@@ -676,4 +728,4 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     server.panel = panel
     if tick_s is not None:
         threading.Thread(target=ticker, daemon=True).start()
-    return server, code
+    return server
