@@ -102,15 +102,15 @@ LOGIN_TTL, SESSION_TTL = 60, 3600
 
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=RunLaunch, speak=_say,
-                name="Rupak", session=None):
+                name="Rupak", session=None, tick_s=1.0):
     """Returns (server, login code); server.panel holds the run session, current run and conversation.
-    The caller has already proven presence."""
+    The caller has already proven presence. tick_s=None starts no ticker (tests call server.panel.tick())."""
     home = Path(home)
     log = AuditLog(home)
     approvals_path = home / "approvals.json"
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
-                            speak=speak, name=name, pending=None, lock=threading.Lock(),
+                            speak=speak, name=name, pending=None, lock=threading.RLock(),
                             told=None, voice=None)
 
     def tell(line):
@@ -119,14 +119,21 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def live():
         return panel.run is not None and not panel.run.done
 
-    def end_session(reason):
-        """End the run session (stopping its run), then audit; None when none was open."""
-        sid = panel.session.end(reason)
+    def end_session(reason, later=None):
+        """End the run session (stopping its run), then audit; None when none was open.
+        Ending and taking the run share panel.lock with say()'s run start, so a run cannot start unseen;
+        run.stop blocks up to 2 s: it runs after the lock, or goes on `later` when the caller holds the lock."""
+        with panel.lock:
+            sid = panel.session.end(reason)
+            run = panel.run if sid is not None and live() else None
         if sid is None:
             return None
-        if live():
-            panel.run.stop("session ended")
-        log.append("session_end", session=sid, reason=reason)
+        try:
+            log.append("session_end", session=sid, reason=reason)
+        finally:   # a failed audit line must not leave the run going
+            if run is not None:
+                stop = lambda: run.stop("session ended")
+                stop() if later is None else later.append(stop)
         return sid
     panel.end_session = end_session
 
@@ -150,6 +157,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def close():
         """Shut the server down, but never while its run is live or its result is still being spoken."""
         state["closing"] = True
+        report()   # a finished, unreported run gets its line and speech before any shutdown
         with panel.lock:
             busy = live() or (panel.voice is not None and panel.voice.is_alive()) or state["down"]
             state["down"] = state["down"] or not busy
@@ -285,46 +293,54 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"autocomplete=off><button>Confirm</button></form><p><a href='/approvals'>Approvals</a></p>")
 
     def say(f):
+        later = []   # an expired session's run stop, run once the lock is released
+        try:
+            with panel.lock:   # check-and-act: one session open, one run start at a time
+                return command(f, later)
+        finally:
+            for fn in later:
+                fn()
+
+    def command(f, later):
         text = " ".join(f.get("text", "").split())[:200]
         if not text:
             return "/"
         code = re.fullmatch(r"[0-9]{6}", text) is not None
-        with panel.lock:   # check-and-act: one session open, one run start at a time
-            # never a code: any run of 6 digits, spaces allowed between them, is masked
-            panel.convo.append("Admin -> " + re.sub(r"[0-9](?: ?[0-9]){5}", "••••••", text))
-            if not panel.session.active():
-                if panel.session.id:
-                    end_session("expired")
-                if not code:
-                    tell(NO_SESSION)
-                    return "/"
-                r = totp.Verifier(home / "totp.state").verify(text)
-                if r != "ok":
-                    log.append("session_open", decision="deny", reason=r)
-                    tell("Too many wrong codes. Try again in 15 minutes." if r == "locked_out" else "That code did not work.")
-                    return "/"
-                sid = panel.session.open()
-                try:
-                    log.append("session_open", decision="allow", session=sid)
-                except Exception:
-                    panel.session.end("error")   # an unrecorded session must not stay open
-                    raise
-                tell("Session open for 30 minutes.")
+        # never a code: any run of 6 digits, spaces allowed between them, is masked
+        panel.convo.append("Admin -> " + re.sub(r"[0-9](?: ?[0-9]){5}", "••••••", text))
+        if not panel.session.active():
+            if panel.session.id:
+                end_session("expired", later)
+            if not code:
+                tell(NO_SESSION)
                 return "/"
-            kind, hit = match(text, al := apps())
-            if kind == "run" and live():
-                tell(f"{panel.app.name} is still running.")
-            elif kind == "run":
-                r = launcher(hit.path, tickets.create(home, hit.id, hit.digest, panel.session.id))
-                r.start()
-                panel.run, panel.app = r, hit
-                tell(f"Starting {hit.name}.")
-            elif kind == "draft":
-                tell(f"{hit.name} is a draft. Get it approved first.")
-            elif kind == "ambiguous":
-                tell(f"Which app: {', '.join(a.name for a in hit)}?")
-            else:
-                tell(f"I don't know that app. Approved apps: {', '.join(a.name for a in al if a.approved) or 'none'}.")
+            r = totp.Verifier(home / "totp.state").verify(text)
+            if r != "ok":
+                log.append("session_open", decision="deny", reason=r)
+                tell("Too many wrong codes. Try again in 15 minutes." if r == "locked_out" else "That code did not work.")
+                return "/"
+            sid = panel.session.open()
+            try:
+                log.append("session_open", decision="allow", session=sid)
+            except Exception:
+                panel.session.end("error")   # an unrecorded session must not stay open
+                raise
+            tell("Session open for 30 minutes.")
+            return "/"
+        kind, hit = match(text, al := apps())
+        if kind == "run" and live():
+            tell(f"{panel.app.name} is still running.")
+        elif kind == "run":
+            r = launcher(hit.path, tickets.create(home, hit.id, hit.digest, panel.session.id))
+            r.start()
+            panel.run, panel.app = r, hit
+            tell(f"Starting {hit.name}.")
+        elif kind == "draft":
+            tell(f"{hit.name} is a draft. Get it approved first.")
+        elif kind == "ambiguous":
+            tell(f"Which app: {', '.join(a.name for a in hit)}?")
+        else:
+            tell(f"I don't know that app. Approved apps: {', '.join(a.name for a in al if a.approved) or 'none'}.")
         return "/"
 
     def approve(f):
@@ -514,14 +530,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         def server_close(self):
             halt.set()
             try:
-                end_session("ended")
+                end_session("server_stop")
             finally:
-                if live():
+                if live():   # a run whose session already ended (or never audited) still must not outlive us
                     panel.run.stop("session ended")
                 super().server_close()
 
     def ticker():
-        while not halt.wait(1):
+        while not halt.wait(tick_s):
             try:
                 tick()
             except Exception:
@@ -529,5 +545,6 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     server = Server(("127.0.0.1", port), H)
     server.panel = panel
-    threading.Thread(target=ticker, daemon=True).start()
+    if tick_s is not None:
+        threading.Thread(target=ticker, daemon=True).start()
     return server, code

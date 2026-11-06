@@ -22,7 +22,12 @@ CSP = "default-src 'none'; style-src 'unsafe-inline'"
 
 
 class FakeLaunch:
+    gate = None   # a test sets an Event to hold __init__ (the run start) open
+
     def __init__(self, flow_path, ticket):
+        if self.gate:
+            self.entered.set()
+            self.gate.wait(5)
         self.flow_path, self.ticket = flow_path, ticket
         self.done, self.started, self.stopped = False, False, None
         self.code, self.summary, self.stopped_reason = None, None, None
@@ -64,7 +69,7 @@ def panel(tmp_path, monkeypatch):
     spoken = []
     mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
     srv, code = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
-                            now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]))
+                            now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None)
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
 
@@ -82,7 +87,7 @@ def panel(tmp_path, monkeypatch):
     sid = req(f"/login?c={code}")[2].getheader("Set-Cookie").split(";")[0][2:]
     P = type("P", (), {})()
     P.home, P.flows, P.srv, P.made, P.answers, P.asked, P.req, P.sid = home, flows, srv, made, answers, asked, req, sid
-    P.spoken, P.mono, P.wall = spoken, mono, wall
+    P.spoken, P.mono, P.wall, P.launcher = spoken, mono, wall, launcher
     P.get = lambda path: req(path, cookie=sid)
     P.csrf = lambda: re.search(r"name=csrf value='([^']+)'", P.get("/")[1])[1]
     P.post = lambda path, headers=None, **f: req(path, "POST", cookie=sid, headers=headers,
@@ -429,7 +434,45 @@ def test_server_close_stops_live_run(panel):
     P.srv.shutdown()
     P.srv.server_close()
     assert L.stopped == "session ended" and not P.srv.panel.session.active()
-    assert _log(P.home, "session_end")[-1]["reason"] == "ended"
+    assert _log(P.home, "session_end")[-1]["reason"] == "server_stop"
+
+
+def test_end_racing_run_start_stops_that_run(panel):
+    P = panel
+    _open(P)
+    P.launcher.gate, P.launcher.entered = threading.Event(), threading.Event()
+    a = threading.Thread(target=P.say, args=("run joblens",))
+    a.start()
+    assert P.launcher.entered.wait(5)   # say() holds the panel lock, the run is being made
+    b = threading.Thread(target=P.srv.panel.end_session, args=("ended",))
+    b.start()
+    b.join(0.2)
+    P.launcher.gate.set()
+    a.join(5), b.join(5)
+    assert P.made and P.made[0].started and P.made[0].stopped == "session ended"
+    assert not P.srv.panel.session.active()
+
+
+def test_shutdown_reports_finished_run_first(panel, monkeypatch):
+    P = panel
+    L = _running(P)
+    L.code, L.done = 0, True   # finished, not yet reported: no tick has run
+    down = threading.Event()
+    real = P.srv.shutdown
+    monkeypatch.setattr(P.srv, "shutdown", lambda: (down.set(), real()))
+    P.wall[0] += 3601
+    assert P.req("/audit", cookie=P.sid)[0] == 403
+    assert down.wait(2)
+    P.srv.panel.voice.join(5)
+    assert P.spoken == ["Rupak, the JobLens flow is complete, thank you."]
+    assert "GOV-AIOS -> JobLens finished: done" in P.srv.panel.convo
+
+
+def test_no_ticker_when_tick_s_none(tmp_path):
+    before = threading.active_count()
+    srv, _ = make_server(tmp_path / "h", tick_s=None)
+    assert threading.active_count() == before
+    srv.server_close()
 
 
 def test_say_uses_usr_bin_say(monkeypatch):
