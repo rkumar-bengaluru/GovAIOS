@@ -504,3 +504,10 @@ def test_approval_dialog_names_delivery(tmp_path, monkeypatch):
     (tmp_path / "b").mkdir()
     run(tmp_path / "b", [True] * 10)
     assert "delivers" not in qs[0]
+
+
+def test_flow_ends_by_closing_its_window(tmp_path):
+    r, e, err = run(tmp_path, [True] * 10)
+    assert err is None and r.d.calls[-1] == "close_window"
+    req = [x for x in e if x["kind"] == "request" and x.get("action") == "close_window"]
+    assert req and req[0]["decision"] == "allow" and e[-1]["kind"] == "flow_end"

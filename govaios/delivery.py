@@ -12,6 +12,7 @@ import tempfile
 import unicodedata
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -54,6 +55,37 @@ def _line(v):
     return " ".join("".join(" " if _bad_char(c) else c for c in v).split())
 
 
+_IST = timezone(timedelta(hours=5, minutes=30))   # no DST; avoids tz data in the frozen app
+_AGO = re.compile(r"(?:posted\s+)?(?:(\d+|an?)\s*(sec|second|min|minute|hr|hour|day)s?\s+ago|(just now|today|yesterday))")
+_UNIT = {"sec": "seconds", "second": "seconds", "min": "minutes", "minute": "minutes", "hr": "hours", "hour": "hours",
+         "day": "days"}
+
+
+def _posted_on(posted, captured_at):
+    """Himalayas shows relative ages ("9 hours ago"): the date counted back from capture, or None when vague."""
+    if not isinstance(posted, str) or not isinstance(captured_at, str):
+        return None
+    m = _AGO.fullmatch(posted.strip().lower())
+    try:
+        at = datetime.fromisoformat(captured_at)
+    except ValueError:
+        return None
+    if not m:
+        return None
+    n, unit, word = m.groups()
+    if word:
+        d = at.date() - timedelta(days=word == "yesterday")
+    else:
+        k = 1 if n in ("a", "an") else int(n)
+        try:
+            d = (at - timedelta(**{_UNIT[unit]: k})).date()
+        except OverflowError:   # absurd age from the page
+            return None
+    if d > datetime.now(_IST).date():   # JobLens refuses a date after its today (Asia/Kolkata)
+        return None
+    return d.isoformat()
+
+
 def build_payload(rec, source):
     def fail(field):
         return None, "failed", field
@@ -87,6 +119,10 @@ def build_payload(rec, source):
         parts = None
     if parts and parts.scheme in ("http", "https") and parts.netloc and not any(c.isspace() or _bad_char(c) for c in url):
         p["url"] = url
+    li = rec.get("list_item")
+    posted = _posted_on(li.get("posted") if isinstance(li, dict) else None, rec.get("captured_at"))
+    if posted:
+        p["posted_on"] = posted
     return p, None, None
 
 

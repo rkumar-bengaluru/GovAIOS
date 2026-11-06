@@ -408,6 +408,11 @@ class Runner:
         with os.fdopen(fd, "a") as f:
             f.write(line)
 
+    def do_close_window(self, s):
+        """Close the flow's window only (press checks it is the verified window); the admin's other windows stay."""
+        self.gate("close_window", "navigate")
+        self._act("press", self.d.press, "close_window")
+
     def do_browser_back(self, s):
         self.gate("navigate", "navigate")
         self._act("press", self.d.press, "browser_back")
