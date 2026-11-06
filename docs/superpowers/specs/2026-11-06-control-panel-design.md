@@ -1,6 +1,6 @@
 # GOV-AIOS control panel (typed) — Design
 
-Date: 2026-11-06. Status: draft for admin approval.
+Date: 2026-11-06. Status: for admin approval (builder check done; admin answers folded in).
 Builds on: governance-layer spec, plan 2 (admin auth and isolation) and its rulings, plan 4
 (delivery, JobLens app). Mockup of the agreed journey: `.superpowers/brainstorm/*/content/journey-v2.html`
 (local, not committed).
@@ -54,6 +54,12 @@ and approvals.
 - On-device speech only (no Chrome speech recognition: it sends audio to Google).
 - Voice input: click once, stop on silence. Hands-free: armed inside a session (§9).
 - The panel replaces the audit page.
+- **The session is a hard 30-minute window:** when it ends, for any reason, a run it started is
+  stopped, including its delivery ("if I issue a command at the 29th minute it is my fault").
+  A screen lock stops runs as today.
+- **Governance rules come first:** mid-run Touch ID prompts (a first-time site, a first-time delivery
+  target, an unknown page that needs the admin) stay native dialog + Touch ID; the session code does
+  not cover them.
 
 ## 4. Constraints
 
@@ -109,6 +115,10 @@ receives the secret after the setup screen.
 - Ends early on: screen lock (any lock during the session, even if unlocked again), the emergency
   stop, Reset authenticator, the panel server stopping, or a "End session" button.
 - Shown as the ring by the admin's name (mockup) with the minutes left.
+- **When the session ends, its run stops** (admin): the panel sends SIGTERM to the app launch it
+  started (as the shim's `stop_app` does), so the run ends as a recorded stop; a `deliver` launch
+  not yet started is not started; a delivery under way stops between files (files left pending go
+  with the next delivery). The page and the spoken reply say "stopped: session ended".
 - Held only by the panel server process, in memory, plus a one-time **run ticket** per run (5.5).
   Nothing on disk says "session open", so nothing outside the panel can borrow it.
 
@@ -155,6 +165,9 @@ New audit kinds: `totp_setup`, `totp_reset`, `session_open` (decision, reason on
   after 5 failures and its expiry.
 - Session: ends at 30:00; ends on a screen lock (fake lock event) even if unlocked again; ends on
   STOPPED; never extended by a code typed mid-session.
+- A run started at minute 29 is stopped at 30:00 (recorded stop, "session ended"); its `deliver`
+  launch is not started; a delivery under way stops between files.
+- A mid-run first-time site or delivery target in a panel run still asks dialog + Touch ID.
 - Ticket: consumed once; expired, wrong flow, changed flow file, symlinked or missing ticket all
   stop the run without a prompt; a terminal run without ticket still calls `auth.prove`.
 - Command matching: "run the joblens app now" → JobLens; unknown and ambiguous → no run; draft →
