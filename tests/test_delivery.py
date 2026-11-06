@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -78,9 +79,14 @@ def test_payload_bad_types_fail():
     assert build_payload(rec(company=5), "S") == (None, "failed", "company")
 
 
-@pytest.mark.parametrize("url", ["javascript:x", None, "https://a b", "x" * 5, "http://[x"])
+@pytest.mark.parametrize("url", ["javascript:x", None, "https://a b", "x" * 5, "http://[x", "https:///x"])
 def test_payload_drops_bad_url(url):
     assert "url" not in build_payload(rec(url=url), "S")[0]
+
+
+def test_payload_every_cc_char_is_control():
+    p = build_payload(rec(job_title="Senior\x85Eng\x80ineer", description="a\x85b\n\tc" + DESC), "S")[0]
+    assert p["title"] == "Senior Eng ineer" and p["jd_text"] == "ab\n\tc" + DESC
 
 
 def test_payload_empty_company_left_out():
@@ -287,6 +293,52 @@ def test_truncated_error_body_is_retry(govaios_home, fake):
     assert batch(govaios_home)["retry"] == 1
 
 
+def test_sigterm_during_post_audited_as_stopped_and_resent(govaios_home, fake):
+    import signal
+
+    kill = [signal.SIGTERM]   # only the first request is interrupted
+    f = fake([(202, {"id": 1}), (200, {"id": 1})], on_answer=lambda: kill and os.kill(os.getpid(), kill.pop()))
+
+    def on_term(signum, frame):
+        raise Stop("emergency stop")
+    prev = signal.signal(signal.SIGTERM, on_term)
+    try:
+        job(govaios_home, "a.json")
+        with pytest.raises(Stop):
+            batch(govaios_home)
+    finally:
+        signal.signal(signal.SIGTERM, prev)
+    entries = [json.loads(x) for x in (govaios_home / "audit.jsonl").read_text().splitlines()]
+    (e,) = [x for x in entries if x["kind"] == "delivery"]
+    assert (e["outcome"], e["reason"], e["response_code"], e["listing_id"]) == ("stopped", "emergency stop", None, None)
+    assert not Deliveries(govaios_home / "deliveries.json")._load()
+    assert batch(govaios_home)["duplicate"] == 1 and len(f.bodies) == 2
+
+
+def test_send_ignores_proxy_env(fake, monkeypatch):
+    target, proxy = fake([(202, {"id": 1})]), Fake([(502, {})])
+    try:
+        for k in ("http_proxy", "HTTP_PROXY"):
+            monkeypatch.setenv(k, "http://127.0.0.1:%d" % proxy.srv.server_port)
+        for k in ("no_proxy", "NO_PROXY"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr(urllib.request, "_opener", None)   # urlopen's cached opener read proxies when first built
+        assert delivery.send(target.url, {"a": 1}) == (202, {"id": 1})
+        assert len(target.bodies) == 1 and not proxy.bodies
+    finally:
+        proxy.close()
+
+
+def test_from_outside_home_refused(govaios_home, fake):
+    f = fake([(202, {"id": 1})])
+    d = govaios_home.parent / "x" / "jd_selected"
+    d.mkdir(parents=True)
+    (d / "a.json").write_text(json.dumps({"flow": "f1", "captured_at": "1", "job_title": "Engineer", "description": DESC}))
+    with pytest.raises(Stop) as e:
+        delivery.deliver_batch(govaios_home, FLOW, {**GOOD, "from": "../x/jd_selected"}, AuditLog(govaios_home))
+    assert str(e.value) == "deliver directory outside the data home" and not f.bodies
+
+
 def _log(home, *entries):
     a = AuditLog(home)
     for kind, fl in entries:
@@ -325,7 +377,7 @@ def setup(govaios_home, tmp_path, monkeypatch):
     def make(block=True, approved=True, last="flow_end", live=(), dest=True):
         (tmp_path / "flows").mkdir(exist_ok=True)
         p = tmp_path / "flows" / "f1.yaml"
-        p.write_text(FLOW_YAML + (BLOCK_YAML if block else ""))
+        p.write_text(FLOW_YAML + (block if isinstance(block, str) else BLOCK_YAML if block else ""))
         govaios_home.mkdir(parents=True, exist_ok=True)
         ap = Approvals(govaios_home / "approvals.json")
         if approved:
@@ -344,6 +396,7 @@ def setup(govaios_home, tmp_path, monkeypatch):
     (dict(block=False), "flow has no deliver block"),
     (dict(last="stop"), "last run did not finish"),
     (dict(live=(1,)), "another gov-aios run is live"),
+    (dict(block="  deliver: {to: other, from: jd_selected, source: Himalayas}\n"), "bad deliver block: to"),
 ])
 def test_run_delivery_refusals(govaios_home, setup, kw, msg):
     p = setup(**kw)
@@ -399,7 +452,7 @@ def test_unreachable_message(govaios_home, setup, monkeypatch, capsys):
     assert delivery.run_delivery(p, govaios_home, AuditLog(govaios_home)) == 1
     out = capsys.readouterr()
     assert out.err == "JobLens not reachable at 127.0.0.1:8100 (is it running?)\n"
-    assert out.out.splitlines()[1:] == ["1 files left for the next delivery"]
+    assert out.out.splitlines()[1:] == ["1 file left for the next delivery"]
 
 
 # ---------- real flows ----------

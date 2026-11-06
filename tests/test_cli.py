@@ -585,3 +585,13 @@ def test_deliver_is_a_registered_run_and_preflighted(monkeypatch, capsys, govaio
         main(["deliver", "x.yaml", "--dev"])
     assert e.value.code == 1 and "STOPPED" in capsys.readouterr().err
     assert not any((govaios_home / "runs").iterdir())
+
+
+def test_deliver_refused_when_screen_locked(monkeypatch, capsys, govaios_home):
+    from govaios import delivery
+    _checks(monkeypatch, locked=True)
+    monkeypatch.setattr(delivery, "run_delivery", lambda *a: pytest.fail("delivery ran"))
+    with pytest.raises(SystemExit) as e:
+        main(["deliver", "x.yaml", "--dev"])
+    assert e.value.code == 1 and "screen is locked" in capsys.readouterr().err
+    assert not any((govaios_home / "runs").iterdir())

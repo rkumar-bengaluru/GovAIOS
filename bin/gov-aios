@@ -42,7 +42,7 @@ launch() {
     ${@+--args "$@"} &
   opid=$!
   while kill -0 "$opid" 2>/dev/null; do pump "$out" o_off 1; pump "$err" e_off 2; sleep 0.05; done
-  wait "$opid" || true
+  wait "$opid" || true; opid=""  # reaped: the trap must not kill a recycled pid
   pump "$out" o_off 1; pump "$err" e_off 2
   code=$(cat "$exitf"); : >"$pidf"  # app is gone: a late signal must not hit a recycled pid
 }

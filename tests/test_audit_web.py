@@ -338,7 +338,7 @@ def test_command_and_auth_columns_escaped(tmp_path):
     body = get("/log")[1]
     assert "<th>auth</th>" in body and "<th>command</th>" in body and "biometric" in body
     assert "<b>hi" not in body and "echo &lt;b&gt;hi&lt;/b&gt;" in body
-    assert "colspan=13 " in body   # seq, ts and every COLS column
+    assert "colspan=17 " in body   # seq, ts and every COLS column
     srv.shutdown(); srv.server_close()
 
 
@@ -370,3 +370,13 @@ def test_revoke_buttons_say_what_they_revoke(web):
     Approvals(home / "approvals.json").approve_destination("demo_flow", "org1")
     body = get("/approvals")[1]
     assert "Revoke flow</button>" in body and "Revoke site</button>" in body
+
+
+def test_delivery_entry_shows_its_fields(tmp_path):
+    srv, get = _raw_server(tmp_path, ['{"seq":1,"kind":"delivery","flow":"f1","target":"joblens","file_hash":"ab12",'
+                                      '"response_code":202,"listing_id":4711,"outcome":"delivered"}'])
+    body = get("/log")[1]
+    for c in ("flow", "response_code", "listing_id", "file_hash"):
+        assert f"<th>{c}</th>" in body
+    assert "<td>202</td>" in body and "<td>4711</td>" in body and "<td>ab12</td>" in body and "<td>f1</td>" in body
+    srv.shutdown(); srv.server_close()

@@ -9,6 +9,7 @@ import signal
 import stat
 import sys
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -21,7 +22,7 @@ TARGETS = {"joblens": {"url": "http://127.0.0.1:8100/api/discover/listings", "la
 
 
 def _bad_char(c):
-    return ord(c) < 32 or ord(c) == 127
+    return unicodedata.category(c) == "Cc"   # as JobLens: C0, DEL and C1 (e.g. U+0085)
 
 
 def _dirs(steps):
@@ -81,10 +82,10 @@ def build_payload(rec, source):
     if len(url) > 2000:
         return fail("url")
     try:
-        scheme = urlsplit(url).scheme
+        parts = urlsplit(url)
     except ValueError:  # malformed host, e.g. "http://[x"
-        scheme = ""
-    if scheme in ("http", "https") and not any(c.isspace() or _bad_char(c) for c in url):
+        parts = None
+    if parts and parts.scheme in ("http", "https") and parts.netloc and not any(c.isspace() or _bad_char(c) for c in url):
         p["url"] = url
     return p, None, None
 
@@ -118,11 +119,19 @@ class Deliveries:
                 raise
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a):
+        return None   # a 3xx surfaces as HTTPError -> failed/http_3xx
+
+
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)   # no env/system proxies
+
+
 def send(url, payload, timeout=20):
     req = urllib.request.Request(url, json.dumps(payload).encode(), {"Content-Type": "application/json"})
     try:
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _OPENER.open(req, timeout=timeout) as r:
                 code, raw = r.status, r.read()
         except urllib.error.HTTPError as e:
             code, raw = e.code, e.read()
@@ -175,6 +184,8 @@ def _read(path):
 def deliver_batch(home, flow, block, audit, post=send):
     home = Path(home)
     d, tracker = home / block["from"], Deliveries(home / "deliveries.json")
+    if not d.resolve().is_relative_to(home.resolve()):   # as engine do_write_json
+        raise Stop("deliver directory outside the data home")
     counts = dict.fromkeys(("delivered", "duplicate", "retry", "failed", "skipped", "left", "unreachable"), 0)
     todo = []
     for name in (sorted(os.listdir(d)) if d.is_dir() else []):
@@ -204,14 +215,19 @@ def deliver_batch(home, flow, block, audit, post=send):
         if local is None:
             payload, outcome, reason = build_payload(rec, block["source"])
             if payload is not None:
-                code, body = post(TARGETS[block["to"]]["url"], payload)
+                try:
+                    code, body = post(TARGETS[block["to"]]["url"], payload)
+                except Stop:   # JobLens may have stored it: audit, but leave the file pending (a resend is a 200)
+                    audit.append("delivery", flow=flow["id"], target=block["to"], file_hash=h, response_code=None,
+                                 listing_id=None, outcome="stopped", reason="emergency stop")
+                    raise
                 outcome, lid, reason = classify(code, body)
         else:
             outcome, reason = local
         counts["skipped" if outcome == "skipped_too_short" else outcome] += 1
-        tracker.record(h, outcome, lid)
         audit.append("delivery", flow=flow["id"], target=block["to"], file_hash=h, response_code=code,
                      listing_id=lid, outcome=outcome, reason=reason)
+        tracker.record(h, outcome, lid)
         if outcome == "retry":
             counts["unreachable"] += reason == "unreachable"
             counts["left"] = len(todo) - i - 1
@@ -283,5 +299,5 @@ def run_delivery(flow_path, home, audit):
     if c["unreachable"]:
         print("JobLens not reachable at 127.0.0.1:8100 (is it running?)", file=sys.stderr)
     if c["left"]:
-        print(f"{c['left']} files left for the next delivery")
+        print(f"{c['left']} file{'' if c['left'] == 1 else 's'} left for the next delivery")
     return 1 if c["retry"] or c["failed"] else 0
