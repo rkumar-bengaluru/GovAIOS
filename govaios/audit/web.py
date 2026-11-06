@@ -125,7 +125,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def end_session(reason, later=None):
         """End the run session (stopping its run), then audit; None when none was open.
         Ending and taking the run share panel.lock with say()'s run start, so a run cannot start unseen;
-        run.stop blocks up to 2 s: it runs after the lock, or goes on `later` when the caller holds the lock."""
+        run.stop may block (direct RunLaunch: up to 2 s; via the helper it returns at once): it runs after the lock,
+        or goes on `later` when the caller holds the lock."""
         with panel.lock:
             sid = panel.session.end(reason)
             run = panel.run if sid is not None and live() else None

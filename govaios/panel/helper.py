@@ -34,7 +34,10 @@ def start_helper(flows_dir, home, open_cmd="open", say_cmd="/usr/bin/say"):
 
 
 def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd):
-    signal.signal(signal.SIGINT, signal.SIG_IGN)   # Ctrl-C reaches the group: the parent ends us via the pipe
+    # Ctrl-C reaches the group; the pipe is our only way to end. A no-op handler, not SIG_IGN: exec resets a
+    # handler to default, but SIG_IGN would be inherited by `open` and what it runs.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: None)
     out, out_lock = os.fdopen(evt_w, "w"), threading.Lock()
     cur = {}   # "id", "run": the one run
 
@@ -71,36 +74,38 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd):
     def live():
         return "run" in cur and not cur["run"].done
 
-    for raw in os.fdopen(cmd_r, "r"):
-        try:
-            m = json.loads(raw)
-        except ValueError:
-            continue
-        if not isinstance(m, dict):
-            continue
-        op, n = m.get("op"), m.get("id")
-        if op == "say" and isinstance(m.get("text"), str):
-            args = [say_cmd, "--", m["text"][:SAY_MAX]]
-            threading.Thread(target=_quiet_run, args=(args,), daemon=True).start()   # say blocks; stops must not wait
-        elif type(n) is not int:
-            continue
-        elif op == "run":
-            real = allowed(m.get("flow"), m.get("ticket"))
-            if real is None or live():
-                send({"id": n, "done": True, "code": 70, "error": "refused"})
+    try:
+        for raw in os.fdopen(cmd_r, "r"):   # trusted channel (both ends ours): lines are not capped
+            try:
+                m = json.loads(raw)
+            except ValueError:
                 continue
-            run = RunLaunch(real, m["ticket"], open_cmd=open_cmd)
-            cur.update(id=n, run=run)
-            run.start()
-            threading.Thread(target=watch, args=(n, run), daemon=True).start()
-        elif op == "stop" and isinstance(m.get("reason"), str) and cur.get("id") == n and live():
-            threading.Thread(target=cur["run"].stop, args=(m["reason"],), daemon=True).start()
-    if live():   # the parent closed the pipe (or died): end its run
-        run = cur["run"]
-        run.stop("session ended")
-        end = time.time() + 10
-        while not run.done and time.time() < end:
-            time.sleep(0.05)
+            if not isinstance(m, dict):
+                continue
+            op, n = m.get("op"), m.get("id")
+            if op == "say" and isinstance(m.get("text"), str):
+                args = [say_cmd, "--", m["text"][:SAY_MAX]]
+                threading.Thread(target=_quiet_run, args=(args,), daemon=True).start()   # say blocks; stops must not wait
+            elif type(n) is not int:
+                continue
+            elif op == "run":
+                real = allowed(m.get("flow"), m.get("ticket"))
+                if real is None or live():
+                    send({"id": n, "done": True, "code": 70, "error": "refused"})
+                    continue
+                run = RunLaunch(real, m["ticket"], open_cmd=open_cmd)
+                cur.update(id=n, run=run)
+                run.start()
+                threading.Thread(target=watch, args=(n, run), daemon=True).start()
+            elif op == "stop" and isinstance(m.get("reason"), str) and cur.get("id") == n and live():
+                threading.Thread(target=cur["run"].stop, args=(m["reason"],), daemon=True).start()
+    finally:
+        if live():   # pipe closed, parent died, or we failed: end its run before os._exit
+            run = cur["run"]
+            run.stop("session ended")
+            end = time.time() + 10
+            while not run.done and time.time() < end:
+                time.sleep(0.05)
 
 
 def _quiet_run(args):
@@ -150,7 +155,7 @@ class Helper:
                 pass   # child gone: the reader marks its runs done
 
     def _read(self, evt_r):
-        for raw in os.fdopen(evt_r, "r"):
+        for raw in os.fdopen(evt_r, "r"):   # trusted channel (both ends ours): lines are not capped
             try:
                 ev = json.loads(raw)
                 r = self._runs.get(ev["id"])

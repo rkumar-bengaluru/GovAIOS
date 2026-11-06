@@ -122,3 +122,27 @@ def test_helper_child_dies_ends_runs(slow, h):
     assert wait(lambda: any("--args" in x for x in calls(h)))
     os.kill(h.pid, 9)
     assert wait(lambda: r.done) and r.code == 70
+
+
+def test_helper_ignores_garbage_then_runs(h):
+    with h._lock:
+        h._w.write('not json\n[1, 2]\n"str"\n{"op": "nope", "id": 1}\n{"op": "run", "id": "1"}\n')
+        h._w.flush()
+    for m in ({"op": "stop", "id": 99, "reason": "x"}, {"op": "stop", "id": 1, "reason": 5}, {"op": "say", "text": 5}):
+        h._send(m)
+    r = h.run(h.tmp / "flows" / "flow.yaml", TICKET)
+    r.start()
+    assert wait(lambda: r.done) and r.code == 0 and r.stopped_reason is None
+
+
+def test_helper_child_ignores_sigterm(slow, h):
+    import signal
+    r = h.run(h.tmp / "flows" / "flow.yaml", TICKET)
+    r.start()
+    assert wait(lambda: any("--args" in x for x in calls(h)))
+    time.sleep(0.3)
+    os.kill(h.pid, signal.SIGTERM)
+    time.sleep(0.3)
+    assert os.waitpid(h.pid, os.WNOHANG) == (0, 0) and not r.done   # still alive, run still live
+    h.close()
+    assert h.exited and "term" in calls(h)   # the pipe still ends it, stopping the app
