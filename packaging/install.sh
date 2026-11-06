@@ -33,6 +33,7 @@ UID_N=$(id -u "$SUDO_USER")
 DATA="$UHOME/Library/Application Support/GOV-AIOS"
 AGENTS="$UHOME/Library/LaunchAgents"
 PLIST="$AGENTS/com.govaios.guard.plist"
+PANEL_PLIST="$AGENTS/com.govaios.panel.plist"
 MS_DIR="/Library/Application Support/ClaudeCode"
 MS_TMP="$MS_DIR/.managed-settings.json.$$"
 STAGE=""
@@ -46,6 +47,7 @@ chmod -R go-w "$STAGE/gov-aios.app"
 codesign --verify --strict "-R=$REQ" "$STAGE/gov-aios.app" || { echo "installed copy fails signer check ($SIGNER_CN)" >&2; exit 1; }
 # Stop the old guard just before the swap (errors ignored: it may not be loaded).
 launchctl bootout "gui/$UID_N/com.govaios.guard" 2>/dev/null || true
+launchctl bootout "gui/$UID_N/com.govaios.panel" 2>/dev/null || true
 rm -rf "/Applications/gov-aios.app"
 mv "$STAGE/gov-aios.app" /Applications/gov-aios.app
 
@@ -65,6 +67,9 @@ fi
 # The plist is written as the user, so root never writes through user-owned paths.
 sudo -u "$SUDO_USER" /bin/mkdir -p "$AGENTS"
 sudo -u "$SUDO_USER" /usr/bin/install -m 0644 packaging/com.govaios.guard.plist "$PLIST"
+sudo -u "$SUDO_USER" /usr/bin/install -m 0644 packaging/com.govaios.panel.plist "$PANEL_PLIST"
+# Seed the apps folder as the user; it never overwrites and lists files it left alone.
+sudo -u "$SUDO_USER" /bin/bash packaging/seed-apps.sh . "$DATA/apps" || { echo "seeding the apps folder failed" >&2; exit 1; }
 
 # Hand back root-owned data-home files via fds (no path races, no symlinks, hard links fail closed).
 # The helper is also the assertion: non-zero aborts the install.
@@ -78,9 +83,17 @@ Now, in System Settings > Privacy & Security, add $APP to:
 (this script changes no TCC setting). Then run: bin/gov-aios doctor
 MSG
 
-for i in 1 2 3; do
-  launchctl bootstrap "gui/$UID_N" "$PLIST" && exit 0
-  [ "$i" -eq 3 ] || sleep 1
-done
-echo "bootstrap failed; run: launchctl bootstrap gui/$UID_N \"$PLIST\"" >&2
-exit 1
+boot() { # label plist
+  for i in 1 2 3; do
+    launchctl bootstrap "gui/$UID_N" "$2" && return 0
+    [ "$i" -eq 3 ] || sleep 1
+  done
+  echo "bootstrap failed; run: launchctl bootstrap gui/$UID_N \"$2\"" >&2
+  exit 1
+}
+boot guard "$PLIST"
+# Warn only. Our own gov-aios (a reinstall) is ignored, decided by lsof's command name.
+OTHER=$(lsof -nP -iTCP:8765 -sTCP:LISTEN -Fc 2>/dev/null | sed -n 's/^c//p' | grep -vx 'gov-aios' | head -n 1 || true)
+[ -z "$OTHER" ] || echo "warning: port 8765 is in use by $OTHER" >&2
+boot panel "$PANEL_PLIST"
+echo "Control panel: http://127.0.0.1:8765/  (sign in with Touch ID on the page)"

@@ -116,3 +116,101 @@ def test_uninstall_hardened_like_install():
     assert "/usr/bin/python3 -I -c 'import pwd" in s
     assert 'sudo -u "$SUDO_USER" rm -f "$UHOME/Library/LaunchAgents/com.govaios.guard.plist"' in s
     assert "\nrm -f \"$UHOME" not in s
+
+
+# --- panel agent, apps seeding ---
+import plistlib
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+PK = ROOT / "packaging"
+END_LINE = "Control panel: http://127.0.0.1:8765/  (sign in with Touch ID on the page)"
+
+
+def test_panel_plist_shape():
+    p = plistlib.loads((PK / "com.govaios.panel.plist").read_bytes())
+    assert p["Label"] == "com.govaios.panel"
+    assert p["ProgramArguments"] == ["/Applications/gov-aios.app/Contents/MacOS/gov-aios", "panel", "--agent"]
+    assert p["RunAtLoad"] is True
+    assert p["KeepAlive"] == {"SuccessfulExit": False}
+    assert p["ThrottleInterval"] == 30
+    assert "StandardOutPath" not in p and "StandardErrorPath" not in p
+
+
+def seed(src, dest):
+    return subprocess.run(["/bin/bash", str(PK / "seed-apps.sh"), str(src), str(dest)],
+                          capture_output=True, text=True, timeout=30)
+
+
+def repo(tmp_path, pages=True):
+    r = tmp_path / "repo"
+    (r / "flows").mkdir(parents=True)
+    (r / "flows/x.yaml").write_text("new")
+    (r / "flows/y.yaml").write_text("same")
+    if pages:
+        (r / "pages").mkdir()
+        (r / "pages/p.yaml").write_text("pnew")
+    return r
+
+
+def test_seed_apps_never_overwrites(tmp_path):
+    r = repo(tmp_path)
+    dest = tmp_path / "apps"
+    (dest / "flows").mkdir(parents=True)
+    (dest / "flows/x.yaml").write_text("edited")
+    (dest / "flows/y.yaml").write_text("same")
+    (dest / "pages").mkdir()
+    (dest / "pages/p.yaml").write_text("pedited")
+    p = seed(r, dest)
+    assert p.returncode == 0
+    assert p.stdout.splitlines() == ["not updated: flows/x.yaml", "not updated: pages/p.yaml"]
+    assert (dest / "flows/x.yaml").read_bytes() == b"edited"
+    assert (dest / "pages/p.yaml").read_bytes() == b"pedited"
+    assert (dest / "flows").stat().st_mode & 0o777 == 0o700
+
+
+def test_seed_apps_copies_missing_and_tolerates_no_pages(tmp_path):
+    r = repo(tmp_path, pages=False)
+    dest = tmp_path / "apps"
+    p = seed(r, dest)
+    assert p.returncode == 0 and p.stdout == ""
+    assert (dest / "flows/x.yaml").read_text() == "new"
+    assert (dest / "pages").is_dir() and (dest / "pages").stat().st_mode & 0o777 == 0o700
+    assert seed(r, dest).stdout == ""  # second run: identical, silent
+
+
+def test_seed_apps_refuses_symlinks(tmp_path):
+    r = repo(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = tmp_path / "apps"
+    os.symlink(elsewhere, link)
+    assert seed(r, link).returncode == 1 and list(elsewhere.iterdir()) == []
+    dest = tmp_path / "apps2"
+    dest.mkdir()
+    os.symlink(elsewhere, dest / "flows")
+    assert seed(r, dest).returncode == 1 and list(elsewhere.iterdir()) == []
+    # a symlinked entry is not written through
+    dest3 = tmp_path / "apps3"
+    (dest3 / "flows").mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    os.symlink(victim, dest3 / "flows/x.yaml")
+    p = seed(r, dest3)
+    assert "not updated: flows/x.yaml" in p.stdout and victim.read_text() == "keep"
+
+
+def test_install_mentions_address():
+    s = (PK / "install.sh").read_text()
+    assert s.rstrip().splitlines()[-1] == f'echo "{END_LINE}"'
+    assert 'bootout "gui/$UID_N/com.govaios.panel"' in s
+    assert "lsof -nP -iTCP:8765 -sTCP:LISTEN" in s
+    assert 'sudo -u "$SUDO_USER" /usr/bin/install -m 0644 packaging/com.govaios.panel.plist' in s
+    assert s.index("port 8765 is in use") < s.index('boot panel "$PANEL_PLIST"')
+
+
+def test_uninstall_removes_panel_agent():
+    s = (PK / "uninstall.sh").read_text()
+    assert 'launchctl bootout "gui/$UID_N/com.govaios.panel"' in s
+    assert 'sudo -u "$SUDO_USER" rm -f "$UHOME/Library/LaunchAgents/com.govaios.panel.plist"' in s
+    assert "apps" not in s.replace("apps folder", "")

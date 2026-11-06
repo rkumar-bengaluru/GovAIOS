@@ -127,6 +127,20 @@ Screen Recording to `/Applications/gov-aios.app` in System Settings.
 Rebuild flow: `packaging/build.sh`, then `sudo packaging/install.sh --no-claude`
 again (re-grant the permissions if the new build needs it).
 
+## Control panel agent
+
+`install.sh` also installs the `com.govaios.panel` LaunchAgent, which runs
+`gov-aios panel --agent` at every login. The panel is at
+`http://127.0.0.1:8765/`; sign in with Touch ID on the page. The agent
+sets no stdout or stderr path (the panel writes its own `panel.log`).
+If another program holds port 8765, install prints a warning.
+
+Install seeds `~/Library/Application Support/GOV-AIOS/apps/{flows,pages}`
+(0700) from the repo with `seed-apps.sh`. It never overwrites: a file you
+edited is kept, and install prints `not updated: flows/<file>` (or
+`pages/<file>`) when it differs from the repo. `uninstall.sh` removes the
+agent and leaves the apps folder.
+
 ## Recovery (admin)
 
 - Guard not running: `launchctl kickstart -k gui/$UID/com.govaios.guard`; if it is not loaded at all:

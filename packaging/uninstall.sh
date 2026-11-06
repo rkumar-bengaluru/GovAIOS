@@ -15,7 +15,9 @@ UID_N=$(id -u "$SUDO_USER")
 
 launchctl bootout "gui/$UID_N/com.govaios.guard" 2>/dev/null || true
 sudo -u "$SUDO_USER" rm -f "$UHOME/Library/LaunchAgents/com.govaios.guard.plist"
+launchctl bootout "gui/$UID_N/com.govaios.panel" 2>/dev/null || true
+sudo -u "$SUDO_USER" rm -f "$UHOME/Library/LaunchAgents/com.govaios.panel.plist"
 rm -f "/Library/Application Support/ClaudeCode/managed-settings.json"
 rm -rf /Applications/gov-aios.app
 
-echo "Uninstalled. Remove the TCC entries in System Settings yourself. The data home and audit log are kept."
+echo "Uninstalled. Remove the TCC entries in System Settings yourself. The data home, apps folder and audit log are kept."
