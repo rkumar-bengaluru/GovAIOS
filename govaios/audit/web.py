@@ -143,7 +143,8 @@ def make_server(home: Path, port: int = 0, now=time.time):
                      f"{form('all', label='Revoke all')}"
                      f"<p><a href='/'>Runs</a></p>")
 
-    SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer"), ("X-Content-Type-Options", "nosniff"),
+    # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
+    SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
            ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'"))
     code_lock = threading.Lock()
 

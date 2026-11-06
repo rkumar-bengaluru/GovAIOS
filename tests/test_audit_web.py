@@ -170,6 +170,16 @@ def test_revoke_rejects_bad_csrf_or_origin(web):
     assert get.req("/revoke", "POST", cookie=get.sid, body={**base, "csrf": t})[0] == 303
 
 
+def test_revoke_with_browser_origin(web):
+    """What Chrome sends for the page's own form under Referrer-Policy same-origin; `null` stays refused."""
+    home, srv, get = web
+    own = {"Origin": f"http://127.0.0.1:{srv.server_address[1]}"}
+    body = {"csrf": _csrf(get), "kind": "flow", "flow": "demo_flow"}
+    assert get.req("/revoke", "POST", cookie=get.sid, body=body, headers={"Origin": "null"})[0] == 403
+    assert get.req("/revoke", "POST", cookie=get.sid, body=body, headers=own)[0] == 303
+    assert not Approvals(home / "approvals.json").flow_ok("demo_flow", "abc123")
+
+
 def test_revoke_all(web):
     home, _, get = web
     Approvals(home / "approvals.json").approve_destination("demo_flow", "org1")
@@ -229,7 +239,7 @@ def test_binds_localhost_only(web):
 def test_no_store_headers(web):
     for r in (web[2]("/", tok=False)[2], web[2]("/")[2], web[2]("/log", method="POST")[2], web[2]("/nope")[2], web[2]("/", method="POST")[2]):
         assert r.getheader("Cache-Control") == "no-store"
-        assert r.getheader("Referrer-Policy") == "no-referrer"
+        assert r.getheader("Referrer-Policy") == "same-origin"
         assert r.getheader("X-Content-Type-Options") == "nosniff"
         assert "default-src 'none'" in r.getheader("Content-Security-Policy")
 
@@ -317,7 +327,7 @@ def test_locked_login_shuts_down(tmp_path, monkeypatch):
 def test_revoke_303_has_security_headers(web):
     get = web[2]
     r = get.req("/revoke", "POST", cookie=get.sid, body={"csrf": _csrf(get), "kind": "all"})[2]
-    assert r.status == 303 and r.getheader("Referrer-Policy") == "no-referrer"
+    assert r.status == 303 and r.getheader("Referrer-Policy") == "same-origin"
     assert "default-src 'none'" in r.getheader("Content-Security-Policy")
     assert r.getheader("X-Content-Type-Options") == "nosniff"
 
