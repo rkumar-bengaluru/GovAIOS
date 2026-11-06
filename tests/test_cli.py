@@ -1,3 +1,4 @@
+import os
 import json
 import subprocess
 import sys
@@ -698,6 +699,7 @@ def test_cli_empty_ticket_env_is_no_ticket(monkeypatch):
 def _agent_env(monkeypatch, govaios_home, port=0):
     from govaios import cli, sandbox
     monkeypatch.setattr(cli, "AGENT_PORT", port)
+    monkeypatch.setattr(os, "dup2", lambda a, b: None)   # never repoint pytest's own fds
     monkeypatch.setattr(sandbox, "apply", lambda p: None)
     monkeypatch.setattr("govaios.panel.helper.start_helper", lambda flows, home: FakeHelper())
 
@@ -713,33 +715,42 @@ def test_agent_args(monkeypatch, govaios_home):
     monkeypatch.setattr("govaios.panel.helper.start_helper",
                         lambda flows, home: order.append(("helper", flows)) or FakeHelper())
     monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
+    monkeypatch.setattr(os, "dup2", lambda a, b: order.append(("dup2", b)))
     monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None, helper=None:
                         seen.append((home, port, flows_dir)) or Srv())
     assert cli.AGENT_PORT == 8765
     assert main(["panel", "--agent"]) == 0
     flows = (govaios_home / "apps" / "flows").resolve()
-    assert order == [("helper", flows), ("apply", sandbox.UI_PROFILE)]
+    assert order == [("helper", flows), ("dup2", 1), ("dup2", 2), ("apply", sandbox.UI_PROFILE)]
     assert seen == [(govaios_home, 8765, flows)]
     assert "Control panel: http://127.0.0.1:8765/" in (govaios_home / "panel.log").read_text()
 
 
-def test_agent_missing_apps_dir(monkeypatch, govaios_home):
+def test_agent_missing_apps_dir(monkeypatch, govaios_home, ui):
+    import threading
     from govaios.audit import web
     _agent_env(monkeypatch, govaios_home)
-    seen = {}
+    real, got = web.make_server, {}
 
     def make(home, port, flows_dir=None, helper=None):
         srv = real(home, 0, flows_dir=flows_dir, tick_s=None)
-        seen["srv"] = srv
-        srv.serve_forever = lambda: None
+
+        def serve():   # a signed-in browser opens Talk while the panel is up
+            t = threading.Thread(target=srv.__class__.serve_forever, args=(srv,), daemon=True)
+            t.start()
+            sid = ui.signin(srv)
+            got["talk"] = ui.raw(srv.server_address[1], "GET", "/", f"s={sid}")[:2]
+            got["audit"] = ui.raw(srv.server_address[1], "GET", "/audit", f"s={sid}")[:2]
+            srv.shutdown()
+        srv.serve_forever = serve
         return srv
-    real = web.make_server
     monkeypatch.setattr(web, "make_server", make)
     assert not (govaios_home / "apps").exists()
     assert main(["panel", "--agent"]) == 0
-    assert seen["srv"].panel is not None   # started with the folder absent
-    from govaios.panel.apps import list_apps
-    assert list_apps(govaios_home / "apps" / "flows", govaios_home) == []
+    # Talk lists no apps (and no "no folder given" note: the folder was given); the existing no-apps line is on /audit
+    assert got["talk"][0] == 200 and "<h2>Approved</h2><ul></ul><h2>Drafts</h2><ul></ul>" in got["talk"][1]
+    assert "No apps folder given" not in got["talk"][1]
+    assert got["audit"][0] == 200 and "No apps yet." in got["audit"][1]
 
 
 def test_agent_port_busy_exits_1_and_logs_once(monkeypatch, govaios_home):
@@ -748,11 +759,12 @@ def test_agent_port_busy_exits_1_and_logs_once(monkeypatch, govaios_home):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         s.listen()
-        monkeypatch.setattr("govaios.cli.AGENT_PORT", s.getsockname()[1])
+        port = s.getsockname()[1]
+        monkeypatch.setattr("govaios.cli.AGENT_PORT", port)
         assert main(["panel", "--agent"]) == 1
         assert main(["panel", "--agent"]) == 1
-    lines = [l for l in (govaios_home / "panel.log").read_text().splitlines() if "in use" in l]
-    assert len(lines) == 1 and lines[0].startswith("panel: port ") and "Traceback" not in (govaios_home / "panel.log").read_text()
+    log = (govaios_home / "panel.log").read_text()
+    assert log == f"panel: port {port} is in use\n"
 
 
 def test_agent_no_ui_login_at_start(monkeypatch, govaios_home):

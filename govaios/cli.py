@@ -363,20 +363,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = p.parse_args(argv)
         args.helper = None
-        if getattr(args, "agent", False):
+        agent = getattr(args, "agent", False)
+        if agent:
             from .home import data_home
-            from .panel import agentlog
             args.port = AGENT_PORT
             args.flows_dir = str(data_home() / "apps" / "flows")   # may not exist: the panel shows "No apps yet."
-            log = agentlog.open_log(data_home())   # before the sandbox (it allows file writes; opened early anyway)
-            out_err = sys.stdout, sys.stderr
-            sys.stdout = sys.stderr = log
         if args.cmd in ("panel", "audit-ui") and args.flows_dir:   # before the sandbox and any thread: it runs the app
             from pathlib import Path
 
             from .home import data_home
             from .panel import helper as launch_helper
             args.helper = helper = launch_helper.start_helper(Path(args.flows_dir).resolve(), data_home())
+        if agent:   # after the fork: the helper and the apps it runs keep launchd's fds, never panel.log
+            from .home import data_home
+            from .panel import agentlog
+            log = agentlog.open_log(data_home())
+            out_err = sys.stdout, sys.stderr
+            os.dup2(log.fileno(), 1)   # native crashes and faulthandler reach the log too
+            os.dup2(log.fileno(), 2)
+            sys.stdout = sys.stderr = log
         profile = PROFILES.get(args.cmd, sandbox.RUN_PROFILE)
         if profile:   # first, before anything can resolve a name: a resolver opened earlier outlives the sandbox
             try:
