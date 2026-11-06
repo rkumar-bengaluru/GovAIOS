@@ -11,7 +11,7 @@ from pathlib import Path
 
 class RunLaunch:
     def __init__(self, flow_path, ticket, app="/Applications/gov-aios.app", open_cmd="open"):
-        self.flow, self.ticket, self.app, self.open_cmd = str(flow_path), ticket, app, open_cmd
+        self.flow, self.ticket, self.app, self.open_cmd = str(Path(flow_path).resolve()), ticket, app, open_cmd
         self.done = False
         self.code = None
         self.summary = None
@@ -55,7 +55,10 @@ class RunLaunch:
         d = tempfile.mkdtemp(prefix="govaios-run-")
         try:
             os.chmod(d, 0o700)
-            mk = lambda: tempfile.mkstemp(dir=d)[1]
+            def mk():
+                fd, path = tempfile.mkstemp(dir=d)
+                os.close(fd)
+                return path
             self._pidf = pidf = mk()
             nextf = mk()
             self._launch(d, mk, pidf, ["run", self.flow], nextf)
@@ -75,9 +78,14 @@ class RunLaunch:
         if nextf:
             cmd += ["--env", f"GOVAIOS_NEXT_FILE={nextf}", "--env", f"GOVAIOS_RUN_TICKET={self.ticket}"]
         with self._lock:
-            if self.stopped_reason is not None and args[0] == "deliver":
+            if self.stopped_reason is not None:
                 return
-            proc = self._proc = subprocess.Popen(cmd + ["--args", *args])
+            try:
+                proc = self._proc = subprocess.Popen(cmd + ["--args", *args])
+            except OSError as e:
+                self._lines.append(f"launch failed: {type(e).__name__}")
+                self.code = 70
+                return
         offs = {out: 0, err: 0}
         while proc.poll() is None:
             self._pump(offs)

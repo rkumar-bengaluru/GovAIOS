@@ -91,3 +91,24 @@ def test_summary_captured(env, monkeypatch):
     monkeypatch.setenv("FAKE_LINE", s)
     r, _ = run(env)
     assert r.summary == s
+
+
+def test_stop_before_launch_prevents_any_launch(env):
+    fake, flow, calls = env
+    r = RunLaunch(flow, "t1", app="/app", open_cmd=str(fake))
+    r.stop("early")
+    r.start()
+    end = time.time() + 3
+    while not r.done and time.time() < end:
+        time.sleep(0.02)
+    assert r.done and r.stopped_reason == "early" and not calls.exists()
+
+
+def test_missing_open_cmd(env):
+    _, flow, _ = env
+    r = RunLaunch(flow, "t1", app="/app", open_cmd="/nonexistent/open")
+    r.start()
+    end = time.time() + 3
+    while not r.done and time.time() < end:
+        time.sleep(0.02)
+    assert r.done and r.code == 70 and r.lines() == ["launch failed: FileNotFoundError"]
