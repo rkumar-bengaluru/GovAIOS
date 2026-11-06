@@ -429,3 +429,16 @@ def test_audit_without_flows_dir_state_dash(tmp_path, ui):
     body = get("/audit")[1]
     assert "gone_app" in body and "Removed" not in body
     srv.shutdown(); srv.server_close()
+
+
+def test_runs_exclude_panel_entries_and_other_flows():
+    from govaios.audit.web import _outcome, _runs
+    es = [{"seq": 1, "kind": "flow_start", "flow": "a"}, {"seq": 2, "kind": "ui_login", "decision": "allow"},
+          {"seq": 3, "kind": "action", "flow": "a"}, {"seq": 4, "kind": "setting", "field": "name"},
+          {"seq": 5, "kind": "session_open"}, {"seq": 6, "kind": "totp_fail"}, {"seq": 7, "kind": "session_end"},
+          {"seq": 8, "kind": "action", "flow": "claude_code"}, {"seq": 9, "kind": "stop"}]
+    runs, odd = _runs([(e, "") for e in es])
+    assert [e["seq"] for e in runs[0]] == [1, 3, 9]
+    assert odd == 0 and _outcome(runs[0]) == "stop"
+    open_run = _runs([(e, "") for e in es[:8]])[0][0]   # no flow_end: never decided by a panel entry
+    assert [e["seq"] for e in open_run] == [1, 3] and _outcome(open_run) == "action"

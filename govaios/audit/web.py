@@ -140,6 +140,9 @@ def _seq(e):
     return s if type(s) is int else None
 
 
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting")
+
+
 def _runs(entries):
     """Entries from each flow_start (valid int seq) through its flow_end or stop. Returns (runs, anomaly count)."""
     runs, cur, odd = [], None, 0
@@ -150,6 +153,8 @@ def _runs(entries):
             cur = [e]
             runs.append(cur)
         elif cur is not None:
+            if e.get("kind") in PANEL_KINDS or str(e.get("kind")).startswith("totp_") or e.get("flow") not in (None, cur[0].get("flow")):
+                continue   # the panel's own entries and other flows' entries are never steps of this run
             cur.append(e)
             if e.get("kind") in ("flow_end", "stop"):
                 cur = None
