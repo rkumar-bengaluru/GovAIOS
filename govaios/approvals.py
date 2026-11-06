@@ -1,6 +1,9 @@
 """Remembered approvals: approved flows (by hash) and approved destinations."""
+import fcntl
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -45,28 +48,54 @@ def flow_hash(flow_path, pages_dir):
 
 
 class Approvals:
-    """approved-flows and approved-destinations lists, persisted locally."""
+    """approved-flows and approved-destinations lists, persisted locally.
+    Every read re-reads the file; every write is read-modify-write under a file lock."""
 
     def __init__(self, path):
         self.path = Path(path)
+
+    def snapshot(self):
         try:
-            self.data = json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text())
         except FileNotFoundError:
-            self.data = {"flows": {}, "destinations": {}}
+            data = {}
+        return {"flows": data.get("flows", {}), "destinations": data.get("destinations", {})}
 
     def flow_ok(self, flow_id, digest):
-        return self.data["flows"].get(flow_id) == digest
-
-    def approve_flow(self, flow_id, digest):
-        self.data["flows"][flow_id] = digest
-        self._save()
+        return self.snapshot()["flows"].get(flow_id) == digest
 
     def destination_ok(self, flow_id, org):
-        return org in self.data["destinations"].get(flow_id, [])
+        return org in self.snapshot()["destinations"].get(flow_id, [])
+
+    def approve_flow(self, flow_id, digest):
+        self._update(lambda d: d["flows"].__setitem__(flow_id, digest))
 
     def approve_destination(self, flow_id, org):
-        self.data["destinations"].setdefault(flow_id, []).append(org)
-        self._save()
+        self._update(lambda d: d["destinations"].setdefault(flow_id, []).append(org))
 
-    def _save(self):
-        self.path.write_text(json.dumps(self.data, indent=2))
+    def revoke_flow(self, flow_id):
+        self._update(lambda d: d["flows"].pop(flow_id, None))
+
+    def revoke_destination(self, flow_id, org):
+        self._update(lambda d: d["destinations"].get(flow_id, []).remove(org) if self._has(d, flow_id, org) else None)
+
+    def revoke_all(self):
+        self._update(lambda d: (d["flows"].clear(), d["destinations"].clear()))
+
+    @staticmethod
+    def _has(d, flow_id, org):
+        return org in d["destinations"].get(flow_id, [])
+
+    def _update(self, mutate):
+        with open(self.path.with_name("approvals.lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self.snapshot()
+            mutate(data)
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".approvals.")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp, self.path)
+            except BaseException:
+                os.unlink(tmp)
+                raise

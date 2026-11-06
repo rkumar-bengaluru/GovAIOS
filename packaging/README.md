@@ -78,17 +78,23 @@ Developer ID, notarization, and a Secure Enclave key (design §9.1).
 Do these steps yourself. GOV-AIOS and its helpers never toggle them.
 
 1. Open System Settings › Privacy & Security › Accessibility. Choose
-   `+` and add `dist/gov-aios.app`.
+   `+` and add `/Applications/gov-aios.app`.
 2. Do the same under Screen Recording.
-3. Run `bin/gov-aios doctor`. Every line should say `True`, and the exit
-   code should be 0.
+3. Run `bin/gov-aios doctor`. Expected lines: `bundle_id: com.govaios.cli`,
+   `frozen: True`, `accessibility: True`, `screen_recording: True`,
+   `guard: True`, `powers_review: <date>` (`missing` until you run
+   `bin/gov-aios review-powers`) and `screen_locked: False`.
+   `managed_settings` and `managed_settings_current` stay `False`, and
+   the exit code stays 1, until Claude Code is governed (managed settings
+   installed with `install.sh <managed-settings.json>`). After that every
+   check passes and the exit code is 0.
 
 With an ad-hoc build, repeat these steps after every rebuild. If an old
 entry no longer applies, remove it and add the app again.
 
 ## The shim (`bin/gov-aios`)
 
-The shim launches the app with `open -W -n -a dist/gov-aios.app`, so
+The shim launches the installed app with `open -W -n -a /Applications/gov-aios.app`, so
 macOS sees `com.govaios.cli` as the responsible process, not Terminal.
 
 `open` does not pass stdio through. For each invocation, the shim:
@@ -102,3 +108,42 @@ macOS sees `com.govaios.cli` as the responsible process, not Terminal.
 On Ctrl-C (or TERM), the shim stops the app through the pid file. File
 arguments after the subcommand are made absolute, because `open` starts
 the app with cwd `/`. Options are never rewritten.
+
+## Install and uninstall (admin, with sudo)
+
+```bash
+packaging/build.sh
+sudo packaging/install.sh --no-claude      # app + guard only; Claude Code not governed
+sudo packaging/install.sh /path/ms.json    # also installs managed settings (from `gov-aios claude-settings`)
+sudo packaging/uninstall.sh                # app, guard plist, managed settings; never the data home or audit log
+```
+
+`install.sh` copies `dist/gov-aios.app` to `/Applications/gov-aios.app`
+(root:wheel, signer pinned to `GOV-AIOS Dev`), installs the guard LaunchAgent (written as the user) for the sudo user and loads
+it. It changes no TCC setting: afterwards, grant Accessibility and
+Screen Recording to `/Applications/gov-aios.app` in System Settings.
+`bin/gov-aios` runs only the installed app.
+
+Rebuild flow: `packaging/build.sh`, then `sudo packaging/install.sh --no-claude`
+again (re-grant the permissions if the new build needs it).
+
+## Recovery (admin)
+
+- Guard not running: `launchctl kickstart -k gui/$UID/com.govaios.guard`; if it is not loaded at all:
+  `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.govaios.guard.plist`
+- After an emergency stop: `bin/gov-aios resume` (Touch ID)
+- Hook locks Claude Code out:
+  `sudo rm "/Library/Application Support/ClaudeCode/managed-settings.json"`, then restart Claude Code
+
+## Trust boundary
+
+- `install.sh`, `handback.py` and `dist/` come from the checkout: run
+  `sudo` only on a checkout you trust.
+- `/Applications` is writable by admins, so the installed bundle can be
+  replaced afterwards. The TCC designated requirement pins its identity
+  only for the OS powers (Accessibility, Screen Recording), and
+  `gov-aios doctor` checks it only when you run it. The Claude Code hook
+  needs no TCC grant, and the stop and run checks (`is_govaios`) trust the
+  path alone: a replaced bundle at that path is a working hook. This risk
+  is accepted for now.
+- A signed pkg is future work.

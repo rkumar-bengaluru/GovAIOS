@@ -19,9 +19,10 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-KINDS = {"flow_start", "flow_approval", "request", "action", "verify", "stop", "flow_end"}
+KINDS = {"flow_start", "flow_approval", "request", "action", "verify", "stop", "flow_end",
+         "emergency_stop", "revoke", "ui_login", "powers_review", "resume"}
 FIELDS = {"flow", "flow_version", "flow_hash", "executor", "step", "action", "risk", "target",
-          "destination", "decision", "approver", "channel", "outcome", "reason"}
+          "destination", "decision", "approver", "channel", "outcome", "reason", "auth", "command"}
 ZERO = "0" * 64
 
 

@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import shutil
 
 import pytest
@@ -40,10 +42,7 @@ class FakeDesktop:
 
     def __init__(self, answers):
         self.answers, self.calls, self.url, self.typed = list(answers), [], "about:blank", ""
-
-    def ask_admin(self, q, timeout_s=60):
-        self.calls.append("ask")
-        return self.answers.pop(0) if self.answers else False
+        FakeDesktop.current = self
 
     def activate(self, app):
         self.calls.append("activate")
@@ -91,7 +90,20 @@ def nosleep(monkeypatch):
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
 
 
-def run(tmp_path, answers, desk=FakeDesktop, directory=None):
+@pytest.fixture(autouse=True)
+def fake_auth(monkeypatch):
+    """Scripted answers (from the FakeDesktop) stand in for Touch ID; never real prompts."""
+    def approve(q, reason, home, channel="touch_id"):
+        d = FakeDesktop.current
+        d.calls.append("ask")
+        ok = d.answers.pop(0) if d.answers else False
+        return ok, "biometric" if ok else "failed"
+    monkeypatch.setattr(engine.auth, "approve", approve)
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
+
+
+def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False):
     src = tmp_path / "src"
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
@@ -102,6 +114,8 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None):
         t = t.replace("directory: jd_selected", f"directory: {directory}")
     f.write_text(t)
     r = Runner(f, desk(answers), tmp_path)
+    if preapprove:
+        r.approvals.approve_flow(r.flow["id"], r.digest)
     try:
         r.run()
         err = None
@@ -189,7 +203,7 @@ def test_resume_denied_is_audited(tmp_path):
     assert isinstance(err, Stop)
     req = [x for x in e if x["kind"] == "request" and x["action"] == "resume"]
     assert len(req) == 1 and req[0]["decision"] == "deny" and req[0]["approver"] == "admin"
-    assert req[0]["channel"] == "desktop_dialog" and e[-1]["kind"] == "stop"
+    assert req[0]["channel"] == "touch_id" and req[0]["auth"] == "failed" and e[-1]["kind"] == "stop"
     assert verify(r.audit.path, r.audit.pub_path).ok
 
 
@@ -267,8 +281,16 @@ def test_flow_parsed_from_hashed_bytes(tmp_path, monkeypatch):
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
     f = src / "flows" / "himalayas_job_vetting.yaml"
-    real = type(f).read_text
-    monkeypatch.setattr(type(f), "read_text", lambda self, *a, **k: "workflow: {}" if self == f else real(self, *a, **k))
+    real = type(f).read_bytes
+    seen = []
+
+    def swapped(self, *a, **k):   # first read (the hashed one) is real; any later read sees the swap
+        if self == f and seen:
+            return b"workflow: {}"
+        seen.append(self) if self == f else None
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(type(f), "read_bytes", swapped)
     r = Runner(f, FakeDesktop([]), tmp_path)   # a second read of the flow would see the swapped text
     assert r.flow["id"] == "himalayas_job_vetting"
 
@@ -282,3 +304,164 @@ def test_invalid_flow_id_refused(tmp_path, bad):
     f.write_text(f.read_text().replace("id: himalayas_job_vetting", f"id: '{bad}'", 1))
     with pytest.raises(Stop, match="invalid flow id"):
         Runner(f, FakeDesktop([]), tmp_path)
+
+
+def test_revoked_flow_stops_at_next_gate(tmp_path):
+    from govaios.approvals import Approvals
+
+    class Revoker(FakeDesktop):
+        def click(self, node):
+            super().click(node)
+            Approvals(tmp_path / "approvals.json").revoke_flow("himalayas_job_vetting")
+
+    r, entries, err = run(tmp_path, [True] * 10, desk=Revoker)
+    assert isinstance(err, Stop)
+    assert entries[-1]["kind"] == "stop" and entries[-1]["reason"] == "revoked"
+    assert r.d.calls.count("click") == 1
+
+
+def test_approved_flow_start_needs_proof(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (False, "failed"))
+    r, e, err = run(tmp_path, [True] * 10, preapprove=True)
+    assert isinstance(err, Stop) and "launch" not in r.d.calls and "ask" not in r.d.calls
+    req = [x for x in e if x.get("action") == "run_start"]
+    assert len(req) == 1 and req[0]["decision"] == "deny" and req[0]["auth"] == "failed"
+    assert req[0]["approver"] == "admin" and req[0]["channel"] == "touch_id"
+
+
+def test_unapproved_flow_one_prompt(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("prove must not run")
+    monkeypatch.setattr(engine.auth, "prove", boom)
+    _, e, err = run(tmp_path, [True] * 10)
+    fa = [x for x in e if x["kind"] == "flow_approval"]
+    assert err is None and fa[0]["auth"] == "biometric" and fa[0]["channel"] == "touch_id"
+    assert not [x for x in e if x.get("action") == "run_start"]
+
+
+def test_first_contact_records_auth(tmp_path):
+    _, e, _ = run(tmp_path, [True] * 10)
+    asks = [x for x in e if x["kind"] == "request" and x["approver"] == "admin"]
+    assert asks and all(x["channel"] == "touch_id" and x["auth"] == "biometric" for x in asks)
+    assert all(x["auth"] is None for x in e if x["kind"] == "request" and x["approver"] == "policy")
+
+
+def test_busy_deny_names_busy_not_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (False, "busy"))
+    _, e, err = run(tmp_path, [])
+    assert isinstance(err, Stop) and "busy" in str(err) and e[-2]["auth"] == "busy"
+
+
+def test_lock_mid_run_stops(tmp_path, monkeypatch):
+    n = []
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: bool(n.append(1)) or len(n) > 1)
+    r, e, err = run(tmp_path, [True] * 10)
+    assert isinstance(err, Stop) and e[-1]["reason"] == "screen_locked"
+    assert [x["action"] for x in e if x["kind"] == "action"] == ["launch_application"]
+
+
+class StopOnLaunch(FakeDesktop):
+    def launch_application(self, app, profile=None):
+        raise Stop("start Chrome, then run the flow again")
+
+
+def test_stop_from_launch_is_audited_with_reason(tmp_path):
+    _, e, err = run(tmp_path, [True] * 10, StopOnLaunch)
+    assert isinstance(err, Stop)
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "start Chrome, then run the flow again"
+
+
+class TermOnClick(FakeDesktop):
+    def click(self, node):
+        os.kill(os.getpid(), signal.SIGTERM)   # the guard's emergency stop, aimed at this run
+
+
+def test_sigterm_stops_run(tmp_path):
+    before = signal.getsignal(signal.SIGTERM)
+    r, e, err = run(tmp_path, [True] * 10, TermOnClick)
+    assert isinstance(err, Stop) and str(err) == "emergency stop"
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
+    assert signal.getsignal(signal.SIGTERM) is before
+    assert verify(r.audit.path, r.audit.pub_path).ok
+
+
+def test_sigterm_during_touch_id_records_emergency_stop(tmp_path, monkeypatch):
+    """The real auth path: SIGTERM lands while Touch ID waits; the run's last entry is the emergency stop."""
+    monkeypatch.undo()   # drop fake_auth: the real prove() and LAContext wait run
+    a = engine.auth
+
+    class Ctx:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+        def setTouchIDAuthenticationAllowableReuseDuration_(self, v):
+            pass
+
+        def setLocalizedFallbackTitle_(self, v):
+            pass
+
+        def canEvaluatePolicy_error_(self, p, _):
+            return True, None
+
+        def evaluatePolicy_localizedReason_reply_(self, p, reason, block):
+            os.kill(os.getpid(), signal.SIGTERM)   # the guard's stop arrives while the prompt is up
+
+        def invalidate(self):
+            pass
+    monkeypatch.setattr(a.LA, "LAContext", Ctx)
+    monkeypatch.setattr(a, "_cg_session_dict", lambda: {a.Quartz.kCGSessionOnConsoleKey: True})
+    monkeypatch.setattr(engine, "auth", a)
+    r, e, err = run(tmp_path, [], preapprove=True)
+    assert isinstance(err, Stop) and str(err) == "emergency stop"
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
+
+
+@pytest.mark.parametrize("at", ["launch_application", "click"])
+def test_stopped_file_mid_run_stops_without_signal(tmp_path, at):
+    """Row 28 / I-1: STOPPED written (no SIGTERM, e.g. the guard died after writing it) stops the run."""
+    class StopsOn(FakeDesktop):
+        pass
+
+    def write_stopped(self, *a, **k):
+        (tmp_path / "STOPPED").touch()
+        return getattr(FakeDesktop, at)(self, *a, **k)
+    setattr(StopsOn, at, write_stopped)
+    r, e, err = run(tmp_path, [True] * 10, StopsOn)
+    assert isinstance(err, Stop) and str(err) == "emergency stop"
+    assert e[-1]["kind"] == "stop" and e[-1]["reason"] == "emergency stop"
+    acts = [x for x in e if x["kind"] in ("action", "request")]
+    assert acts[-1]["kind"] == "action" and acts[-1]["action"] == at   # nothing gated or done after it
+
+
+def test_destination_remembered_only_after_audit(tmp_path, monkeypatch):
+    """M-14: approve_destination happens after the request entry is on record."""
+    from govaios.audit.log import AuditLog
+    real = AuditLog.append
+
+    def boom(self, kind, **f):
+        if kind == "request" and f.get("approver") == "admin" and f.get("destination"):
+            raise OSError("disk full")
+        return real(self, kind, **f)
+    monkeypatch.setattr(AuditLog, "append", boom)
+    seen = []
+    real_init = Runner.__init__
+    monkeypatch.setattr(Runner, "__init__", lambda self, *a, **k: (real_init(self, *a, **k), seen.append(self))[0])
+    with pytest.raises(OSError):
+        run(tmp_path, [True] * 10, preapprove=True)
+    assert seen[0].approvals.snapshot()["destinations"] == {}
+
+
+def test_resume_reason_names_unknown_page(tmp_path, monkeypatch):
+    """M-19: no "resume None" in the prompt reason."""
+    reasons = []
+    monkeypatch.setattr(engine.auth, "approve", lambda q, reason, home, channel="touch_id": (reasons.append(reason), (False, "failed"))[1])
+    r, e, err = run(tmp_path, [], preapprove=True)
+    r.ctx, r.step = {}, "x"
+    monkeypatch.setattr(r, "wait_for_page", lambda c, t: (None, None))
+    with pytest.raises(Stop):
+        r.do_classify_page({"on_match": {"a": "continue", "unknown": "stop_and_request_user"}})
+    assert reasons[-1].endswith("resume unknown page")

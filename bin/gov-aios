@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP=/Applications/gov-aios.app
+[ -d "$APP" ] || { echo "not installed: run packaging/install.sh" >&2; exit 1; }
 out=$(mktemp); err=$(mktemp); exitf=$(mktemp); pidf=$(mktemp)
 opid=""
 cleanup() { rm -f "$out" "$err" "$exitf" "$pidf"; }
@@ -21,7 +22,7 @@ for a in "$@"; do
   if [ "$i" -gt 0 ] && [ "${a#-}" = "$a" ] && [ -e "$a" ]; then a="$(cd "$(dirname -- "$a")" && pwd)/$(basename -- "$a")"; fi
   args+=("$a"); i=$((i+1))
 done
-open -W -n -a "$REPO/dist/gov-aios.app" --stdout "$out" --stderr "$err" \
+open -W -n -a "$APP" --stdout "$out" --stderr "$err" \
   --env GOVAIOS_EXIT_FILE="$exitf" --env GOVAIOS_PID_FILE="$pidf" \
   ${args[@]+--args "${args[@]}"} &
 opid=$!

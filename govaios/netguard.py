@@ -6,7 +6,7 @@ _installed = False
 _BLOCKED = "network blocked during run"
 
 
-# shortcut: in-process guard only; a C extension can bypass it. Runs under test use a credential-free GOVAIOS_HOME, so a bypass leaks nothing. The OS-level egress block (sandbox profile) comes with plan 2.
+# shortcut: in-process guard only; a C extension can bypass it. Runs under test use a credential-free GOVAIOS_HOME, so a bypass leaks nothing. Second layer (clear errors, covers the dev path); the OS-level egress block is the sandbox profile, decision row 22.
 def block_all_network() -> None:
     global _installed
     if _installed:

@@ -1,4 +1,6 @@
 """macOS adapter: NSAccessibility for perception, CGEvent for real mouse/keyboard."""
+import os
+import signal
 import subprocess
 import time
 
@@ -12,6 +14,8 @@ from ApplicationServices import (
 from CoreFoundation import CFEqual
 
 from . import Node, ROLES, native_to_neutral
+from .. import auth
+from ..runstate import Stop
 
 BUNDLES = {"chrome": ("com.google.Chrome", "Google Chrome")}
 # Fixed human pace (spec 5.8): reliability and fair site load, never bot-detection evasion (no jitter).
@@ -30,9 +34,24 @@ def _attr(el, name):
     return v if err == 0 else None
 
 
+def _within(el, target, depth=40):
+    """True if el is target or a descendant of it (AXParent chain); no target means no."""
+    for _ in range(depth):
+        if el is None or target is None:
+            return False
+        if CFEqual(el, target):
+            return True
+        el = _attr(el, "AXParent")
+    return False
+
+
 def _s(v):
     return str(v).replace("\n", " ").strip() if isinstance(v, str) else ""
 
+
+
+class InputRefused(Stop, RuntimeError):
+    """A safety refusal with fixed text (never page content), so the run prints and audits it as a stop."""
 
 class MacDesktop:
     platform = "macos"
@@ -47,7 +66,7 @@ class MacDesktop:
     def _target_pid(self):
         running = self._app(self._target) if self._target else None
         if running is None:
-            raise RuntimeError("input refused: target app is not running")
+            raise InputRefused("input refused: target app is not running")
         return running.processIdentifier()
 
     def _focused(self):
@@ -61,12 +80,14 @@ class MacDesktop:
 
     def _require_focus(self):
         """Synthetic input goes to whatever has focus: refuse unless it is the flow's app (and pinned window)."""
+        if auth.screen_locked():
+            raise Stop("screen_locked")   # row 9: recorded as screen_locked, not as a RuntimeError
         pid = self._target_pid()
         fpid, win = self._focused()
         if fpid is None or fpid != pid:
-            raise RuntimeError("input refused: target app is not frontmost")
+            raise InputRefused("input refused: target app is not frontmost")
         if self._window is not None and (win is None or not CFEqual(win, self._window)):
-            raise RuntimeError("input refused: focused window is not the verified window")
+            raise InputRefused("input refused: focused window is not the verified window")
         return pid
 
     def focused_window_id(self, app):
@@ -89,18 +110,29 @@ class MacDesktop:
         return running[0] if running else None
 
     def launch_application(self, app, profile_directory=None):
-        """With a profile, Chrome opens (or focuses) a window in that profile even if already running."""
-        if profile_directory and self._app(app):
-            # `open -a X --args` drops the args when X is already running; the binary hands
-            # them to the running instance, which opens (or focuses) that profile's window.
-            # Only when running: a binary we start would make gov-aios Chrome's responsible process.
+        """With a profile, Chrome must already be running; its own binary hands the profile to it (row 23)."""
+        if profile_directory and not self._app(app):
+            raise Stop("start Chrome, then run the flow again")   # never launch: a child would inherit our sandbox and TCC identity
+        if profile_directory:
             exe = f"/Applications/{BUNDLES[app][1]}.app/Contents/MacOS/{BUNDLES[app][1]}"
-            subprocess.Popen([exe, f"--profile-directory={profile_directory}"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            time.sleep(3)
-        elif profile_directory:
-            subprocess.run(["open", "-a", BUNDLES[app][1], "--args", f"--profile-directory={profile_directory}"], check=True)
-            time.sleep(3)
+            try:
+                proc = subprocess.Popen([exe, f"--profile-directory={profile_directory}"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:   # binary missing or not executable
+                raise Stop("chrome handoff failed") from None
+            try:
+                code = proc.wait(timeout=10)
+            except BaseException as e:   # timeout (it became a browser of its own) or the run's own stop
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)   # own session: the run's SIGKILL would miss it
+                except ProcessLookupError:
+                    proc.kill()
+                proc.wait()
+                if isinstance(e, subprocess.TimeoutExpired):
+                    raise Stop("chrome handoff failed") from None
+                raise
+            if code != 0:
+                raise Stop("chrome handoff failed")
         elif not self._app(app):
             subprocess.run(["open", "-a", BUNDLES[app][1]], check=True)
             time.sleep(3)
@@ -133,14 +165,6 @@ class MacDesktop:
         doc = self._find(win, "AXWebArea", 30) if win is not None else None
         url = _attr(doc, "AXURL") if doc is not None else None
         return str(url.absoluteString()) if url is not None else ""
-
-    def ask_admin(self, question, timeout_s=60):
-        """Native dialog; anything but an explicit Approve (incl. timeout) is a deny."""
-        q = question.replace("\\", "\\\\").replace('"', '\\"')
-        script = (f'display dialog "{q}" with title "GOV-AIOS approval" '
-                  f'buttons {{"Deny", "Approve"}} default button "Deny" giving up after {timeout_s}')
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-        return "button returned:Approve" in r.stdout and "gave up:true" not in r.stdout
 
     # --- perception ---
     def web_root(self, app):
@@ -209,22 +233,25 @@ class MacDesktop:
         pt = (x + min(w / 2, 20), y + h / 2)   # near the left edge: link text, not trailing whitespace
         for t in (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
             if t != Q.kCGEventLeftMouseUp:   # re-check after the pointer pause; never strand a pressed button
-                self._require_point(pt)
+                self._require_point(pt, node.handle)
             ev = Q.CGEventCreateMouseEvent(None, t, pt, Q.kCGMouseButtonLeft)
             Q.CGEventSetFlags(ev, 0)   # else a prior cmd shortcut leaks in: cmd+click = background tab
             Q.CGEventPost(Q.kCGHIDEventTap, ev)
             time.sleep(PACE["pointer"] if t == Q.kCGEventMouseMoved else 0.08)
         time.sleep(PACE["after_action"])
 
-    def _require_point(self, pt):
-        """Focus check, plus: the element under the point belongs to the target pid (not a dialog or other app)."""
+    def _require_point(self, pt, target):
+        """Focus check, plus: the element under the point is the target element or inside it
+        (not a dialog, another app, or an ad that moved over the link)."""
         pid = self._require_focus()
         err, hit = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), pt[0], pt[1], None)
         hit_pid = AXUIElementGetPid(hit, None) if err == 0 and hit is not None else (1, None)
         if hit_pid[0] != 0 or hit_pid[1] != pid:
-            raise RuntimeError("input refused: click point is not in the target app")
+            raise InputRefused("input refused: click point is not in the target app")
         if self._window is not None and not CFEqual(_attr(hit, "AXWindow"), self._window):
-            raise RuntimeError("input refused: click point is not in the verified window")
+            raise InputRefused("input refused: click point is not in the verified window")
+        if not _within(hit, target):
+            raise InputRefused("input refused: click point is not on the target element")
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.

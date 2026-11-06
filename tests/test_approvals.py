@@ -1,10 +1,11 @@
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 import yaml
 
-from govaios.approvals import flow_hash, pages_used
+from govaios.approvals import Approvals, flow_hash, pages_used
 
 ROOT = Path(__file__).parent.parent
 HIM = "flows/himalayas_job_vetting.yaml"
@@ -41,3 +42,36 @@ def test_missing_page_rejected(tree):
     flow.write_text("workflow:\n  id: bad\n  steps:\n    - {id: a, action: click, verify_page: nope}\n")
     with pytest.raises(KeyError, match="nope"):
         flow_hash(flow, tree / "pages")
+
+
+def test_revocation_survives_other_writer(tmp_path):
+    p = tmp_path / "approvals.json"
+    a, b = Approvals(p), Approvals(p)
+    a.approve_flow("f", "h")
+    b.revoke_flow("f")
+    a.approve_destination("f", "https://y")
+    assert Approvals(p).flow_ok("f", "h") is False
+    assert Approvals(p).destination_ok("f", "https://y") is True
+
+
+def test_revoke_destination_and_all(tmp_path):
+    a = Approvals(tmp_path / "approvals.json")
+    a.approve_destination("f", "https://x")
+    a.approve_destination("f", "https://y")
+    a.revoke_destination("f", "https://x")
+    assert not a.destination_ok("f", "https://x") and a.destination_ok("f", "https://y")
+    a.approve_flow("f", "h")
+    a.revoke_all()
+    assert a.snapshot() == {"flows": {}, "destinations": {}}
+
+
+def test_write_is_atomic(tmp_path, monkeypatch):
+    p = tmp_path / "approvals.json"
+    a = Approvals(p)
+    a.approve_flow("f", "h")
+    before = p.read_text()
+    monkeypatch.setattr(os, "replace", lambda *x: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        a.approve_flow("g", "h2")
+    assert p.read_text() == before
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["approvals.json", "approvals.lock"]
