@@ -7,7 +7,7 @@ import sys
 
 from . import identity, sandbox
 
-PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE, "deliver": sandbox.DELIVER_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
+PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE, "panel": sandbox.UI_PROFILE, "deliver": sandbox.DELIVER_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
 
 
 def _doctor(args) -> int:
@@ -118,6 +118,8 @@ def _verify_audit(args) -> int:
 
 
 def _audit_ui(args) -> int:
+    from pathlib import Path
+
     from .audit.web import make_server
     from .home import data_home
 
@@ -130,7 +132,8 @@ def _audit_ui(args) -> int:
     if not ok:
         print("not proven; audit UI not started", file=sys.stderr)
         return 1
-    server, code = make_server(home, args.port)
+    flows = Path(args.flows_dir).resolve() if args.flows_dir else None
+    server, code = make_server(home, args.port, flows_dir=flows)
     print(f"http://127.0.0.1:{server.server_address[1]}/login?c={code}", flush=True)
     try:
         server.serve_forever()
@@ -139,6 +142,10 @@ def _audit_ui(args) -> int:
     finally:
         server.server_close()
     return 0
+
+
+def _panel(args) -> int:
+    return _audit_ui(args)   # audit-ui is the older name
 
 
 def _dump(args) -> int:
@@ -318,9 +325,11 @@ def main(argv: list[str] | None = None) -> int:
     dl.add_argument("--dev", action="store_true")
     dl.set_defaults(fn=_deliver)
     sub.add_parser("verify-audit").set_defaults(fn=_verify_audit)
-    a = sub.add_parser("audit-ui")
-    a.add_argument("--port", type=int, default=0)
-    a.set_defaults(fn=_audit_ui)
+    for name, fn in (("audit-ui", _audit_ui), ("panel", _panel)):
+        a = sub.add_parser(name)
+        a.add_argument("flows_dir", nargs="?")
+        a.add_argument("--port", type=int, default=0)
+        a.set_defaults(fn=fn)
     x = sub.add_parser("dump")
     x.add_argument("--dev", action="store_true")
     x.set_defaults(fn=_dump)

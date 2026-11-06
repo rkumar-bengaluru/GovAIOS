@@ -274,7 +274,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                          for a in al if not a.approved)
         end = f"<form method=post action=/end>{hidden(csrf)}<button>End session</button></form>" if s.active() else ""
         steps = f"<h2>{escape(panel.app.name)}</h2>{lines(run.lines())}" if live() else ""
-        return _page(f"<h1>{escape(panel.name)}</h1><p>{ring}</p>{end}{lines(convo)}{steps}"
+        nodir = "" if flows_dir else "<p>No apps folder given. Start with: bin/gov-aios panel flows</p>"
+        return _page(f"<h1>{escape(panel.name)}</h1><p>{ring}</p>{nodir}{end}{lines(convo)}{steps}"
                      f"<form method=post action=/say>{hidden(csrf)}<input name=text autocomplete=off autofocus>"
                      f"<button>Send</button></form><h2>Approved</h2>{lines(a.name for a in al if a.approved)}"
                      f"<h2>Drafts</h2><ul>{drafts}</ul><p><a href='/audit'>Audit log</a> <a href='/approvals'>Approvals</a></p>",

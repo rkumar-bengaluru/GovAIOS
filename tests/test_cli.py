@@ -303,7 +303,7 @@ def _subcommands():
     return re.search(r"\{([a-z,-]+)\}", buf.getvalue())[1].split(",")
 
 
-SUBCOMMANDS = ["doctor", "selftest", "run", "deliver", "verify-audit", "audit-ui", "dump", "guard", "resume", "hook",
+SUBCOMMANDS = ["doctor", "selftest", "run", "deliver", "verify-audit", "audit-ui", "panel", "dump", "guard", "resume", "hook",
                "claude-settings", "review-powers"]
 ARGV = {"selftest": ["selftest", "lines", "1"], "run": ["run", "x.yaml"], "deliver": ["deliver", "x.yaml"],
         "claude-settings": ["claude-settings", "--root", "/x"],
@@ -318,7 +318,7 @@ def test_sandbox_table_covers_every_subcommand():
 def test_sandbox_applied_per_subcommand(monkeypatch, sandbox_calls, cmd):
     """The Global Constraints table: doctor none, audit-ui UI_PROFILE, every other subcommand RUN_PROFILE."""
     from govaios import cli, sandbox
-    profile = {"doctor": None, "audit-ui": "UI_PROFILE", "deliver": "DELIVER_PROFILE"}.get(cmd, "RUN_PROFILE")
+    profile = {"doctor": None, "audit-ui": "UI_PROFILE", "panel": "UI_PROFILE", "deliver": "DELIVER_PROFILE"}.get(cmd, "RUN_PROFILE")
     order = []
     monkeypatch.setattr(sandbox, "apply", lambda p: order.append(("apply", p)))
     monkeypatch.setattr(cli, "_" + cmd.replace("-", "_"), lambda args: order.append(("handler", None)) or 0)
@@ -505,10 +505,35 @@ def test_audit_ui_deny_and_allow(monkeypatch, capsys, govaios_home):
     class Srv:
         server_address = ("127.0.0.1", 1234)
         serve_forever = server_close = lambda self: None
-    monkeypatch.setattr(web, "make_server", lambda home, port: (Srv(), "CODE"))
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None: (Srv(), "CODE"))
     monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
     assert main(["audit-ui"]) == 0
     assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+
+
+def test_panel_deny_and_allow(monkeypatch, capsys, govaios_home, tmp_path):
+    from govaios import auth
+    from govaios.audit import web
+    monkeypatch.setattr(web, "make_server", lambda *a, **k: pytest.fail("must not bind"))
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (False, "failed"))
+    assert main(["panel", str(tmp_path)]) == 1
+    seen = []
+
+    class Srv:
+        server_address = ("127.0.0.1", 1234)
+        serve_forever = server_close = lambda self: None
+    monkeypatch.setattr(web, "make_server", lambda home, port, flows_dir=None: seen.append((port, flows_dir)) or (Srv(), "CODE"))
+    monkeypatch.setattr(auth, "prove", lambda reason, home: (True, "biometric"))
+    assert main(["panel", str(tmp_path), "--port", "7"]) == 0
+    assert seen == [(7, tmp_path.resolve())]
+    assert "http://127.0.0.1:1234/login?c=CODE" in capsys.readouterr().out
+
+
+def test_audit_ui_alias_same_handler(monkeypatch):
+    from govaios import cli, sandbox
+    monkeypatch.setattr(sandbox, "apply", lambda p: None)
+    monkeypatch.setattr(cli, "_audit_ui", lambda args: 0 if args.flows_dir is None else 1)
+    assert main(["audit-ui"]) == 0 and main(["panel"]) == 0
 
 
 def test_doctor_reports_drift_and_mode(monkeypatch, tmp_path, capsys):

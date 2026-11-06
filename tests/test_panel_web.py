@@ -484,3 +484,18 @@ def test_say_uses_usr_bin_say(monkeypatch):
     assert calls == [((["/usr/bin/say", "hi"],), {"timeout": 60})]
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: 1 / 0)
     web._say("hi")   # errors ignored
+
+
+def test_talk_without_apps_folder_says_how_to_start(tmp_path):
+    srv, code = make_server(tmp_path / "h", tick_s=None)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        c.request("GET", f"/login?c={code}")
+        sid = c.getresponse().getheader("Set-Cookie").split(";")[0][2:]
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        c.request("GET", "/", headers={"Cookie": f"s={sid}"})
+        assert "No apps folder given. Start with: bin/gov-aios panel flows" in c.getresponse().read().decode()
+    finally:
+        srv.shutdown()
+        srv.server_close()
