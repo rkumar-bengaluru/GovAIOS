@@ -399,9 +399,21 @@ def test_audit_app_page_only_its_runs(tmp_path, ui):
 
 
 def test_audit_app_bad_id_404(tmp_path, ui):
-    srv, get = _app_server(tmp_path, ui, RUNS)
-    for bad in ("../x", "A", "%2e%2e", "a" * 65):
+    extra = [x for f in ("A", "a" * 65) for x in (("flow_start", {"flow": f}), ("flow_end", {"flow": f, "outcome": "done"}))]
+    srv, get = _app_server(tmp_path, ui, RUNS + extra)
+    for bad in ("../x", "A", "%2e%2e", "a" * 65):   # A and a*65 have runs: only the id check can 404 them
         assert get(f"/audit/app/{bad}")[0] == 404
+    srv.shutdown(); srv.server_close()
+
+
+def test_audit_rows_exact_and_hostile_names(tmp_path, ui):
+    srv, get = _app_server(tmp_path, ui, RUNS + [("flow_start", {"flow": "<b>"}), ("flow_end", {"flow": "<b>", "outcome": "done"})])
+    f = tmp_path / "home" / "apps" / "flows" / "beta.yaml"
+    f.write_text(f.read_text().replace("Beta App", "Beta <i>App"))
+    body = get("/audit")[1]
+    assert "<tr><td><a href='/audit/app/beta'>Beta &lt;i&gt;App</a></td><td>Draft</td><td>0</td><td></td><td></td><td>\u2014</td></tr>" in body
+    assert "<td>Draft</td><td>2</td>" in body
+    assert "<td>&lt;b&gt;</td><td>Removed</td>" in body and "<b>" not in body and "<i>App" not in body
     srv.shutdown(); srv.server_close()
 
 
