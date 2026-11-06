@@ -17,6 +17,30 @@ Updated 2026-11-06 after control panel v2 (PR #10).
 - **Later: service-account / API connectors** (e.g. Drive API): new action kind, Keychain
   credentials, scopes, network rules. Admin: "leave service account for later".
 
+## Publication and open source (admin, 2026-11-06)
+
+Order: Studio phase 1 → attack-suite evaluation → paper and public repo released together.
+
+- **Attack-suite evaluation.** Turn the existing tests into a measured attack suite. Cover:
+  - injected page text steering a flow;
+  - forged or replayed panel requests and stale tokens;
+  - an agent (Claude Code, Codex) acting outside its rules;
+  - writes or destinations a flow doesn't allow;
+  - an LLM-written draft that tries to widen its permissions.
+
+  Report blocked vs total for each, and the time added per action.
+- **Paper outline and related-work survey.** Target an arXiv preprint in cs.CR (the admin has endorsers), and optionally an agent-security workshop or demo track. The paper needs:
+  - contributions (presence-bound approval, risk-rated page schemas, one governance layer for browser and coding agents, safe LLM-written apps);
+  - a threat model with the known residuals stated;
+  - the evaluation;
+  - an acknowledgement of Claude (Anthropic) via Claude Code. AI can't be listed as an author on arXiv or with ACM/IEEE.
+- **Clean public repo.** A new repo with fresh history, not this one made public, because this repo's history holds personal data (Google account, Chrome profile, Himalayas/JobLens). It needs:
+  - the chosen code: engine, policy, audit, panel, sandbox, Claude Code and Codex governance, Studio checks;
+  - a demo flow against a public test page;
+  - no Himalayas, Gmail or delivery targets;
+  - a secrets and personal-data scan before release;
+  - an Apache-2.0 licence.
+
 ## Control panel residuals (v2 rulings doc)
 
 - Keychain / Secure Enclave work: fixes same-user ticket minting (v1 ruling 5) and the
