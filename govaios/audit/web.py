@@ -23,7 +23,7 @@ from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
 from govaios.audit.verify import verify
-from govaios.panel import settings, tickets, totp
+from govaios.panel import market, settings, tickets, totp
 from govaios.panel.apps import list_apps, match
 from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
@@ -72,7 +72,8 @@ background:conic-gradient(var(--ok) var(--p,0%),var(--line) 0)}
 .ring b{width:34px;height:34px;border-radius:50%;background:var(--me);color:#fff;display:grid;place-items:center;font-size:14px}
 button{font:inherit;font-weight:700;border-radius:10px;padding:9px 14px;cursor:pointer;
 background:var(--card);color:var(--steel);border:1px solid var(--line)}
-button.go{background:var(--me);color:#fff;border-color:var(--me)}
+button.go,a.go{background:var(--me);color:#fff;border-color:var(--me)}
+a.go{display:inline-block;font-weight:700;border-radius:10px;padding:9px 14px;text-decoration:none;border:1px solid var(--me)}
 button.stop{color:var(--stop);border:2px solid var(--stop)}
 input{font:inherit;color:var(--ink);background:var(--card);padding:10px 14px;border:1px solid var(--line);border-radius:10px;min-width:0}
 .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
@@ -113,6 +114,11 @@ box-shadow:none;outline-offset:4px}
 .otpbox{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:0 0 16px}
 .qr{display:inline-block;background:#fff;padding:10px;border-radius:8px;border:1px solid var(--line)}
 .qr svg{display:block;max-width:100%;height:auto}
+.tpl{max-width:640px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:0 0 12px}
+.tpl h2{margin:0 0 4px}.tpl p{margin:4px 0}.tpl .m{color:var(--steel);font-size:14px}
+.tpl .need{display:inline-block;font-size:13px;padding:2px 8px;margin:6px 6px 0 0;border:1px solid var(--line);border-radius:999px}
+.tpl .state{font-weight:700;color:var(--ok)}
+.pick label{display:flex;gap:10px;align-items:baseline;font-weight:400;padding:8px 0;border-top:1px solid var(--line)}
 code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
 @media (max-width:820px){.app{grid-template-columns:minmax(0,1fr);min-height:0}.rail{order:1}main{padding:16px 16px 32px}
 .top{margin:-16px -16px 16px;padding:12px 16px}}
@@ -176,7 +182,7 @@ def _td(v):
 
 def _page(body, head="", rail="", here=None):
     nav = "".join(f"<a href='{h}'{' aria-current=page' if h == here else ''}>{t}</a>"
-                  for h, t in (("/", "Talk"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
+                  for h, t in (("/", "Talk"), ("/market", "Marketplace"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
     return (f"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,"
             f"initial-scale=1'>{head}<title>GOV-AIOS</title><style>{CSS}</style><div class=app>"
             f"<nav class=rail aria-label='GOV-AIOS'>{BRAND}{nav}{rail}</nav><main>{body}</main></div>")
@@ -221,7 +227,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?")
 APP_ID = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -242,7 +248,7 @@ NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "no": "Touch ID did
 
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
-                name=None, session=None, tick_s=1.0, helper=None):
+                name=None, session=None, tick_s=1.0, helper=None, chrome_state=None, templates=None):
     """Returns the server; server.panel holds the run session, current run and conversation.
     Browsers sign in on the page with Touch ID (POST /signin); the server never shuts itself down. tick_s=None starts no ticker (tests call server.panel.tick()).
     helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed."""
@@ -619,6 +625,71 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         end_session("ended")
         return "/"
 
+    def _src():
+        if templates is not None:
+            return Path(templates)
+        from govaios.engine import REPO   # the flows and pages shipped inside the app
+        return REPO
+
+    def _tpl(tid):
+        return next((t for t in market.CATALOG if t.id == tid), None)
+
+    def market_page():
+        have = market.installed_ids(flows_dir)
+        cards = []
+        for t in market.CATALOG:
+            act = (f"<p class=state>Installed as {escape(have[t.id])}</p>" if t.id in have
+                   else f"<p><a class=go href='/market/setup/{t.id}'>Set up</a></p>" if flows_dir else "")
+            needs = "".join(f"<span class=need>{escape(n)}</span>" for n in t.needs)
+            cards.append(f"<section class=tpl><h2>{escape(t.title)}</h2><p>{escape(t.does)}</p>"
+                         f"<p class=m>{escape(t.limits)}</p><div>{needs}</div>{act}</section>")
+        nodir = "" if flows_dir else "<p class=note>No apps folder given, so nothing can be set up here.</p>"
+        return _page(f"<h1>Marketplace</h1><p>Templates that ship with GOV-AIOS. Setting one up makes a draft app; "
+                     f"it runs only after you approve it with Touch ID.</p>{nodir}{''.join(cards)}", here="/market")
+
+    def market_setup_page(csrf, tid):
+        t = _tpl(tid)
+        if t is None or not flows_dir:
+            return None
+        if t.id in market.installed_ids(flows_dir):
+            return market_page()
+        profiles = market.chrome_profiles(chrome_state or market.local_state())
+        if profiles:
+            pick = "".join(f"<label><input type=radio name=profile value='{escape(d)}' required{' checked' if i == 0 else ''}>"
+                           f"<span><b>{escape(n)}</b> <span class=m>{escape(a)}</span></span></label>"
+                           for i, (d, n, a) in enumerate(profiles))
+            ask = (f"<p>Which Chrome profile should it use? The app checks this Google account before it opens any site.</p>"
+                   f"<div class=pick>{pick}</div>")
+        else:
+            ask = ("<p class=note>Chrome's profile list could not be read. Type the profile folder and the Google "
+                   "account signed in to it.</p><label for=profile>Chrome profile folder</label>"
+                   "<input id=profile name=profile placeholder='Profile 1' required>"
+                   "<label for=account>Google account</label><input id=account name=account type=email required>")
+        return _page(f"<section class=card><h1>Set up {escape(t.title)}</h1><p>{escape(t.does)}</p>"
+                     f"<form method=post action=/market/setup>{hidden(csrf)}<input type=hidden name=template value='{t.id}'>"
+                     f"{ask}<p><button class=go>Set up as draft</button> <a href='/market'>Cancel</a></p></form></section>",
+                     here="/market")
+
+    def market_setup(f):
+        t = _tpl(f.get("template", ""))
+        if t is None or not flows_dir:
+            return None
+        profile = f.get("profile", "")
+        profiles = market.chrome_profiles(chrome_state or market.local_state())
+        if profiles:   # the account comes from Chrome, never from the form
+            account = next((a for d, _, a in profiles if d == profile), None)
+            if account is None:
+                return None
+        else:
+            account = f.get("account", "").strip()
+        try:
+            market.setup(t, profile, account, flows_dir, _src())
+        except ValueError:
+            return None
+        log.append("setting", field="app_setup", flow=t.id)   # no account or profile in the log
+        tell(f"{t.title} is set up as a draft. Approve it to let it run.")
+        return "/"
+
     def revoke(f):
         kind, flow, dest = f.get("kind"), f.get("flow", ""), f.get("destination", "")
         ap = Approvals(approvals_path)
@@ -634,7 +705,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/approvals"
 
     POSTS = {"/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
-             "/revoke": revoke, "/name": set_name}
+             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
 
     # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
     SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
@@ -801,9 +872,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             try:
                 m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
                 a = re.fullmatch(r"/audit/app/([^/]{1,200})", u.path)
+                mk = re.fullmatch(r"/market/setup/([a-z0-9_]{1,64})", u.path)
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
+                        else market_page() if u.path == "/market" else market_setup_page(sess[1], mk[1]) if mk
                         else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed
                 return self._send(500, "internal error")
