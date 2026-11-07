@@ -159,6 +159,18 @@ def test_code_opens_session_then_run(panel):
     assert P.srv.panel.run is L and P.srv.panel.session.active()
 
 
+def test_code_field_only_while_no_session(panel):
+    P = panel
+    assert "class=otp" not in P.get("/")[1]   # no authenticator set up yet
+    secret = _secret(P)
+    body = P.get("/")[1]
+    assert "<label for=otp>Authenticator code</label>" in body and "autocomplete=one-time-code" in body
+    assert "inputmode=numeric" in body and "maxlength=6" in body and body.count("autofocus") == 1
+    P.say(code_at(secret, time.time()))   # the field posts to /say like the command box
+    body = P.get("/")[1]
+    assert "Session open: 30 min left" in body and "id=otp" not in body
+
+
 def test_no_session_asks_for_code(panel):
     P = panel
     _secret(P)

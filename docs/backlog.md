@@ -58,7 +58,7 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 - A startup crash writes a traceback to `panel.log` on each 30 s restart (v2 M4).
 - Not yet seen live: the launch helper surviving a panel crash under launchd and stopping its run.
 - One full-suite run once failed 13 tests (likely two pytest runs sharing temp dirs); watch for it.
-- Voice and hands-free.
+- Voice and hands-free: speak commands and the authenticator code to the panel (admin, 2026-11-07).
 
 ## Plan 3: terms gate and challenge handling (governance-layer spec §5.5, §5.6)
 

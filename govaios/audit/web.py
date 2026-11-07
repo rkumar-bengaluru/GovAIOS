@@ -106,7 +106,11 @@ form{margin:10px 0}
 td form{margin:0}
 .card{max-width:640px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
 .card label{display:block;font-weight:700;margin-bottom:6px}
-.word{font:700 28px var(--mono);letter-spacing:.2em}
+.otp{font:700 28px var(--mono);letter-spacing:1ch;width:12ch;box-sizing:border-box;padding:10px 0 10px .3ch;
+border:0;border-radius:0;caret-color:var(--me);background:repeating-linear-gradient(90deg,transparent 0 2px,var(--card) 2px calc(1.6ch - 2px),transparent calc(1.6ch - 2px) 2ch) 0 2px/11.6ch calc(100% - 4px) no-repeat,repeating-linear-gradient(90deg,var(--line) 0 1.6ch,transparent 1.6ch 2ch) 0 0/11.6ch 100% no-repeat;
+box-shadow:none;outline-offset:4px}
+.otp:focus{background:repeating-linear-gradient(90deg,transparent 0 2px,var(--card) 2px calc(1.6ch - 2px),transparent calc(1.6ch - 2px) 2ch) 0 2px/11.6ch calc(100% - 4px) no-repeat,repeating-linear-gradient(90deg,var(--me) 0 1.6ch,transparent 1.6ch 2ch) 0 0/11.6ch 100% no-repeat}
+.otpbox{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:0 0 16px}
 .qr{display:inline-block;background:#fff;padding:10px;border-radius:8px;border:1px solid var(--line)}
 .qr svg{display:block;max-width:100%;height:auto}
 code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
@@ -478,9 +482,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                f"<b>{escape(panel.name[:1])}</b></div><div><h1>{escape(panel.name)}</h1>"
                f"<div class=s>{ring}</div></div></div>{end}<form method=post action=/signout>{hidden(csrf)}"
                f"<button>Sign out</button></form></header>")
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{steps}"
+        # no session yet: the authenticator code gets its own 6-box field (the command box still takes it too)
+        otp = (f"<form class=otpbox method=post action=/say>{hidden(csrf)}<label for=otp>Authenticator code</label>"
+               f"<input class=otp id=otp name=text inputmode=numeric pattern='[0-9]{{6}}' maxlength=6 "
+               f"autocomplete=one-time-code required autofocus><button class=go>Open session</button></form>"
+               if not s.active() and store.load() is not None else "")
+        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{steps}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
-                     f"</label><input id=cmd name=text autocomplete=off autofocus placeholder='Type: run joblens'>"
+                     f"</label><input id=cmd name=text autocomplete=off{'' if otp else ' autofocus'} placeholder='Type: run joblens'>"
                      f"<button class=go>Send</button></form>",
                      '<meta http-equiv="refresh" content="2">' if live() else "",
                      f"<h2>Approved</h2><ul>{ok}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
@@ -497,7 +506,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"<div class=qr role=img aria-label='QR code for your authenticator app'>"
                      f"{totp.qr_svg(totp.otpauth_uri(secret))}</div><p>Key: <code>{key}</code></p>"
                      f"<form method=post action=/totp/setup>{hidden(csrf)}<label for=code>6-digit code</label>"
-                     f"<input id=code name=code inputmode=numeric autocomplete=off> <button class=go>Confirm</button>"
+                     f"<input class=otp id=code name=code inputmode=numeric pattern='[0-9]{{6}}' maxlength=6 "
+                     f"autocomplete=one-time-code required> <button class=go>Confirm</button>"
                      f"</form></section>")
 
     def say(f):
