@@ -13,6 +13,9 @@ Updated 2026-11-06 after control panel v2 (PR #10).
   Mockup: `docs/superpowers/mockups/2026-11-06-apps-journey.html`.
 - **Start Claude Code from the panel:** "start Claude Code in ~/Documents/2026/x" opens Terminal in that
   folder and runs `claude` (admin, 2026-11-07). Today the panel sets up governance only.
+- **Claude Code refusals made by its own managed deny rules are not in the audit log** (seen live
+  2026-11-07: reading the data home and writing /tmp were refused before the hook ran). Only calls that
+  reach the hook are logged.
 - **Change Claude Code folders from the panel:** setup keeps an existing policy's folders.
 - **Govern OpenAI Codex** like Claude Code: Codex 0.162 has `PreToolUse` hooks and a managed `/etc/codex/requirements.toml`. Needs one live test (does a hook crash or timeout fail closed?). Spike: `docs/superpowers/spikes/2026-11-06-codex-governance.md`.
 - **Inbox brief short app name** (`app:` in `flows/morning_inbox_briefing.yaml`) so the panel

@@ -399,13 +399,38 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 f"{_td(d['last_outcome'])}{_td(d['last_started_by'])}</tr>")
         head = "<tr><th>app</th><th>state</th><th>runs</th><th>last run</th><th>outcome</th><th>started by</th></tr>"
         table = lambda rs: f"<table>{head}{''.join(rs)}</table>"
+        checks = cc_checks()
+        cc = ""
+        if checks or claudecode.governed(home, managed)[0]:
+            last = checks[-1] if checks else {}
+            refused = sum(1 for e in checks if e.get("decision") != "allow")
+            cc = ("<h2>Coding agents</h2><table><tr><th>agent</th><th>state</th><th>checks</th><th>refused</th>"
+                  "<th>last check</th></tr><tr><td><a href='/audit/app/claude_code'>Claude Code</a></td>"
+                  f"{_td('Governed' if claudecode.governed(home, managed)[0] else 'Not governed')}{_td(len(checks))}"
+                  f"{_td(refused)}{_td(last.get('ts'))}</tr></table>")
         body = (f"<h1>Audit log</h1>{banner()}{note}<h2>Apps</h2>"
-                + (table(rows[""]) if rows[""] else "<p>No apps yet.</p>")
+                + (table(rows[""]) if rows[""] else "<p>No apps yet.</p>") + cc
                 + (f"<h2>Removed apps</h2>{table(rows['Removed'])}" if rows["Removed"] else "")
                 + "<p><a href='/audit/log'>Full log</a></p>")
         return _page(body, here="/audit")
 
+    def cc_checks():
+        """Claude Code's hook decisions (one `request` per tool call it saw)."""
+        return [e for e, _ in _entries(log) if e and e.get("kind") == "request" and e.get("executor") == claudecode.ID]
+
+    def cc_page():
+        cols = ("ts", "action", "command", "target", "decision", "auth", "reason")
+        rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in cols) + "</tr>" for e in reversed(cc_checks()))
+        table = (f"<table><tr>{''.join(f'<th>{c}</th>' for c in ('time', *cols[1:]))}</tr>{rows}</table>" if rows
+                 else "<p>No checks yet. Start Claude Code in a new Terminal session.</p>")
+        return _page(f"<h1>Claude Code</h1>{banner()}<p class=m>Every tool call Claude Code sent to GOV-AIOS, newest "
+                     f"first. Calls Claude Code's own managed rules refuse first never reach GOV-AIOS and are not "
+                     f"listed.</p>{table}<p><a href='/audit'>Apps</a> | <a href='/audit/log'>Full log</a></p>",
+                     here="/audit")
+
     def app_page(app_id):
+        if app_id == claudecode.ID:
+            return cc_page()
         runs = [r for r in _runs(_entries(log))[0] if r[0].get("flow") == app_id]
         known = {a.id: a.name for a in apps()}
         if not runs and app_id not in known:
@@ -471,6 +496,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"{form('all', label='Revoke all', cls=' class=stop')}{authn}", here="/approvals")
 
     def talk(csrf):
+        cc_li = ("<li class=ok>Claude Code<span class=m>Governed: start it in Terminal</span></li>"
+                 if claudecode.governed(home, managed)[0] else "")
         report()   # the page refresh stops once the run is done: show its result on that same load
         s, run, al = panel.session, panel.run, apps()
         with panel.lock:
@@ -503,7 +530,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"</label><input id=cmd name=text autocomplete=off{'' if otp else ' autofocus'} placeholder='Type: run joblens'>"
                      f"<button class=go>Send</button></form>",
                      '<meta http-equiv="refresh" content="2">' if live() else "",
-                     f"<h2>Approved</h2><ul>{ok}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
+                     f"<h2>Approved</h2><ul>{ok}{cc_li}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
 
     def setup(csrf, bad):
         if store.load() is not None:

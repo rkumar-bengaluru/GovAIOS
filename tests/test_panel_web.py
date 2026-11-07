@@ -1100,3 +1100,19 @@ def test_claude_code_turn_off_needs_touch_id(cc):
 def test_claude_code_setup_forged_without_csrf(cc):
     st = cc.req("/claude/setup", "POST", cookie=cc.sid, body={"folders": str(cc.proj)})[0]
     assert st == 403 and cc.admin_calls == []
+
+
+def test_claude_code_in_talk_and_audit(cc):
+    assert "Claude Code<span" not in cc.get("/")[1] and "Coding agents" not in cc.get("/audit")[1]
+    cc.post("/claude/setup", folders=str(cc.proj))
+    log = AuditLog(cc.home)
+    log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="git status",
+               decision="allow", approver="policy")
+    log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="make <b>",
+               decision="deny", reason="not allowed")
+    assert "Claude Code<span class=m>Governed" in cc.get("/")[1]
+    idx = cc.get("/audit")[1]
+    assert "Coding agents" in idx and "href='/audit/app/claude_code'" in idx
+    assert re.search(r"<td>Governed</td><td>2</td><td>1</td>", idx)
+    page = cc.get("/audit/app/claude_code")[1]
+    assert page.index("make &lt;b&gt;") < page.index("git status") and "<b>" not in page.split("</h1>", 1)[1]
