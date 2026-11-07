@@ -118,7 +118,7 @@ Safety checks keep their Mac meaning:
 
 ### 5.7 The flow file on Windows
 
-`flows/morning_inbox_briefing.yaml` is shared and unchanged. On Windows, dev runs use a **local copy in the dev data home** (e.g. `%GOVAIOS_HOME%lows\morning_inbox_briefing.yaml`) with this PC's Chrome `profile_directory` and `account`; it is approved on Windows like any flow (its own hash). The admin edits that copy by hand for now. Choosing the profile during setup in the control panel is a later stage (section 9).
+`flows/morning_inbox_briefing.yaml` is shared and unchanged. On Windows, dev runs use a **local copy in the dev data home** (e.g. `%GOVAIOS_HOME%\flows\morning_inbox_briefing.yaml`) with this PC's Chrome `profile_directory` and `account`; it is approved on Windows like any flow (its own hash). The admin edits that copy by hand for now. Choosing the profile during setup in the control panel is a later stage (section 9).
 
 ### 5.8 Page schemas
 
