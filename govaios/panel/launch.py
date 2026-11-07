@@ -1,4 +1,5 @@
 """Python port of bin/gov-aios launch(): run, then deliver when the app asks."""
+import json
 import os
 import shutil
 import signal
@@ -10,8 +11,9 @@ from pathlib import Path
 
 
 class RunLaunch:
-    def __init__(self, flow_path, ticket, app="/Applications/gov-aios.app", open_cmd="open"):
+    def __init__(self, flow_path, ticket, inputs=None, app="/Applications/gov-aios.app", open_cmd="open"):
         self.flow, self.ticket, self.app, self.open_cmd = str(Path(flow_path).resolve()), ticket, app, open_cmd
+        self.inputs = inputs
         self.done = False
         self.code = None
         self.summary = None
@@ -90,6 +92,8 @@ class RunLaunch:
                "--env", f"GOVAIOS_EXIT_FILE={exitf}", "--env", f"GOVAIOS_PID_FILE={pidf}"]
         if nextf:
             cmd += ["--env", f"GOVAIOS_NEXT_FILE={nextf}", "--env", f"GOVAIOS_RUN_TICKET={self.ticket}"]
+            if self.inputs:
+                cmd += ["--env", f"GOVAIOS_RUN_INPUT={json.dumps(self.inputs)}"]
         with self._lock:
             if self.stopped_reason is not None:
                 return

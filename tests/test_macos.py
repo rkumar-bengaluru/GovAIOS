@@ -292,3 +292,166 @@ def test_click_refuses_when_something_else_is_under_the_point(env):
     env.ax.hit_parent = "job_link"   # the hit is the link's text, inside the link
     env.d.click(Node("link", "SECRET", handle="job_link"))
     assert len(env.posted) == 3
+
+
+def _snap_tree(env, monkeypatch, tree):
+    """tree: {el: (role, sub, kids)}; fake CopyMultipleAttributeValues."""
+    monkeypatch.setattr(macos, "AXUIElementCopyMultipleAttributeValues",
+                        lambda el, attrs, o, n: (0, (tree[el][0], tree[el][1], "t", None, None, None, [], tree[el][2])))
+    env.d._count = 0
+    return env.d._snap("root")
+
+
+def test_radio_outside_tab_list_is_radio(env, monkeypatch):
+    n = _snap_tree(env, monkeypatch, {"root": ("AXGroup", None, ["r"]), "r": ("AXRadioButton", None, [])})
+    assert n.children[0].role == "radio"
+
+
+def test_radio_in_tab_list_is_tab(env, monkeypatch):
+    n = _snap_tree(env, monkeypatch, {"root": ("AXTabGroup", None, ["r"]), "r": ("AXRadioButton", None, [])})
+    assert n.children[0].role == "tab"
+
+
+def test_text_area_role(env, monkeypatch):
+    assert _snap_tree(env, monkeypatch, {"root": ("AXTextArea", None, [])}).role == "text_area"
+
+
+def test_new_keys_have_codes():
+    from govaios.desktop import ROLES
+    for combo in ROLES["keys"].values():
+        assert all(k in macos.KEYCODES or k in macos.FLAGS for k in combo["macos"])
+    assert (macos.KEYCODES["a"], macos.KEYCODES["g"], macos.KEYCODES["backspace"], macos.KEYCODES["escape"]) == (0, 5, 51, 53)
+
+
+# --- form input primitives ---
+class FormAX:
+    """Focused element + AXParent/AXRole tree for the field, sheet and menu checks."""
+
+    def __init__(self):
+        self.focused = "field"
+        self.parents = {"field": "page", "page": "win1", "item": "menu1", "menu1": "win1",
+                        "sfield": "sheet1", "sheet1": "win1"}
+        self.roles = {"menu1": "AXMenu", "sheet1": "AXSheet"}
+        self.on_post = None
+
+
+@pytest.fixture
+def form(env, monkeypatch):
+    fx = FormAX()
+    orig = macos.AXUIElementCopyAttributeValue
+
+    def copy_attr(el, name, _):
+        if el == "chrome_ax" and name == "AXFocusedUIElement":
+            return 0, fx.focused
+        if name == "AXParent" and el in fx.parents:
+            return 0, fx.parents[el]
+        if name == "AXRole" and el in fx.roles:
+            return 0, fx.roles[el]
+        return orig(el, name, _)
+    monkeypatch.setattr(macos, "AXUIElementCopyAttributeValue", copy_attr)
+    monkeypatch.setattr(macos, "AXUIElementCreateApplication", lambda pid: "chrome_ax")
+    performed = []
+    monkeypatch.setattr(macos, "AXUIElementPerformAction", lambda el, a: performed.append((el, a)))
+    monkeypatch.setattr(macos.Q, "CGEventPostToPid", lambda pid, ev: (env.posted.append((pid, ev)),
+                                                                      fx.on_post and fx.on_post(ev)))
+    env.fx, env.performed = fx, performed
+    env.d.pin_window("win1")
+    return env
+
+
+def test_type_into_refuses_when_focus_moves(form):
+    def move(ev):
+        if len([e for _, e in form.posted if e[2]]) == 2 and not ev[2]:
+            form.fx.focused = "other"
+    form.fx.on_post = move
+    with pytest.raises(macos.InputRefused, match="focus left the field"):
+        form.d.type_into(Node("textbox", handle="field"), "abcd")
+    assert len(form.posted) == 4   # 2 chars, key down + up each
+
+
+def test_focused_is(form):
+    assert form.d.focused_is(Node("textbox", handle="field"))
+    assert not form.d.focused_is(Node("textbox", handle="x"))
+
+
+def test_choose_file_refuses_without_sheet(form):
+    with pytest.raises(macos.InputRefused, match="no file dialog"):
+        form.d.choose_file("/secret/cv.pdf")
+    assert form.posted == []
+
+
+def test_choose_file_types_path_in_sheet_and_leaves_window_pinned(form):
+    form.fx.focused = "sfield"
+    def closes_on_enter(ev):   # return key code 36 down closes the sheet
+        if ev[1] == 36 and ev[2]:
+            form.fx.focused = "field"
+    form.fx.on_post = closes_on_enter
+    form.d.choose_file("/a")
+    keys = [e[1] for _, e in form.posted if e[2]]
+    assert keys == [5, 0, 0, 36]   # cmd-shift-g, "/", "a" (unicode events use code 0), enter
+    assert form.d._window == "win1"
+
+
+def test_choose_file_stops_when_sheet_closes(form):
+    form.fx.focused = "sfield"
+    def closes_on_enter(ev):
+        if ev[1] == 36 and ev[2]:
+            form.fx.focused = "field"
+    form.fx.on_post = closes_on_enter
+    form.d.choose_file("/a")
+    assert [e[1] for _, e in form.posted if e[2]].count(36) == 1
+
+
+def test_choose_file_presses_enter_again_if_sheet_stays(form):
+    form.fx.focused = "sfield"
+    form.d.choose_file("/a")
+    assert [e[1] for _, e in form.posted if e[2]].count(36) == 2
+
+
+def test_choose_file_refuses_when_sheet_closes_mid_path(form):
+    form.fx.focused = "sfield"
+    def close(ev):
+        form.fx.focused = "field"
+    form.fx.on_post = close
+    with pytest.raises(macos.InputRefused) as e:
+        form.d.choose_file("/secret")
+    assert "secret" not in str(e.value)
+
+
+def test_choose_file_sheet_of_another_window_refused(form):
+    form.fx.focused = "sfield"
+    form.fx.parents["sheet1"] = "win2"
+    with pytest.raises(macos.InputRefused):
+        form.d.choose_file("/a")
+
+
+def test_menu_open(form):
+    assert not form.d.menu_open()
+    form.fx.focused = "item"
+    assert form.d.menu_open()
+    form.fx.focused = "menu1"
+    assert form.d.menu_open()
+
+
+def test_raise_pinned(form):
+    form.d.raise_pinned()
+    assert ("win1", "AXRaise") in form.performed and form.app.activated >= 2
+
+
+def test_choose_file_refuses_when_app_leaves_front_mid_path(form):
+    form.fx.focused = "sfield"
+    def leave(ev):
+        if len(form.posted) >= 6:   # go_to_folder (2 events) + 2 chars
+            form.ax.focus_pid = OTHER
+    form.fx.on_post = leave
+    with pytest.raises(macos.InputRefused, match="not frontmost"):
+        form.d.choose_file("/abcdef")
+    n = len(form.posted)
+    assert n == 6
+
+
+def test_raise_pinned_without_pinned_window_refused(form):
+    form.d._window = None
+    with pytest.raises(macos.InputRefused, match="no pinned window"):
+        form.d.raise_pinned()
+    assert form.performed == []

@@ -146,10 +146,14 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
                 continue
             elif op == "run":
                 real = allowed(m.get("flow"), m.get("ticket"))
+                ins = m.get("inputs")
+                if ins is not None and not (isinstance(ins, dict) and len(ins) <= 4 and all(
+                        isinstance(k, str) and isinstance(v, str) and len(v) <= 500 for k, v in ins.items())):
+                    real = None
                 if real is None or live():
                     send({"id": n, "done": True, "code": 70, "error": "refused"})
                     continue
-                run = RunLaunch(real, m["ticket"], open_cmd=open_cmd)
+                run = RunLaunch(real, m["ticket"], open_cmd=open_cmd, inputs=ins)
                 cur.update(id=n, run=run)
                 run.start()
                 threading.Thread(target=watch, args=(n, run), daemon=True).start()
@@ -206,10 +210,10 @@ class Helper:
         self._w, self._lock, self._runs, self._n = os.fdopen(cmd_w, "w"), threading.Lock(), {}, 0
         threading.Thread(target=self._read, args=(evt_r,), daemon=True).start()
 
-    def run(self, flow_path, ticket):
+    def run(self, flow_path, ticket, inputs=None):
         with self._lock:
             self._n += 1
-            r = self._runs[self._n] = HelperRun(self, self._n, flow_path, ticket)
+            r = self._runs[self._n] = HelperRun(self, self._n, flow_path, ticket, inputs)
         return r
 
     def say(self, text):
@@ -283,8 +287,8 @@ class Helper:
 class HelperRun:
     """What the panel uses of RunLaunch; state is filled by the Helper's reader thread."""
 
-    def __init__(self, helper, n, flow_path, ticket):
-        self._helper, self._n, self.flow, self.ticket = helper, n, str(flow_path), ticket
+    def __init__(self, helper, n, flow_path, ticket, inputs=None):
+        self._helper, self._n, self.flow, self.ticket, self.inputs = helper, n, str(flow_path), ticket, inputs
         self.done, self.code, self.summary, self.stopped_reason, self.error = False, None, None, None, None
         self._lines, self._lock = [], threading.Lock()
 
@@ -293,7 +297,7 @@ class HelperRun:
             return list(self._lines)
 
     def start(self):
-        self._helper._send({"op": "run", "id": self._n, "flow": self.flow, "ticket": self.ticket})
+        self._helper._send({"op": "run", "id": self._n, "flow": self.flow, "ticket": self.ticket, "inputs": self.inputs})
 
     def stop(self, reason):
         if not self.done:

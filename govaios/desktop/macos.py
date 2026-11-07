@@ -9,7 +9,7 @@ from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
 from ApplicationServices import (
     AXIsProcessTrusted, AXUIElementCreateApplication, AXUIElementCopyAttributeValue,
     AXUIElementCopyElementAtPosition, AXUIElementCopyMultipleAttributeValues, AXUIElementCreateSystemWide,
-    AXUIElementGetPid, AXUIElementSetAttributeValue, AXValueGetValue, kAXValueCGPointType, kAXValueCGSizeType,
+    AXUIElementGetPid, AXUIElementPerformAction, AXUIElementSetAttributeValue, AXValueGetValue, kAXValueCGPointType, kAXValueCGSizeType,
 )
 from CoreFoundation import CFEqual
 
@@ -21,7 +21,7 @@ BUNDLES = {"chrome": ("com.google.Chrome", "Google Chrome")}
 # Fixed human pace (spec 5.8): reliability and fair site load, never bot-detection evasion (no jitter).
 # shortcut: fixed values, not the admin's learned pace; replaced by bootstrap-learned pace in plan 4.
 PACE = {"char": 0.12, "key": 0.15, "pointer": 0.25, "after_action": 1.0}
-KEYCODES = {"l": 37, "[": 33, "return": 36, "left": 123, "w": 13}
+KEYCODES = {"l": 37, "[": 33, "return": 36, "left": 123, "w": 13, "a": 0, "g": 5, "backspace": 51, "escape": 53}
 FLAGS = {"cmd": Q.kCGEventFlagMaskCommand, "alt": Q.kCGEventFlagMaskAlternate,
          "ctrl": Q.kCGEventFlagMaskControl, "shift": Q.kCGEventFlagMaskShift}
 ATTRS = ["AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXDOMIdentifier", "AXDOMClassList", "AXChildren"]
@@ -189,7 +189,7 @@ class MacDesktop:
                 return hit
         return None
 
-    def _snap(self, el):
+    def _snap(self, el, parent_role=None):
         self._count += 1
         err, vals = AXUIElementCopyMultipleAttributeValues(el, ATTRS, 0, None)
         if err != 0:
@@ -197,6 +197,8 @@ class MacDesktop:
         role, sub, title, desc, value, dom_id, classes, kids = vals
         role, sub = _s(role), _s(sub)
         neutral = NEUTRAL.get(f"{role}/{sub}") or NEUTRAL.get(role) or f"native:{role}"
+        if neutral == "tab" and parent_role != "AXTabGroup":
+            neutral = "radio"   # Chrome's role=tab and plain radios are both AXRadioButton
         node = Node(role=neutral, name=_s(title) or _s(desc), value=_s(value), dom_id=_s(dom_id),
                     dom_class=tuple(c for c in classes if isinstance(c, str)) if hasattr(classes, '__iter__') and not isinstance(classes, str) else (), handle=el)
         if neutral == "document" and self._count > 1:
@@ -206,7 +208,7 @@ class MacDesktop:
             for k in kids:
                 if self._count >= MAX_NODES:
                     break
-                node.children.append(self._snap(k))
+                node.children.append(self._snap(k, role))
         return node
 
     # --- input: real OS events ---
@@ -255,12 +257,10 @@ class MacDesktop:
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.
-        from ApplicationServices import AXUIElementPerformAction
         AXUIElementPerformAction(node.handle, "AXScrollToVisible")
         time.sleep(PACE["after_action"])
 
-    def press(self, logical_key):
-        pid = self._require_focus()
+    def _key(self, pid, logical_key):
         *mods, key = self.keys[logical_key]
         flags = 0
         for m in mods:
@@ -272,13 +272,94 @@ class MacDesktop:
             time.sleep(0.05)
         time.sleep(PACE["key"])
 
+    def _char(self, pid, ch):
+        for down in (True, False):
+            ev = Q.CGEventCreateKeyboardEvent(None, 0, down)
+            Q.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
+            Q.CGEventSetFlags(ev, 0)
+            Q.CGEventPostToPid(pid, ev)
+        time.sleep(PACE["char"])
+
+    def press(self, logical_key):
+        self._key(self._require_focus(), logical_key)
+
     def type_text(self, text):
         for ch in text:
-            pid = self._require_focus()   # per character: focus can move mid-word
-            for down in (True, False):
-                ev = Q.CGEventCreateKeyboardEvent(None, 0, down)
-                Q.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
-                Q.CGEventSetFlags(ev, 0)
-                Q.CGEventPostToPid(pid, ev)
-            time.sleep(PACE["char"])
+            self._char(self._require_focus(), ch)   # per character: focus can move mid-word
         time.sleep(PACE["after_action"])
+
+    def _focus_el(self):
+        return _attr(AXUIElementCreateApplication(self._target_pid()), "AXFocusedUIElement")
+
+    def focused_is(self, node):
+        el = self._focus_el()
+        return el is not None and bool(CFEqual(el, node.handle))
+
+    def type_into(self, node, text):
+        """type_text, but the field itself (not just the window) must keep focus before every character."""
+        for ch in text:
+            pid = self._require_focus()
+            if not self.focused_is(node):
+                raise InputRefused("input refused: focus left the field")
+            self._char(pid, ch)
+        time.sleep(PACE["after_action"])
+
+    def _ancestor(self, role, el=None):
+        """First element with AXRole `role` on the AXParent chain from the focused element (bounded)."""
+        el = self._focus_el() if el is None else el
+        for _ in range(40):
+            if el is None:
+                return None
+            if _attr(el, "AXRole") == role:
+                return el
+            el = _attr(el, "AXParent")
+        return None
+
+    def menu_open(self):
+        return self._ancestor("AXMenu") is not None
+
+    def _in_pinned_sheet(self):
+        sheet = self._ancestor("AXSheet")
+        return sheet is not None and _within(_attr(sheet, "AXParent"), self._window)
+
+    def raise_pinned(self):
+        if self._window is None:
+            raise InputRefused("input refused: no pinned window")
+        AXUIElementPerformAction(self._window, "AXRaise")
+        pid = self._target_pid()
+        self._app(self._target).activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+        for _ in range(8):
+            time.sleep(0.25)
+            if self._focused()[0] == pid:
+                break
+        self._require_focus()
+
+    def choose_file(self, path):
+        """Drive the native open sheet: Go to Folder, the path, Enter. The sheet (child of the pinned window)
+        replaces the window check here; self._window stays as it is. The path is never put in a message."""
+        pid = self._target_pid()
+        for _ in range(20):
+            if self._in_pinned_sheet():
+                break
+            time.sleep(0.25)
+        else:
+            raise InputRefused("input refused: no file dialog")
+
+        def guard():
+            if auth.screen_locked():
+                raise Stop("screen_locked")
+            if self._focused()[0] != pid:
+                raise InputRefused("input refused: target app is not frontmost")
+            if not self._in_pinned_sheet():
+                raise InputRefused("input refused: file dialog is not focused")
+        guard()
+        self._key(pid, "go_to_folder")
+        for ch in path:
+            guard()
+            self._char(pid, ch)
+        guard()
+        self._key(pid, "enter")
+        time.sleep(1)
+        if self._in_pinned_sheet():   # still open: the Go to Folder field needed a second Enter
+            guard()
+            self._key(pid, "enter")

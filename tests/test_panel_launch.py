@@ -138,3 +138,27 @@ def test_late_pid_still_gets_sigterm(env, monkeypatch):
     assert r.done and r.stopped_reason == "session ended"
     lines = calls.read_text().splitlines()
     assert "term" in lines and sum("--args" in x for x in lines) == 1
+
+
+def test_runlaunch_passes_input_env(env):
+    fake, flow, calls = env
+    inputs = {"job_url": "https://himalayas.app/companies/a/jobs/b"}
+    r = RunLaunch(flow, "t1", app="/app", open_cmd=str(fake), inputs=inputs)
+    r.start()
+    end = time.time() + 10
+    while not r.done and time.time() < end:
+        time.sleep(0.02)
+    c = calls.read_text().splitlines()
+    assert 'GOVAIOS_RUN_INPUT={"job_url": "https://himalayas.app/companies/a/jobs/b"}' in c[0]
+    assert "GOVAIOS_RUN_INPUT" not in c[1]
+
+
+def test_runlaunch_inputs_is_third_positional(env):
+    fake, flow, calls = env
+    r = RunLaunch(flow, "t1", {"job_url": "u"}, open_cmd=str(fake))   # launcher(path, ticket, inputs) shape
+    r.start()
+    end = time.time() + 10
+    while not r.done and time.time() < end:
+        time.sleep(0.02)
+    c = calls.read_text().splitlines()[0]
+    assert 'GOVAIOS_RUN_INPUT={"job_url": "u"}' in c and "-a /Applications/gov-aios.app" in c

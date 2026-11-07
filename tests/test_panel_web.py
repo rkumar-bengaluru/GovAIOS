@@ -1,6 +1,7 @@
 import base64
 import http.client
 import json
+import os
 import re
 import shutil
 import threading
@@ -24,11 +25,11 @@ CSP = "default-src 'none'; style-src 'unsafe-inline'"
 class FakeLaunch:
     gate = None   # a test sets an Event to hold __init__ (the run start) open
 
-    def __init__(self, flow_path, ticket):
+    def __init__(self, flow_path, ticket, inputs=None):
         if self.gate:
             self.entered.set()
             self.gate.wait(5)
-        self.flow_path, self.ticket = flow_path, ticket
+        self.flow_path, self.ticket, self.inputs = flow_path, ticket, inputs
         self.done, self.started, self.stopped, self.stops = False, False, None, []
         self.code, self.summary, self.stopped_reason = None, None, None
         self._lines = ["step 3 <script>alert(1)</script>"]
@@ -330,7 +331,7 @@ def test_approve_draft_uses_native_dialog(panel):
     assert P.asked == [approval_question(wf, None)]
     P.answers["approve"] = True
     P.post("/approve", flow="morning_inbox_briefing")
-    assert all(a.approved for a in list_apps(P.flows, P.home))
+    assert all(a.approved for a in list_apps(P.flows, P.home) if a.id != "job_apply")   # job_apply stays a draft
     fa = _log(P.home, "flow_approval")
     assert [e["decision"] for e in fa] == ["deny", "allow"] and {e["executor"] for e in fa} == {"gov_runner"}
     P.post("/approve", flow="no_such_flow")
@@ -1246,3 +1247,389 @@ def test_agents_are_independent(cc):
     assert "Set up" in cc.get("/codex")[1] or "Approve and install" in cc.get("/codex")[1]
     cc.say("/codex")
     assert "OpenAI Codex is not governed yet" in _tells(cc)[-1]
+
+
+LINK = "https://himalayas.app/companies/acme/jobs/senior-engineer"
+
+
+def _approve_job_apply(P):
+    ja = next(a for a in list_apps(P.flows, P.home) if a.name == "Job Apply")
+    Approvals(P.home / "approvals.json").approve_flow(ja.id, ja.digest)
+    return ja
+
+
+def test_job_apply_card_has_input(cc):
+    _approve_job_apply(cc)
+    cc.say("/job-apply")
+    page = cc.get("/")[1]
+    assert "Himalayas job link" in page and "name='in:job_url'" in page and "name=text value='/job-apply'" in page
+    assert "pattern='https://himalayas\\.app/companies/[a-z0-9\\-]+/jobs/[a-z0-9\\-]+/?([?#].*)?'" in page
+
+
+def test_job_apply_starts_with_link_from_card_and_from_words(cc):
+    ja = _approve_job_apply(cc)
+    _open(cc)
+    cc.post("/say", text="/job-apply", **{"in:job_url": LINK})
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}]
+    assert cc.made[0].started and cc.made[0].flow_path == ja.path
+    cc.made[0].done = True
+    cc.say(f"/job-apply {LINK}")
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}] * 2
+
+
+def test_job_apply_strips_tracking_and_slash(cc):
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.say(f"/job-apply {LINK}/?utm_source=x#top")
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}]
+
+
+def test_job_apply_rejects_bad_link(cc):
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.post("/say", text="/job-apply", **{"in:job_url": "https://evil.example/x"})
+    cc.say("/job-apply not a link")
+    cc.say("run Job Apply")
+    assert cc.made == [] and _tells(cc)[-3:] == ["GOV-AIOS -> That isn't a valid Himalayas job link."] * 3
+    assert "evil.example" not in "".join(_tells(cc))
+
+
+def test_job_apply_needs_session(cc):
+    _approve_job_apply(cc)
+    cc.say(f"/job-apply {LINK}")
+    assert cc.made == [] and "authenticator" in _tells(cc)[-1]
+
+
+def test_apps_without_inputs_unchanged(cc):
+    _open(cc)
+    cc.say("/joblens")
+    assert "name='in:" not in cc.get("/")[1]
+    cc.say("/joblens extra words")
+    assert len(cc.made) == 1 and cc.made[0].inputs is None
+
+
+def test_job_apply_undeclared_inputs_dropped(cc):
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.post("/say", text="/job-apply", **{"in:job_url": LINK, "in:evil": "x"})
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}]
+
+
+def test_agent_slash_ignores_in_fields(cc):
+    cc.post("/say", text="/claude", **{"in:x": "y"})
+    assert cc.made == [] and "run claude None" not in "".join(cc.srv.panel.convo)
+    assert "is not governed yet" in _tells(cc)[-1]
+
+
+def _asking(P, fields):
+    """A live Job Apply run whose engine has written ask.json; returns its run id."""
+    from govaios import applyfiles
+    from govaios.panel.tickets import run_id
+    _approve_job_apply(P)
+    _open(P)
+    P.say(f"/job-apply {LINK}")
+    rid = run_id(P.made[-1].ticket)
+    applyfiles.write_json(P.home, applyfiles.ASK, {"run": rid, "fields": fields})
+    return rid
+
+
+ASKED = [{"key": "#why", "label": "Why us? <b>", "kind": "textarea", "options": []},
+         {"key": "label:visa:0", "label": "Need a visa?", "kind": "radio", "options": ["Yes", "No"]}]
+
+
+def _ask_digest(P):
+    return re.search(r"name=ask value='([0-9a-f]+)'", P.get("/")[1])[1]
+
+
+def test_answer_card_round_trip(cc):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    page = cc.get("/")[1]
+    assert "Why us? &lt;b&gt;" in page and "<b>" not in page.split("Why us?")[1][:20]
+    assert "type=radio name='a:label:visa:0' value='Yes'" in page and "Save to my bank" in page
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#why": "Great team SECRETVAL", "save:#why": "1",
+                                                     "a:label:visa:0": "No"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {
+        "run": rid, "answers": {"#why": "Great team SECRETVAL", "label:visa:0": "No"}}
+    b = _log(cc.home, "bank_updated")
+    assert len(b) == 1 and b[0]["field"] == "#why" and "outcome" not in b[0]
+    assert _log(cc.home, "apply_answer")[0]["outcome"] == "2"
+    assert "SECRETVAL" not in AuditLog(cc.home).path.read_text() and "SECRETVAL" not in "".join(cc.srv.panel.convo)
+    bank = yaml.safe_load((cc.home / applyfiles.BANK).read_text())
+    assert bank["answers"] == [{"key": "why_us_b", "labels": ["Why us? <b>"], "answer": "Great team SECRETVAL"}]
+    d = _ask_digest(cc) if "name=ask" in cc.get("/")[1] else "x"
+    cc.post("/apply/answer", ask=d, **{"a:#why": "again"})   # a second reply to the same ask is refused
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"]["#why"] == "Great team SECRETVAL"
+    assert len(_log(cc.home, "apply_answer")) == 1
+
+
+@pytest.mark.parametrize("bad", [{"a:label:visa:0": "Maybe"}, {"a:#why": "a\x00b"}, {"a:#why": "x" * 2001}])
+def test_answer_rejects_option_not_offered_and_control_chars(cc, bad):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    cc.post("/apply/answer", ask=_ask_digest(cc), **bad)
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None and not _log(cc.home, "apply_answer")
+    assert "Maybe" not in "".join(cc.srv.panel.convo)
+
+
+def test_answer_needs_session(cc):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    d = _ask_digest(cc)
+    cc.req("/apply/answer", "POST", body={"ask": d, "a:#why": "x"})   # no browser cookie
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+    csrf = cc.csrf()
+    cc.srv.panel.session.end("ended")   # code session over: no answering either
+    cc.req("/apply/answer", "POST", cookie=cc.sid, body={"csrf": csrf, "ask": d, "a:#why": "x"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+
+
+def test_answer_card_ignores_other_run(cc):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": "0" * 16, "fields": ASKED})
+    assert "Save to my bank" not in cc.get("/")[1]
+    cc.post("/apply/answer", ask="0", **{"a:#why": "x"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+
+
+def test_result_card_lists_labels_only(cc):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.RESULT, {"run": rid, "filled": 5, "total": 8,
+                                                       "yourself": ["Resume/CV", "<i>Gender</i>"], "check": ["Phone"]})
+    cc.made[-1].done, cc.made[-1].code = True, 0
+    page = cc.get("/")[1]
+    assert "Filled 5 of 8 fields. Review the form in Chrome and press Submit yourself." in page
+    assert "Fill in Chrome yourself:" in page and "&lt;i&gt;Gender&lt;/i&gt;" in page and "<i>" not in page
+    assert "Check:" in page and "Phone" in page
+    applyfiles.write_json(cc.home, applyfiles.RESULT, {"run": "0" * 16, "filled": 1, "total": 1,
+                                                       "yourself": [], "check": []})
+    assert "Filled 1 of 1" not in cc.get("/")[1]
+
+
+def test_done_run_cleans_ask_and_reply(cc):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.REPLY, {"run": rid, "answers": {}})
+    cc.made[-1].done, cc.made[-1].stopped_reason = True, "killed"
+    cc.srv.panel.tick()
+    assert not (cc.home / applyfiles.ASK).exists() and not (cc.home / applyfiles.REPLY).exists()
+
+
+def test_textarea_crlf_becomes_newline_and_engine_accepts(cc):
+    from govaios import applyfiles
+    from govaios.formfill import ok_value
+    _asking(cc, ASKED)
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#why": "line1\r\nline2", "save:#why": "1"})
+    v = applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"]["#why"]
+    assert v == "line1\nline2" and ok_value(v, "textarea")
+    assert yaml.safe_load((cc.home / applyfiles.BANK).read_text())["answers"][0]["answer"] == "line1\nline2"
+
+
+def test_crlf_in_text_field_still_refused(cc):
+    from govaios import applyfiles
+    _asking(cc, [{"key": "#n", "label": "Name", "kind": "text", "options": []}])
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#n": "a\r\nb"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+
+
+def test_select_field_offers_options_and_checks_choice(cc):
+    from govaios import applyfiles
+    sel = [{"key": "#country", "label": "Country", "kind": "select", "options": ["India", "Other"]}]
+    _asking(cc, sel)
+    page = cc.get("/")[1]
+    assert "type=radio name='a:#country' value='India'" in page and "value='Select...'" not in page
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#country": "Select..."})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#country": "India"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"] == {"#country": "India"}
+
+
+def test_bank_save_failure_still_sends_reply(cc, monkeypatch):
+    from govaios import applyfiles
+    from govaios.audit import web
+    def boom(*a):
+        raise OSError("disk")
+    monkeypatch.setattr(web, "add_answer", boom)
+    _asking(cc, ASKED)
+    st, _, _ = cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#why": "SECRETVAL", "save:#why": "1"})
+    assert st == 303 or st == 302
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"]["#why"] == "SECRETVAL"
+    assert "GOV-AIOS -> That answer couldn't be saved to your bank." in _tells(cc)
+    assert _log(cc.home, "bank_updated")[-1]["outcome"] == "error"
+
+
+def test_done_run_finish_message_survives_cleanup_error(cc):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    (cc.home / applyfiles.ASK).unlink()
+    (cc.home / applyfiles.ASK).mkdir()   # unlink of a directory fails
+    cc.made[-1].done, cc.made[-1].code = True, 0
+    cc.srv.panel.tick()
+    assert _tells(cc)[-1].startswith("GOV-AIOS -> Job Apply finished")
+
+
+def test_long_field_key_capped_in_form(cc):
+    _asking(cc, [{"key": "#" + "k" * 5000, "label": "L", "kind": "text", "options": []}])
+    assert "k" * 300 not in cc.get("/")[1]
+
+
+GOOD_BANK = "answers:\n- key: why\n  labels: [\"Why us?\"]\n  answer: BANKSECRET\n"
+
+
+def test_bank_page_needs_session(cc):
+    from govaios import applyfiles
+    assert cc.req("/apply/bank", cookie=None)[0] == 303
+    cc.req("/apply/bank", "POST", body={"text": GOOD_BANK})
+    assert not (cc.home / applyfiles.BANK).exists()
+    st, page = cc.get("/apply/bank")[:2]
+    assert st == 200 and "<textarea" in page and "<script" not in page
+
+
+def test_bank_page_saves_valid(cc):
+    from govaios import applyfiles
+    cc.post("/apply/bank", text=GOOD_BANK.replace("\n", "\r\n"))
+    p = cc.home / applyfiles.BANK
+    assert p.read_text() == GOOD_BANK and (p.stat().st_mode & 0o777) == 0o600
+    assert not [x for x in p.parent.iterdir() if x.name != p.name]
+    b = _log(cc.home, "bank_updated")
+    assert len(b) == 1 and b[0]["field"] == "all" and "outcome" not in b[0]
+    assert "BANKSECRET" not in AuditLog(cc.home).path.read_text() and "BANKSECRET" not in "".join(cc.srv.panel.convo)
+    assert "BANKSECRET" in cc.get("/apply/bank")[1]
+
+
+def test_bank_page_rejects_malformed_and_keeps_old(cc):
+    from govaios import applyfiles
+    p = cc.home / applyfiles.BANK
+    cc.post("/apply/bank", text=GOOD_BANK)
+    for bad in ("answers: [unclosed\n", "answers:\n- key: x\n  labels: [a]\n  answer: \"\\x01\"\n", "x" * 70000):
+        cc.post("/apply/bank", text=bad)
+        assert p.read_text() == GOOD_BANK
+    cc.post("/apply/bank", text="answers: [unclosed SECRETBAD\n")
+    page = cc.get("/apply/bank")[1]
+    assert "YAML error" in page and page.count("SECRETBAD") == 1   # only inside the textarea
+    assert "YAML error" not in cc.get("/apply/bank")[1]
+    assert not [x for x in p.parent.iterdir() if x.name != p.name]
+    assert "SECRETBAD" not in AuditLog(cc.home).path.read_text()
+
+
+def _bad(cc, text):
+    from govaios import applyfiles
+    cc.post("/apply/bank", text=text)
+    return (cc.home / applyfiles.BANK).exists(), cc.get("/apply/bank")[1]
+
+
+def test_bank_page_refusals_keep_nothing(cc):
+    for bad, msg in (("- a\n- b\n", "must be a mapping"),
+                     ("answers:\n" + "".join(f"- key: k{i}\n  labels: [a]\n  answer: b\n" for i in range(301)), "at most 300"),
+                     ("a: 2001-13-45\n", "YAML error"),
+                     ("a: " + "[" * 5000 + "\n", "YAML error"),
+                     ("cv_file: /etc/passwd.pdf\n", "inside your home"),
+                     ("cv_file: ~/../../etc/x.pdf\n", "inside your home")):
+        exists, page = _bad(cc, bad)
+        assert not exists and msg in page, msg
+    exists, _ = _bad(cc, "cv_file: ~/not-yet.pdf\n")   # a CV that is not there yet is fine
+    assert exists
+
+
+def test_bank_page_escapes_textarea_and_too_large_not_echoed(cc):
+    cc.post("/apply/bank", text="# </textarea><b>x\nanswers: []\n")
+    page = cc.get("/apply/bank")[1]
+    assert "&lt;/textarea&gt;&lt;b&gt;x" in page and "</textarea><b>" not in page
+    cc.post("/apply/bank", text="# BIGMARK\n" + "x" * 61000)
+    page = cc.get("/apply/bank")[1]
+    assert "too large" in page and "BIGMARK" not in page
+
+
+def test_bank_page_post_needs_csrf(cc):
+    from govaios import applyfiles
+    cc.req("/apply/bank", "POST", cookie=cc.sid, body={"text": GOOD_BANK})
+    cc.req("/apply/bank", "POST", cookie=cc.sid, body={"csrf": "wrong", "text": GOOD_BANK})
+    assert not (cc.home / applyfiles.BANK).exists()
+
+
+def test_bank_page_symlinked_dir_refused(cc):
+    from govaios import applyfiles
+    real = cc.tmp / "elsewhere"
+    real.mkdir()
+    (cc.home / "apply").symlink_to(real)
+    _, page = _bad(cc, GOOD_BANK)
+    assert "symlink" in page and list(real.iterdir()) == []
+
+
+REFRESH = '<meta http-equiv="refresh" content="2">'
+
+
+def test_answer_card_stops_refresh_and_autofocus(cc):
+    from govaios import applyfiles
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.say(f"/job-apply {LINK}")
+    page = cc.get("/")[1]   # live, nothing asked: today's refresh and focus
+    assert REFRESH in page and re.search(r"<input id=cmd [^>]*autofocus", page)
+    from govaios.panel.tickets import run_id
+    rid = run_id(cc.made[-1].ticket)
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": rid, "fields": ASKED})
+    page = cc.get("/")[1]   # the admin is typing: nothing may reload or steal focus
+    assert "Save to my bank" in page and "refresh" not in page and not re.search(r"<input id=cmd [^>]*autofocus", page)
+    applyfiles.write_json(cc.home, applyfiles.REPLY, {"run": rid, "answers": {}})
+    page = cc.get("/")[1]
+    assert REFRESH in page and re.search(r"<input id=cmd [^>]*autofocus", page)
+
+
+def _result(cc, done_ok):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.RESULT, {"run": rid, "filled": 2, "total": 3,
+                                                       "yourself": ["Resume/CV"], "check": []})
+    cc.made[-1].done, cc.made[-1].code = True, 0 if done_ok else 70
+    if not done_ok:
+        cc.made[-1].stopped_reason = "emergency stop"
+    return cc.get("/")[1]
+
+
+def test_result_card_finished_says_submit_yourself(cc):
+    page = _result(cc, True)
+    assert "press Submit yourself" in page and "stopped" not in page.split("Job Apply</h2>")[-1]
+
+
+def test_result_card_stopped_run_says_check_form(cc):
+    page = _result(cc, False).split("Job Apply</h2>")[-1]
+    assert "press Submit yourself" not in page
+    assert "The run stopped. Check the form in Chrome." in page and "Resume/CV" in page
+
+
+def test_bank_post_limit_raised_for_bank_only(cc):
+    from govaios import applyfiles
+    big = GOOD_BANK + ("#" + ":" * 99 + "\n") * 500   # ~50 KB; ':' and newline url-encode to 3 bytes each
+    assert 50000 <= len(big) <= 60000 and len(urlencode({"text": big})) > 3 * 50000
+    st = cc.post("/apply/bank", text=big)[0]
+    assert st in (302, 303) and (cc.home / applyfiles.BANK).read_text() == big
+    st = cc.post("/say", text="x" * 70000)[0]   # every other route keeps the old limit
+    assert st == 400
+
+
+def test_bank_page_get_refuses_symlink_and_fifo(cc):
+    from govaios import applyfiles
+    (cc.home / "apply").mkdir(mode=0o700)
+    secret = cc.tmp / "secret.yaml"
+    secret.write_text("answers: []\n# LINKEDSECRET\n")
+    (cc.home / applyfiles.BANK).symlink_to(secret)
+    st, page = cc.get("/apply/bank")[:2]
+    assert st == 200 and "LINKEDSECRET" not in page
+    (cc.home / applyfiles.BANK).unlink()
+    os.mkfifo(cc.home / applyfiles.BANK)
+    t = threading.Thread(target=lambda: cc.get("/apply/bank"), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "GET /apply/bank hung on a FIFO"
+
+
+def test_bank_page_get_refuses_symlinked_dir(cc):
+    from govaios import applyfiles
+    real = cc.tmp / "elsewhere2"
+    real.mkdir()
+    (real / "answers.yaml").write_text("# DIRSECRET\n")
+    (cc.home / "apply").symlink_to(real)
+    assert "DIRSECRET" not in cc.get("/apply/bank")[1]

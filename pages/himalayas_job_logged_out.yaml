@@ -1,0 +1,12 @@
+# A Himalayas job page while logged out: Apply now is a link (a button once logged in). Classify only.
+page:
+  id: himalayas_job_logged_out
+  identification:
+    title_matches: ' hiring .* \| Himalayas$'
+    anchors: [job_title, apply_link]
+    absent: [apply_button]
+  elements:
+    main:         { role: main, risk: read }
+    job_title:    { role: heading, within: main, index: 0, risk: read }
+    apply_link:   { role: link, name: "Apply now", risk: navigate }
+    apply_button: { role: button, name: "Apply now", risk: navigate }

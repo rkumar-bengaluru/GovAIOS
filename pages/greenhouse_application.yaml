@@ -1,0 +1,13 @@
+# job-boards.greenhouse.io application form. The admin submits; Submit and Autofill are never clicked.
+page:
+  id: greenhouse_application
+  identification:
+    title_matches: '^Job Application for .+ at '
+    anchors: [form_region, submit, resume_input]
+  elements:
+    form_region:   { role: group, dom_id: application-form, risk: read }
+    submit:        { role: button, name: "Submit application", risk: submit }
+    autofill:      { role: button, name: "Autofill my application", risk: submit }
+    resume_group:  { role: group, name: "Resume/CV", risk: read }
+    resume_attach: { role: button, name: "Attach", within: resume_group, risk: modify }
+    resume_input:  { role: button, dom_id: resume, risk: read }   # "Attach: No file chosen" until a file is attached

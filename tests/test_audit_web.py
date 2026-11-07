@@ -311,7 +311,14 @@ def test_command_and_auth_columns_escaped(tmp_path, ui):
     body = get("/audit/log")[1]
     assert "<th>auth</th>" in body and "<th>command</th>" in body and "biometric" in body
     assert "<b>hi" not in body and "echo &lt;b&gt;hi&lt;/b&gt;" in body
-    assert "colspan=17 " in body   # seq, ts and every COLS column
+    assert "colspan=18 " in body   # seq, ts and every COLS column
+    srv.shutdown(); srv.server_close()
+
+
+def test_fill_source_column_shown(tmp_path, ui):
+    srv, get = _raw_server(tmp_path, ui, ['{"seq":1,"kind":"action","action":"fill_field","source":"bank"}'])
+    body = get("/audit/log")[1]
+    assert "<th>source</th>" in body and "<td>bank</td>" in body
     srv.shutdown(); srv.server_close()
 
 

@@ -50,3 +50,12 @@ def test_lookalike_domain_denied(appr):
 def test_payment_always_asks(appr):
     pay = {"permissions": {"allow": ["click"], "max_element_risk": "payment"}, "id": "p"}
     assert decide({"action": "click", "risk": "payment"}, pay, appr) == "ask"
+
+
+def test_attach_file_always_asks(appr):
+    f = {**FLOW, "permissions": {**FLOW["permissions"], "allow": ["attach_file"]}}
+    req = {"action": "attach_file", "risk": "modify"}
+    assert decide(req, f, appr) == "ask"
+    appr.approve_destination("f", "https://himalayas.app")
+    assert decide(req, f, appr) == "ask"
+    assert decide(req, FLOW, appr) == "deny"   # not allow-listed: deny wins

@@ -14,16 +14,26 @@ from pathlib import Path
 import yaml
 
 from . import auth, runstate
+from .agents import user_home
+from .applyfiles import ASK, BANK, REPLY, RESULT, read_json, remove, write_json
+from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
+                       read_form, restricted)
 from .audit.log import AuditLog, url_for_audit
 from .delivery import TARGETS, check_block
 from .approvals import Approvals, pages_used, read_bound
-from .policy import decide, origin
+from .policy import RISK_ORDER, decide, origin
 from .runstate import Stop
 
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
 
 
 NO_DEST = object()
+FORM_PASSES = 3
+ASK_TIMEOUT_S = 900
+
+
+class Denied(Stop):
+    """The admin (or policy) refused an action; the run may carry on without it."""
 
 
 def _emergency_stop(signum, frame):
@@ -89,12 +99,49 @@ def approval_question(f, deliver):
             f"{'; delivers to: ' + TARGETS[deliver['to']]['label'] if deliver else ''}. Approve this flow?")
 
 
+def _lists(root):
+    """`list` nodes by their path of child indexes from the root (handles change between snapshots)."""
+    out = {}
+
+    def walk(n, path):
+        if n.role == "list":
+            out[path] = n
+        for i, c in enumerate(n.children):
+            walk(c, path + (i,))
+    walk(root, ())
+    return out
+
+
+def _new_lists(before, root, region):
+    """`list` nodes inside the form region whose path wasn't in `before` (an open dropdown)."""
+    inside = {id(n) for n in region.walk()}
+    return [l for p, l in _lists(root).items() if p not in before and id(l) in inside]
+
+
+def _named(n, value):
+    """Outermost descendants whose name or text equals value (an option, not also its own text child)."""
+    for c in n.children:
+        if c.name == value or c.text() == value:
+            yield c
+        else:
+            yield from _named(c, value)
+
+
+def _option(group, value):
+    return next((n for n in group.walk() if n.role == "radio" and n.name == value), None)
+
+
 # ---------- executor ----------
 
 class Runner:
-    def __init__(self, flow_path, desktop, home, executor="gov_runner_dev", ticket=None):
+    def __init__(self, flow_path, desktop, home, executor="gov_runner_dev", ticket=None, inputs=None):
         self.home = Path(home)
         self.ticket = ticket   # panel run: a one-use ticket stands in for the Touch ID start proof
+        self.inputs = inputs   # validated in _run, not here: the panel builds a Runner only to approve the flow
+        self.run_id = None
+        if ticket is not None:
+            from .panel import tickets
+            self.run_id = tickets.run_id(ticket)
         self.executor = executor   # "gov_runner" only when cli runs inside com.govaios.cli
         self.flow_path = Path(flow_path)
         self.pages_dir = self.flow_path.parent.parent / "pages"   # flows/ and pages/ are siblings
@@ -148,7 +195,7 @@ class Runner:
         return ok, how
 
     # governance gate for every side effect
-    def gate(self, action, risk, target=None, destination=NO_DEST):
+    def gate(self, action, risk, target=None, destination=NO_DEST, question=None):
         if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
             raise Stop("emergency stop")
         if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked since approve_flow
@@ -165,7 +212,7 @@ class Runner:
         if asked:
             q = f"Flow '{self.flow['id']}' wants to {action}"
             q += f" and reach {origin(destination)} for the first time." if destination else "."
-            ok, how = self.ask(q + " Approve?", f"{self.flow['id']}: {action} {origin(destination) if destination else ''}".strip())
+            ok, how = self.ask(question or q + " Approve?", f"{self.flow['id']}: {action} {origin(destination) if destination else ''}".strip())
             verdict, remember = ("allow", bool(destination)) if ok else ("deny", False)
         self._audit("request", action=action, risk=risk, target=target, destination=dest, decision=verdict,
                     approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how,
@@ -173,7 +220,7 @@ class Runner:
         if remember:   # only once the approval is on record
             self.approvals.approve_destination(self.flow["id"], origin(destination))
         if verdict != "allow":
-            raise Stop(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
+            raise Denied(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
 
     def approve_flow(self):
         digest = self.digest
@@ -239,10 +286,14 @@ class Runner:
         self.step = None
         self._audit("flow_start", flow_hash=self.digest)
         try:
+            decl, given = self.flow.get("inputs") or {}, self.inputs or {}
+            if set(given) != set(decl) or not all(
+                    isinstance(v, str) and re.fullmatch(decl[k]["pattern"], v) for k, v in given.items()):
+                raise Stop("bad run input")
             approved = self.approvals.flow_ok(self.flow["id"], self.digest)
             if self.ticket is not None:   # panel run: never a prompt; the ticket is the start proof
                 from .panel import tickets
-                sid = tickets.consume(self.home, self.ticket, self.flow["id"], self.digest)   # always: a refused ticket is spent too
+                sid = tickets.consume(self.home, self.ticket, self.flow["id"], self.digest, self.inputs)   # always: a refused ticket is spent too
                 sid = approved and sid
                 if approved:
                     extra = {"session": sid} if sid else {}
@@ -290,9 +341,10 @@ class Runner:
         self.d.pin_window(window)   # refuses if focus left that window during the check
 
     def do_navigate(self, s):
-        self.gate("navigate", "navigate", destination=s["value"])
+        value = self.inputs[s["value_from"].removeprefix("input.")] if "value_from" in s else s["value"]
+        self.gate("navigate", "navigate", destination=value)
         self._act("press", self.d.press, "focus_address_bar")
-        self._act("type_text", self.d.type_text, s["value"])
+        self._act("type_text", self.d.type_text, value)
         self._act("press", self.d.press, "enter")
         time.sleep(2)
 
@@ -355,8 +407,12 @@ class Runner:
                 return (it if fs.get("self") else find_all(it, fs, self.pages[page_id])[0]), fs
         raise Stop("selected item no longer on the page")   # identity check
 
+    def ref(self, target):
+        """Audit ref for a target; `current_page.<el>` names the page the run classified."""
+        return f"{self.ctx['page']}.{target.split('.', 1)[1]}" if target.startswith("current_page.") else target
+
     def do_click(self, s):
-        tgt = s["target"]
+        tgt = self.ref(s["target"])
         if tgt.startswith("current_item."):
             node, spec = self._current_item_node(tgt.split(".", 1)[1])
         else:
@@ -436,3 +492,198 @@ class Runner:
         self.gate("navigate", "navigate")
         self._act("press", self.d.press, "browser_back")
         time.sleep(2)
+
+    # ----- job-application form -----
+    def _form(self):
+        page = self.ctx["page"]
+        root = self.snapshot()
+        if not identify(self.pages[page], root):
+            raise Stop("left the form page")
+        return root, self.element(f"{page}.form_region", root)[0]
+
+    def _node(self, region, f, value):
+        n = locate(region, f)
+        if n is not None and f.kind == "radio":
+            n = _option(n, value)
+        return n if n is not None and n.role in FIELD_ROLES else None
+
+    def fill(self, f, value, source):
+        """One bank/admin answer into one field, re-found by key in a fresh snapshot, then read back.
+        Never logs the value; Enter only inside a confirmed-open native menu."""
+        root, region = self._form()
+        node, label = self._node(region, f, value), f.label[:80]
+        ok = node is not None and ok_value(value, f.kind)
+        if ok:
+            self.gate("fill_field", "modify", target=label, destination=self.d.current_url(self.app))
+            before = set(_lists(root))
+            ok = self._enter(f.kind, node, value, before, label)
+            root, region = self._form()   # re-found after entry or escape: the old handle may be stale
+            node = n = self._node(region, f, value)
+            if not ok or n is None:
+                ok = False
+            elif f.kind == "radio":
+                ok = n.value == "1"
+            elif f.kind == "select":
+                ok = value in (n.value, n.name)
+            elif f.kind == "combo":   # picked only once the dropdown closed; text in a still-open list doesn't count
+                parent = next((p for p in region.walk() if any(c is n for c in p.children)), n)
+                in_list = {id(x) for l in parent.walk() if l.role == "list" for x in l.walk()}
+                ok = not _new_lists(before, root, region) and (n.value == value or any(
+                    d.role == "text" and (d.value or d.name) == value and id(d) not in in_list for d in parent.walk()))
+            else:
+                ok = n.value == value
+        if not ok and node is not None and f.kind in ("text", "textarea", "combo") and self.d.focused_is(node):
+            self._act("press", self.d.press, "select_all", target=label)
+            self._act("press", self.d.press, "delete_back", target=label)
+        self._audit("action", action="fill_field", target=label, source=source, outcome="done" if ok else "mismatch")
+        if not ok:
+            self.ctx["apply"]["yourself"].append(f.label)
+        return ok
+
+    def _enter(self, kind, node, value, before, label):
+        if kind in ("text", "textarea"):
+            self._act("click", self.d.click, node, target=label)
+            if not self.d.focused_is(node):
+                return False
+            self._act("type_into", self.d.type_into, node, value, target=label)
+        elif kind == "combo":
+            self._act("click", self.d.click, node, target=label)
+            self._act("type_into", self.d.type_into, node, value, target=label)
+            new = _new_lists(before, *self._form())
+            cands = list({id(c): c for l in new for c in _named(l, value)}.values())
+            if len(cands) != 1:
+                self._act("press", self.d.press, "escape", target=label)
+                return False
+            self._act("click", self.d.click, cands[0], target=label)
+        elif kind == "select":
+            self._act("click", self.d.click, node, target=label)
+            if not self.d.menu_open():
+                self._act("press", self.d.press, "escape", target=label)
+                return False
+            self._act("type_text", self.d.type_text, value, target=label)
+            if not self.d.menu_open():   # checked again right before Enter: never Enter in the web page
+                self._act("press", self.d.press, "escape", target=label)
+                return False
+            self._act("press", self.d.press, "enter", target=label)   # inside the native menu, confirmed open
+        else:   # radio: node is the option named value
+            self._act("click", self.d.click, node, target=label)
+        return True
+
+    def do_fill_form(self, s):
+        try:
+            bank = load_bank(self.home / BANK, user_home())
+        except BankError as e:
+            raise Stop(f"answer bank: {e}") from None
+        a = self.ctx["apply"] = {"bank": bank, "filled": 0, "total": 0, "yourself": [], "check": [], "pending": []}
+        done = set()
+        for _ in range(FORM_PASSES):   # a fill can reveal conditional fields
+            fields = read_form(self._form()[1])
+            new = [f for f in fields if f.key not in done]
+            if not new:
+                break
+            for f in new:
+                done.add(f.key)
+                a["total"] += 1
+                hit = answer_for(f, bank, fields)
+                if f.filled:
+                    a["check"].append(f.label)
+                elif hit:
+                    a["filled"] += self.fill(f, *hit)
+                elif restricted(f) or not normalize(f.label) or f.kind not in ASKABLE:
+                    a["yourself"].append(f.label)
+                else:
+                    a["pending"].append(f)
+        self.ask_pending()
+        self.write_result()
+
+    def do_attach_file(self, s):
+        """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
+        from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
+        a, ref = self.ctx["apply"], self.ref(s["target"])
+        a["yourself"].append("Resume/CV")   # until attached: a stop from here on leaves it on the result card
+        self.write_result()
+        p = cv_path(a["bank"], user_home())
+        if p is not None:
+            _, spec = self.page_element(ref)
+            if RISK_ORDER.index(spec["risk"]) > RISK_ORDER.index(self.flow["permissions"]["max_element_risk"]):
+                raise Stop(f"{ref}: risk {spec['risk']} above the flow's ceiling")   # never click it
+            try:
+                self.gate("attach_file", spec["risk"], target=ref,
+                          question=f"Attach your CV ({p.name}) to this application?")
+            except Denied:
+                p = None
+        if p is not None:
+            node, _ = self.page_element(ref)   # re-located after the prompt, as do_click does
+            self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
+            node, _ = self.page_element(ref)
+            self._act("click", self.d.click, node, target=ref)
+            try:
+                self._act("choose_file", self.d.choose_file, str(p), target=ref)
+            except InputRefused:   # fixed text, no path; any other Stop ends the run
+                self._act("press", self.d.press, "escape", target=ref)
+                p = None
+        if p is not None:
+            try:
+                chk, _ = self.element(self.ref(s["check"]), self.wait_for_page([ref.split(".")[0]], 10)[1])
+                if "No file chosen" in chk.name:
+                    p = None
+            except Stop:   # the check element is missing or ambiguous
+                if runstate.stopped(self.home):   # an emergency stop (STOPPED is touched before SIGTERM)
+                    raise
+                p = None
+        if p is not None:
+            a["yourself"].remove("Resume/CV")
+        self.write_result()
+
+    def ask_pending(self):
+        """Hand the unmatched fields to the admin via the panel (ask.json/reply.json), then type the answers in.
+        A CLI run (no ticket) never asks. Values are never logged."""
+        a = self.ctx["apply"]
+        pend, a["pending"] = a["pending"], []
+        if not pend or self.run_id is None:
+            a["yourself"] += [f.label for f in pend]
+            return
+        self.gate("ask_admin", "read")
+        # a select's first option is its placeholder (formfill's rule): never offered, never accepted
+        offered = {f.key: list(f.options[1:] if f.kind == "select" else f.options if f.kind == "radio" else ())
+                   for f in pend}
+        asked = {f.key: f for f in pend}
+        try:
+            remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
+            write_json(self.home, ASK, {"run": self.run_id, "fields": [
+                {"key": f.key, "label": f.label, "kind": f.kind, "options": offered[f.key]} for f in pend]})
+            deadline = time.monotonic() + ASK_TIMEOUT_S
+            while True:
+                reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet
+                if reply and reply.get("run") == self.run_id:
+                    break
+                if runstate.stopped(self.home):
+                    raise Stop("emergency stop")
+                if auth.screen_locked():
+                    raise Stop("screen_locked")
+                if time.monotonic() > deadline:
+                    raise Stop("no answer from admin")
+                time.sleep(1)
+        finally:
+            remove(self.home, ASK, REPLY)
+        answers = reply.get("answers")
+        if not isinstance(answers, dict) or not all(
+                k in asked and isinstance(v, str) and len(v) <= 2000 and ok_value(v, asked[k].kind)
+                and (not v or asked[k].kind not in ("select", "radio") or v in offered[k])
+                for k, v in answers.items()):
+            raise Stop("bad reply")
+        self._act("raise_pinned", self.d.raise_pinned)
+        for f in pend:
+            v = answers.get(f.key, "")
+            if v:
+                a["filled"] += self.fill(f, v, "admin")
+            else:
+                a["yourself"].append(f.label)
+
+    def write_result(self):
+        """Counts and labels only, never values."""
+        a = self.ctx["apply"]
+        if self.run_id is not None:
+            write_json(self.home, RESULT, {"run": self.run_id, "filled": a["filled"], "total": a["total"],
+                                           "yourself": a["yourself"], "check": a["check"]})
+        print(f"apply: filled {a['filled']} of {a['total']}", flush=True)

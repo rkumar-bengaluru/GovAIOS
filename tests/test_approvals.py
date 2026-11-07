@@ -75,3 +75,8 @@ def test_write_is_atomic(tmp_path, monkeypatch):
         a.approve_flow("g", "h2")
     assert p.read_text() == before
     assert sorted(x.name for x in tmp_path.iterdir()) == ["approvals.json", "approvals.lock"]
+
+
+def test_pages_used_skips_current_page():
+    flow = {"steps": [{"target": "current_page.next"}, {"target": "current_item.title"}, {"target": "p.x"}]}
+    assert pages_used(flow) == {"p"}

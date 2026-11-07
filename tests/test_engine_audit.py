@@ -8,83 +8,8 @@ import pytest
 
 from govaios import engine
 from govaios.audit.verify import verify
-from govaios.desktop import Node
 from govaios.engine import REPO, Runner, Stop
-
-ACCT = "test@example.invalid"
-
-
-def N(role, name="", **kw):
-    return Node(role, name, **kw)
-
-
-def google_home():
-    return N("document", "Google", children=[
-        N("link", "Gmail"), N("popup_button", f"Google Account: Tester ({ACCT})")])
-
-
-def matches():
-    card = N("article", children=[N("link", "SECRET-TITLE"), N("link", "SECRET-CO Verified"),
-                                  N("link", "View job"), N("time", children=[N("text", "2d ago")])])
-    return N("document", "Your matches | Himalayas", children=[
-        N("heading", "Your matches"), N("banner"),
-        N("group", dom_id="job-search-results", children=[card])])
-
-
-def detail():
-    return N("document", "SECRET-CO hiring SECRET-TITLE | Himalayas", children=[
-        N("main", children=[N("heading", "SECRET-TITLE"), N("link", "SECRET-CO"),
-                            N("article", children=[N("text", "SECRET-DESCRIPTION")])]),
-        N("heading", "Apply now")])
-
-
-class FakeDesktop:
-    """Canned trees; records instead of sending input. Never touches the OS."""
-
-    def __init__(self, answers):
-        self.answers, self.calls, self.url, self.typed = list(answers), [], "about:blank", ""
-        FakeDesktop.current = self
-
-    def activate(self, app):
-        self.calls.append("activate")
-
-    def focused_window_id(self, app):
-        return "win1"
-
-    def pin_window(self, token):
-        self.calls.append(("pin", token))
-
-    def launch_application(self, app, profile=None):
-        self.calls.append("launch")
-
-    def press(self, key):
-        self.calls.append(key)
-        if key == "enter":
-            self.url = self.typed
-        elif key == "browser_back":
-            self.url = "https://himalayas.app/jobs/matches"
-
-    def type_text(self, t):
-        self.typed = t
-
-    def scroll_into_view(self, node):
-        self.calls.append("scroll")
-
-    def click(self, node):
-        self.calls.append("click")
-        self.url = "https://himalayas.app/jobs/secret-title"
-
-    def current_url(self, app):
-        return self.url + ("?utm=x" if "himalayas" in self.url else "")
-
-    def window_title(self, app):
-        return "x"
-
-    def web_root(self, app):
-        if "google.com" in self.url:
-            return google_home()
-        return detail() if "/jobs/secret" in self.url else matches()
-
+from conftest import ACCT, FakeDesktop, N
 
 @pytest.fixture(autouse=True)
 def nosleep(monkeypatch):
@@ -584,3 +509,59 @@ def test_approval_question_unchanged(tmp_path, monkeypatch):
             f"max element risk {f['permissions']['max_element_risk']}; destinations "
             f"{', '.join(f['destinations'])}; delivers to: joblens (local). Approve this flow?")
     assert qs[0] == want == engine.approval_question(f, r.deliver)
+
+
+JOB = "https://himalayas.app/companies/a/jobs/b"
+INPUT_FLOW = """workflow:
+  id: input_flow
+  app: X
+  name: x
+  version: 1
+  browser: { application: chrome }
+  permissions: { allow: [navigate], max_element_risk: navigate }
+  destinations: ["https://himalayas.app"]
+  inputs: { job_url: { label: "Job link", pattern: "https://himalayas\\\\.app/companies/[a-z0-9-]+/jobs/[a-z0-9-]+" } }
+  steps:
+    - { id: open_job, action: navigate, value_from: input.job_url }
+"""
+
+
+def input_runner(tmp_path, inputs=None):
+    (tmp_path / "src" / "flows").mkdir(parents=True)
+    (tmp_path / "src" / "pages").mkdir()
+    f = tmp_path / "src" / "flows" / "input_flow.yaml"
+    f.write_text(INPUT_FLOW)
+    r = Runner(f, FakeDesktop([]), tmp_path, inputs=inputs)
+    r.approvals.approve_flow(r.flow["id"], r.digest)
+    r.approvals.approve_destination(r.flow["id"], "https://himalayas.app")
+    return r
+
+
+def test_runner_init_without_inputs_ok_for_approval(tmp_path):
+    input_runner(tmp_path)   # no raise
+
+
+@pytest.mark.parametrize("bad", [None, {}, {"job_url": "https://evil.example/x"}, {"job_url": JOB, "extra": "1"}])
+def test_run_input_required_and_validated(tmp_path, bad):
+    r = input_runner(tmp_path, bad)
+    with pytest.raises(Stop, match="^bad run input$"):
+        r.run()
+    assert not r.d.calls
+
+
+def test_run_input_valid_navigates(tmp_path):
+    r = input_runner(tmp_path, {"job_url": JOB})
+    r.run()
+    assert r.d.typed == JOB
+
+
+def test_gate_custom_question(tmp_path, monkeypatch):
+    qs = []
+    monkeypatch.setattr(engine.auth, "approve", lambda q, *a, **k: (qs.append(q), (True, "biometric"))[1])
+    r = Runner(REPO / "flows" / "himalayas_job_vetting.yaml", FakeDesktop([]), tmp_path)
+    r.approvals.approve_flow(r.flow["id"], r.digest)
+    r.flow["permissions"]["allow"].append("attach_file")
+    r.gate("attach_file", "modify", question="Attach your CV?")
+    r.gate("attach_file", "modify")
+    assert qs[0] == "Attach your CV?" and qs[1].startswith("Flow 'himalayas_job_vetting' wants to attach_file")
+    assert r.approvals.destination_ok(r.flow["id"], "https://x") is False   # nothing remembered

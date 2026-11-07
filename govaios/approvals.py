@@ -16,7 +16,7 @@ def pages_used(flow):
     def walk(steps):
         for s in steps:
             t = s.get("target", "").split(".")[0]
-            if t and t != "current_item":
+            if t and t not in ("current_item", "current_page"):
                 ids.add(t)
             ids.update(s[k] for k in ("page", "verify_page") if k in s)
             ids.update(k for k in s.get("on_match", {}) if k != "unknown")
