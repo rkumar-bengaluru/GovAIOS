@@ -18,7 +18,10 @@ Updated 2026-11-06 after control panel v2 (PR #10).
   Needs the Studio decision on how the panel reaches Claude. Apps with run-time inputs show them on
   their `/app` card.
 - **Change Claude Code folders from the panel:** setup keeps an existing policy's folders.
-- **Govern OpenAI Codex** like Claude Code: Codex 0.162 has `PreToolUse` hooks and a managed `/etc/codex/requirements.toml`. Needs one live test (does a hook crash or timeout fail closed?). Spike: `docs/superpowers/spikes/2026-11-06-codex-governance.md`.
+- ~~Govern OpenAI Codex like Claude Code~~ built 2026-11-07 (branch `feat/codex-template`); live test
+  in `docs/codex-integration-test.md`. Still open: Codex network allow-list (`experimental_network`),
+  Codex built-in tools beyond Bash/apply_patch/MCP, whether ChatGPT.app's Codex reads the file.
+- **JobLens integration** (admin, 2026-11-07): next after Codex is verified.
 - **Inbox brief short app name** (`app:` in `flows/morning_inbox_briefing.yaml`) so the panel
   accepts "run inbox brief".
 - **Later: service-account / API connectors** (e.g. Drive API): new action kind, Keychain

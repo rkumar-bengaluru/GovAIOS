@@ -51,8 +51,8 @@ def default_policy(*roots):
                            "destinations": DESTINATIONS, "tools": DEFAULT_TOOLS}, sort_keys=False)
 
 
-def load(home):
-    return parse((Path(home) / POLICY_PATH).read_bytes())
+def load(home, path=POLICY_PATH):
+    return parse((Path(home) / path).read_bytes())
 
 
 def parse(raw: bytes):

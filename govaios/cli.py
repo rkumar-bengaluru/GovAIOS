@@ -17,14 +17,16 @@ def _doctor(args) -> int:
 
     home = data_home()
     c = identity.check()
-    from .claudecode import root_owned
+    from .agents import root_owned
     managed = root_owned(hook.MANAGED_SETTINGS)
     try:   # row 32: the hook's own comparison
         current = hook.drift(hook.MANAGED_SETTINGS, executor.load(home)[0]) is None
     except Exception:   # no or bad policy: not current
         current = False
     ts = powers.last(home)
+    from .agents import CODEX, governed
     c.update(guard=runstate.guard_alive(home), managed_settings=managed, managed_settings_current=current,
+             codex_governed=governed(home, CODEX.managed, CODEX)[0],   # informational: Codex is optional
              powers_review=ts.date().isoformat() if ts else "missing", screen_locked=auth.screen_locked())
     for k, v in c.items():
         print(f"{k}: {v}")
@@ -241,34 +243,41 @@ def _hook(args) -> int:
     return hook_main(sys.stdin, sys.stdout, sys.stderr, data_home())
 
 
+def _codex_hook(args) -> int:
+    from .codex import main as codex_main
+    from .home import data_home
+
+    return codex_main(sys.stdin, sys.stdout, sys.stderr, data_home())
+
+
 def _claude_settings(args) -> int:
-    from . import auth, claudecode
+    from . import agents, auth
     from .audit.log import AuditLog
     from .hook import ID
     from .home import data_home
 
     home = data_home()
     try:
-        path, raw, pol, digest = claudecode.draft(home, args.root)
+        path, raw, pol, digest = agents.draft(home, args.root)
     except ValueError as e:   # our own message
         print(f"refused: {e}", file=sys.stderr)
         return 1
     if path.exists():
         print(f"note: {path} exists; its project_roots are used, not --root", file=sys.stderr)
-    q = claudecode.question(path, raw)   # shown and approved bytes are the hashed bytes (Rule 11)
-    ok, how = auth.approve(q, claudecode.REASON, home)
+    q = agents.question(path, raw)   # shown and approved bytes are the hashed bytes (Rule 11)
+    ok, how = auth.approve(q, agents.CLAUDE.reason, home)
     AuditLog(home).append("flow_approval", flow=ID, flow_hash=digest, executor=ID, decision="allow" if ok else "deny",
                           approver="admin", channel="touch_id", auth=how,
-                          shown=auth.shown_digest(q, None if how == "none" else claudecode.REASON))
+                          shown=auth.shown_digest(q, None if how == "none" else agents.CLAUDE.reason))
     if not ok:
         print("approval busy" if how == "busy" else "not approved", file=sys.stderr)
         return 1
     try:
-        claudecode.commit(home, path, raw, digest)
+        agents.commit(home, path, raw, digest)
     except (OSError, ValueError) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 1
-    print(claudecode.settings_bytes(pol, home).decode(), end="")
+    print(agents.CLAUDE.settings(pol, home).decode(), end="")
     return 0
 
 
@@ -330,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("guard").set_defaults(fn=_guard)
     sub.add_parser("resume").set_defaults(fn=_resume)
     sub.add_parser("hook").set_defaults(fn=_hook)
+    sub.add_parser("codex-hook").set_defaults(fn=_codex_hook)
     c = sub.add_parser("claude-settings")
     c.add_argument("--root", action="append", required=True)
     c.set_defaults(fn=_claude_settings)
