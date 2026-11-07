@@ -292,3 +292,32 @@ def test_click_refuses_when_something_else_is_under_the_point(env):
     env.ax.hit_parent = "job_link"   # the hit is the link's text, inside the link
     env.d.click(Node("link", "SECRET", handle="job_link"))
     assert len(env.posted) == 3
+
+
+def _snap_tree(env, monkeypatch, tree):
+    """tree: {el: (role, sub, kids)}; fake CopyMultipleAttributeValues."""
+    monkeypatch.setattr(macos, "AXUIElementCopyMultipleAttributeValues",
+                        lambda el, attrs, o, n: (0, (tree[el][0], tree[el][1], "t", None, None, None, [], tree[el][2])))
+    env.d._count = 0
+    return env.d._snap("root")
+
+
+def test_radio_outside_tab_list_is_radio(env, monkeypatch):
+    n = _snap_tree(env, monkeypatch, {"root": ("AXGroup", None, ["r"]), "r": ("AXRadioButton", None, [])})
+    assert n.children[0].role == "radio"
+
+
+def test_radio_in_tab_list_is_tab(env, monkeypatch):
+    n = _snap_tree(env, monkeypatch, {"root": ("AXTabGroup", None, ["r"]), "r": ("AXRadioButton", None, [])})
+    assert n.children[0].role == "tab"
+
+
+def test_text_area_role(env, monkeypatch):
+    assert _snap_tree(env, monkeypatch, {"root": ("AXTextArea", None, [])}).role == "text_area"
+
+
+def test_new_keys_have_codes():
+    from govaios.desktop import ROLES
+    for combo in ROLES["keys"].values():
+        assert all(k in macos.KEYCODES or k in macos.FLAGS for k in combo["macos"])
+    assert (macos.KEYCODES["a"], macos.KEYCODES["g"], macos.KEYCODES["backspace"], macos.KEYCODES["escape"]) == (0, 5, 51, 53)

@@ -21,7 +21,7 @@ BUNDLES = {"chrome": ("com.google.Chrome", "Google Chrome")}
 # Fixed human pace (spec 5.8): reliability and fair site load, never bot-detection evasion (no jitter).
 # shortcut: fixed values, not the admin's learned pace; replaced by bootstrap-learned pace in plan 4.
 PACE = {"char": 0.12, "key": 0.15, "pointer": 0.25, "after_action": 1.0}
-KEYCODES = {"l": 37, "[": 33, "return": 36, "left": 123, "w": 13}
+KEYCODES = {"l": 37, "[": 33, "return": 36, "left": 123, "w": 13, "a": 0, "g": 5, "backspace": 51, "escape": 53}
 FLAGS = {"cmd": Q.kCGEventFlagMaskCommand, "alt": Q.kCGEventFlagMaskAlternate,
          "ctrl": Q.kCGEventFlagMaskControl, "shift": Q.kCGEventFlagMaskShift}
 ATTRS = ["AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXDOMIdentifier", "AXDOMClassList", "AXChildren"]
@@ -189,7 +189,7 @@ class MacDesktop:
                 return hit
         return None
 
-    def _snap(self, el):
+    def _snap(self, el, parent_role=None):
         self._count += 1
         err, vals = AXUIElementCopyMultipleAttributeValues(el, ATTRS, 0, None)
         if err != 0:
@@ -197,6 +197,8 @@ class MacDesktop:
         role, sub, title, desc, value, dom_id, classes, kids = vals
         role, sub = _s(role), _s(sub)
         neutral = NEUTRAL.get(f"{role}/{sub}") or NEUTRAL.get(role) or f"native:{role}"
+        if neutral == "tab" and parent_role != "AXTabGroup":
+            neutral = "radio"   # Chrome's role=tab and plain radios are both AXRadioButton
         node = Node(role=neutral, name=_s(title) or _s(desc), value=_s(value), dom_id=_s(dom_id),
                     dom_class=tuple(c for c in classes if isinstance(c, str)) if hasattr(classes, '__iter__') and not isinstance(classes, str) else (), handle=el)
         if neutral == "document" and self._count > 1:
@@ -206,7 +208,7 @@ class MacDesktop:
             for k in kids:
                 if self._count >= MAX_NODES:
                     break
-                node.children.append(self._snap(k))
+                node.children.append(self._snap(k, role))
         return node
 
     # --- input: real OS events ---

@@ -31,7 +31,8 @@ class Node:
 
 
 def native_to_neutral(platform):
-    return {v[platform]: k for k, v in ROLES["roles"].items()}
+    # a macOS value with a space is documentation only (e.g. radio), never a native role
+    return {v[platform]: k for k, v in ROLES["roles"].items() if " " not in v[platform]}
 
 
 def get_desktop():
