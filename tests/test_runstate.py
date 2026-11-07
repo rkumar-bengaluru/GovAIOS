@@ -138,7 +138,7 @@ sys.exit(guard.main(Path(sys.argv[1])))
 """
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 6")
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: SIGTERM guard; Windows guard in Task 9")
 def test_guard_exits_on_sigterm_and_removes_pid(home):
     """Row 53: SIGTERM must reach Python while the guard sits in the NSApplication run loop."""
     with subprocess.Popen([sys.executable, "-c", CHILD, str(home)], stderr=subprocess.PIPE, text=True) as p:

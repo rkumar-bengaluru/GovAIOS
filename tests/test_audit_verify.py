@@ -7,7 +7,7 @@ import os
 from govaios.audit.log import AuditLog, _canon
 from govaios.audit.verify import main, verify
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="macOS: audit log UF_APPEND flag (os.chflags)")
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="macOS: helper clears UF_APPEND; Windows tamper cases in test_win_audit_verify.py")
 
 
 def _mk(home, n=3):

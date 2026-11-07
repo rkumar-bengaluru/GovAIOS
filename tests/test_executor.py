@@ -11,7 +11,7 @@ from govaios.executor import (ALLOW_COMMANDS, DESTINATIONS, build_request, categ
                               load, protected_paths)
 from govaios.policy import decide_tool
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="macOS: Claude Code executor uses pwd")
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows: Claude Code executor not supported this cycle")
 
 
 @pytest.fixture

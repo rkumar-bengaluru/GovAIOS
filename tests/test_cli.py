@@ -20,7 +20,7 @@ def test_run_refused_outside_app(capsys):
     assert capsys.readouterr().err.count("com.govaios.cli") == 1   # printed once, not again by the re-raise
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: child env PATH=/usr/bin (no SYSTEMROOT on Windows)")
 def test_run_dev_blocks_network(tmp_path):
     driver = textwrap.dedent("""
         import socket
@@ -641,7 +641,7 @@ def test_dump_is_a_registered_run(monkeypatch, govaios_home):
 
 
 @pytest.mark.parametrize("var", ["GOVAIOS_PID_FILE", "GOVAIOS_EXIT_FILE"])
-@pytest.mark.skipif(sys.platform == "win32", reason="macOS: symlink creation needs a privilege on Windows")
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: test creates symlinks, which need an elevated privilege (SeCreateSymbolicLink); shim files do not exist on Windows")
 def test_shim_files_never_follow_links_or_truncate(monkeypatch, tmp_path, var):
     """M-6: only an existing empty regular file (the shim's mktemp) is written."""
     victim = tmp_path / "victim"

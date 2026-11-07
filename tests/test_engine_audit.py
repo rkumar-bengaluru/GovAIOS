@@ -527,7 +527,7 @@ def _no_prompts(monkeypatch):
     monkeypatch.setattr(engine.auth, "approve", boom)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 8 (tickets os.O_NOFOLLOW)")
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel tickets not supported this cycle (os.O_NOFOLLOW)")
 def test_ticket_run_skips_touch_id(tmp_path, monkeypatch):
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no Touch ID")))
     r, e, err = run(tmp_path, [True] * 10, preapprove=True, mint=True)
@@ -552,7 +552,7 @@ def test_ticket_for_unapproved_flow_stops(tmp_path, monkeypatch):
     assert isinstance(err, Stop) and str(err) == "run ticket not valid"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 8 (tickets os.O_NOFOLLOW)")
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel tickets not supported this cycle (os.O_NOFOLLOW)")
 def test_ticket_for_unapproved_flow_is_spent(tmp_path, monkeypatch):
     _no_prompts(monkeypatch)
     r, e, err = run(tmp_path, [], mint=True)
