@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 import yaml
 
 from govaios import agents, applyfiles, auth, runstate
-from govaios.formfill import BankError, add_answer, ok_value
+from govaios.formfill import add_answer, ok_value
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
@@ -330,7 +330,6 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if r is None or not r.done or panel.told is r:
                 return
             panel.told, app = r, panel.app.name
-            applyfiles.remove(home, applyfiles.ASK, applyfiles.REPLY)   # a killed run leaves its hand-off behind
             if r.code == 0 and r.stopped_reason is None:
                 tell(f"{app} finished: {(r.summary or 'done').split(': ', 1)[-1]}")
                 text = f"{panel.name}, the {app} flow is complete, thank you."
@@ -340,6 +339,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 text = f"{panel.name}, the {app} flow stopped: {why}."
             panel.voice = threading.Thread(target=panel.speak, args=(text,), daemon=True)
             panel.voice.start()
+            try:   # after the finish message: a killed run leaves its hand-off behind
+                applyfiles.remove(home, applyfiles.ASK, applyfiles.REPLY)
+            except OSError:
+                pass
 
     def signout_all():
         with sign_lock:
@@ -733,7 +736,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return ""
         rows = []
         for f in q[1]:
-            n, lab = escape("a:" + f["key"]), escape(f["label"][:300])
+            n, lab = escape("a:" + f["key"][:200]), escape(f["label"][:300])   # a longer key never matches: fill yourself
             if f["kind"] in ("select", "radio"):
                 ctl = "".join(f"<label><input type=radio name='{n}' value='{escape(o)}'> {escape(o[:200])}</label>"
                               for o in f["options"][:50])
@@ -742,7 +745,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             else:
                 ctl = f"<input name='{n}' maxlength=2000 autocomplete=off aria-label='{lab}'>"
             rows.append(f"<fieldset><legend>{lab}</legend>{ctl}"
-                        f"<label><input type=checkbox name='{escape('save:' + f['key'])}' value=1> Save to my bank</label>"
+                        f"<label><input type=checkbox name='{escape('save:' + f['key'][:200])}' value=1> Save to my bank</label>"
                         f"</fieldset>")
         return (f"<section class=appcard><h2>Job Apply needs your answers</h2>"
                 f"<p class=m>Leave one empty to fill it in Chrome yourself.</p>"
@@ -772,23 +775,25 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             answers = {}
             for fd in q[1]:
                 v = f.get("a:" + fd["key"], "")
+                if fd["kind"] == "textarea":
+                    v = v.replace("\r\n", "\n")   # browsers send a textarea's newlines as CRLF
                 if len(v) > 2000 or not ok_value(v, fd["kind"]) or (
                         v and fd["kind"] in ("select", "radio") and v not in fd["options"]):
                     tell(f"That answer can't be used: {fd['label'][:300]}.")
                     return "/"
                 answers[fd["key"]] = v
-            for fd in q[1]:
-                if answers[fd["key"]] and f.get("save:" + fd["key"]):
-                    try:
-                        key = add_answer(home / applyfiles.BANK, fd["label"], answers[fd["key"]])
-                    except BankError:
-                        tell("That answer couldn't be saved to your bank.")
-                        continue
-                    log.append("bank_updated", field=key)
             n = sum(1 for v in answers.values() if v)
-            audited("apply_answer", {"outcome": str(n)},
+            audited("apply_answer", {"outcome": str(n)},   # the reply first: the live run is waiting on it
                     lambda: applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "answers": answers}))
             tell(f"Sent {n} answer{'' if n == 1 else 's'} to Job Apply.")
+            for fd in q[1]:
+                v = answers[fd["key"]]
+                if v and f.get("save:" + fd["key"]):
+                    try:   # the reply is sent: nothing here may turn into a 500
+                        audited("bank_updated", {"field": fd["key"][:200]},
+                                lambda fd=fd, v=v: add_answer(home / applyfiles.BANK, fd["label"], v))
+                    except Exception:
+                        tell("That answer couldn't be saved to your bank.")
         return "/"
 
     def say(f):

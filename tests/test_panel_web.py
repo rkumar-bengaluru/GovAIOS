@@ -1351,7 +1351,7 @@ def test_answer_card_round_trip(cc):
     assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {
         "run": rid, "answers": {"#why": "Great team SECRETVAL", "label:visa:0": "No"}}
     b = _log(cc.home, "bank_updated")
-    assert len(b) == 1 and b[0]["field"] == "why_us_b"
+    assert len(b) == 1 and b[0]["field"] == "#why" and "outcome" not in b[0]
     assert _log(cc.home, "apply_answer")[0]["outcome"] == "2"
     assert "SECRETVAL" not in AuditLog(cc.home).path.read_text() and "SECRETVAL" not in "".join(cc.srv.panel.convo)
     bank = yaml.safe_load((cc.home / applyfiles.BANK).read_text())
@@ -1414,3 +1414,61 @@ def test_done_run_cleans_ask_and_reply(cc):
     cc.made[-1].done, cc.made[-1].stopped_reason = True, "killed"
     cc.srv.panel.tick()
     assert not (cc.home / applyfiles.ASK).exists() and not (cc.home / applyfiles.REPLY).exists()
+
+
+def test_textarea_crlf_becomes_newline_and_engine_accepts(cc):
+    from govaios import applyfiles
+    from govaios.formfill import ok_value
+    _asking(cc, ASKED)
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#why": "line1\r\nline2", "save:#why": "1"})
+    v = applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"]["#why"]
+    assert v == "line1\nline2" and ok_value(v, "textarea")
+    assert yaml.safe_load((cc.home / applyfiles.BANK).read_text())["answers"][0]["answer"] == "line1\nline2"
+
+
+def test_crlf_in_text_field_still_refused(cc):
+    from govaios import applyfiles
+    _asking(cc, [{"key": "#n", "label": "Name", "kind": "text", "options": []}])
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#n": "a\r\nb"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+
+
+def test_select_field_offers_options_and_checks_choice(cc):
+    from govaios import applyfiles
+    sel = [{"key": "#country", "label": "Country", "kind": "select", "options": ["India", "Other"]}]
+    _asking(cc, sel)
+    page = cc.get("/")[1]
+    assert "type=radio name='a:#country' value='India'" in page and "value='Select...'" not in page
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#country": "Select..."})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#country": "India"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"] == {"#country": "India"}
+
+
+def test_bank_save_failure_still_sends_reply(cc, monkeypatch):
+    from govaios import applyfiles
+    from govaios.audit import web
+    def boom(*a):
+        raise OSError("disk")
+    monkeypatch.setattr(web, "add_answer", boom)
+    _asking(cc, ASKED)
+    st, _, _ = cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#why": "SECRETVAL", "save:#why": "1"})
+    assert st == 303 or st == 302
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"]["#why"] == "SECRETVAL"
+    assert "GOV-AIOS -> That answer couldn't be saved to your bank." in _tells(cc)
+    assert _log(cc.home, "bank_updated")[-1]["outcome"] == "error"
+
+
+def test_done_run_finish_message_survives_cleanup_error(cc):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    (cc.home / applyfiles.ASK).unlink()
+    (cc.home / applyfiles.ASK).mkdir()   # unlink of a directory fails
+    cc.made[-1].done, cc.made[-1].code = True, 0
+    cc.srv.panel.tick()
+    assert _tells(cc)[-1].startswith("GOV-AIOS -> Job Apply finished")
+
+
+def test_long_field_key_capped_in_form(cc):
+    _asking(cc, [{"key": "#" + "k" * 5000, "label": "L", "kind": "text", "options": []}])
+    assert "k" * 300 not in cc.get("/")[1]
