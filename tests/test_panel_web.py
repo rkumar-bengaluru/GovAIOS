@@ -1109,10 +1109,14 @@ def test_claude_code_in_talk_and_audit(cc):
     log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="git status",
                decision="allow", approver="policy")
     log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="make <b>",
-               decision="deny", reason="not allowed")
+               decision="deny", reason="not allowed", approver="admin", auth="biometric")
+    log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="make --version",
+               decision="allow", approver="admin", auth="biometric")
     assert "Claude Code<span class=m>Governed" in cc.get("/")[1]
     idx = cc.get("/audit")[1]
     assert "Coding agents" in idx and "href='/audit/app/claude_code'" in idx
-    assert re.search(r"<td>Governed</td><td>2</td><td>1</td>", idx)
+    assert re.search(r"<td>Governed</td><td>3</td><td>1</td>", idx)
     page = cc.get("/audit/app/claude_code")[1]
     assert page.index("make &lt;b&gt;") < page.index("git status") and "<b>" not in page.split("</h1>", 1)[1]
+    assert "<td>GOV-AIOS policy</td>" in page and "<td>You, Touch ID</td>" in page
+    assert "<td>You declined (Touch ID)</td><td>not allowed</td>" in page

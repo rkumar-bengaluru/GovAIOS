@@ -176,6 +176,14 @@ def _runs(entries):
     return runs, odd
 
 
+def _decided_by(e):
+    """Who made a Claude Code decision, in words: the admin's own presence proof, or GOV-AIOS's rules alone."""
+    if e.get("approver") == "admin":
+        how = {"biometric": "Touch ID", "password": "Mac password"}.get(e.get("auth"), e.get("auth") or "no proof")
+        return f"You, {how}" if e.get("decision") == "allow" else f"You declined ({how})"
+    return "GOV-AIOS policy"
+
+
 def _td(v):
     return f"<td>{escape('' if v is None else str(v))}</td>"
 
@@ -419,9 +427,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return [e for e, _ in _entries(log) if e and e.get("kind") == "request" and e.get("executor") == claudecode.ID]
 
     def cc_page():
-        cols = ("ts", "action", "command", "target", "decision", "auth", "reason")
-        rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in cols) + "</tr>" for e in reversed(cc_checks()))
-        table = (f"<table><tr>{''.join(f'<th>{c}</th>' for c in ('time', *cols[1:]))}</tr>{rows}</table>" if rows
+        cols = ("ts", "action", "command", "target", "decision")
+        rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in cols) + _td(_decided_by(e)) + _td(e.get("reason"))
+                       + "</tr>" for e in reversed(cc_checks()))
+        heads = ("time", "tool", "command", "target", "decision", "decided by", "why")
+        table = (f"<table><tr>{''.join(f'<th>{c}</th>' for c in heads)}</tr>{rows}</table>" if rows
                  else "<p>No checks yet. Start Claude Code in a new Terminal session.</p>")
         return _page(f"<h1>Claude Code</h1>{banner()}<p class=m>Every tool call Claude Code sent to GOV-AIOS, newest "
                      f"first. Calls Claude Code's own managed rules refuse first never reach GOV-AIOS and are not "

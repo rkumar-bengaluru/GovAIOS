@@ -93,7 +93,7 @@ def _decide(payload, home: Path, managed: Path):
     asked = how is not None
     AuditLog(home).append("request", flow=ID, flow_hash=digest, executor=ID, action=tool, target=target,
                           command=cmd, decision=verdict, approver="admin" if asked else "policy",
-                          channel="touch_id" if asked else None, auth=how)
+                          channel="touch_id" if asked else None, auth=how, reason=reason)
     if remember:   # only once the approval is on record
         approvals.approve_destination(ID, remember)
     return verdict, reason
