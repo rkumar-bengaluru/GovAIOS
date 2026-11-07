@@ -24,11 +24,11 @@ CSP = "default-src 'none'; style-src 'unsafe-inline'"
 class FakeLaunch:
     gate = None   # a test sets an Event to hold __init__ (the run start) open
 
-    def __init__(self, flow_path, ticket):
+    def __init__(self, flow_path, ticket, inputs=None):
         if self.gate:
             self.entered.set()
             self.gate.wait(5)
-        self.flow_path, self.ticket = flow_path, ticket
+        self.flow_path, self.ticket, self.inputs = flow_path, ticket, inputs
         self.done, self.started, self.stopped, self.stops = False, False, None, []
         self.code, self.summary, self.stopped_reason = None, None, None
         self._lines = ["step 3 <script>alert(1)</script>"]
@@ -1246,3 +1246,62 @@ def test_agents_are_independent(cc):
     assert "Set up" in cc.get("/codex")[1] or "Approve and install" in cc.get("/codex")[1]
     cc.say("/codex")
     assert "OpenAI Codex is not governed yet" in _tells(cc)[-1]
+
+
+LINK = "https://himalayas.app/companies/acme/jobs/senior-engineer"
+
+
+def _approve_job_apply(P):
+    ja = next(a for a in list_apps(P.flows, P.home) if a.name == "Job Apply")
+    Approvals(P.home / "approvals.json").approve_flow(ja.id, ja.digest)
+    return ja
+
+
+def test_job_apply_card_has_input(cc):
+    _approve_job_apply(cc)
+    cc.say("/job-apply")
+    page = cc.get("/")[1]
+    assert "Himalayas job link" in page and "name='in:job_url'" in page and "name=text value='/job-apply'" in page
+    assert "pattern='https://himalayas\\.app/companies/[a-z0-9-]+/jobs/[a-z0-9-]+/?([?#].*)?'" in page
+
+
+def test_job_apply_starts_with_link_from_card_and_from_words(cc):
+    ja = _approve_job_apply(cc)
+    _open(cc)
+    cc.post("/say", text="/job-apply", **{"in:job_url": LINK})
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}]
+    assert cc.made[0].started and cc.made[0].flow_path == ja.path
+    cc.made[0].done = True
+    cc.say(f"/job-apply {LINK}")
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}] * 2
+
+
+def test_job_apply_strips_tracking_and_slash(cc):
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.say(f"/job-apply {LINK}/?utm_source=x#top")
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}]
+
+
+def test_job_apply_rejects_bad_link(cc):
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.post("/say", text="/job-apply", **{"in:job_url": "https://evil.example/x"})
+    cc.say("/job-apply not a link")
+    cc.say("run Job Apply")
+    assert cc.made == [] and _tells(cc)[-3:] == ["GOV-AIOS -> That isn't a valid Himalayas job link."] * 3
+    assert "evil.example" not in "".join(_tells(cc))
+
+
+def test_job_apply_needs_session(cc):
+    _approve_job_apply(cc)
+    cc.say(f"/job-apply {LINK}")
+    assert cc.made == [] and "authenticator" in _tells(cc)[-1]
+
+
+def test_apps_without_inputs_unchanged(cc):
+    _open(cc)
+    cc.say("/joblens")
+    assert "name='in:" not in cc.get("/")[1]
+    cc.say("/joblens extra words")
+    assert len(cc.made) == 1 and cc.made[0].inputs is None

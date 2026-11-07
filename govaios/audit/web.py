@@ -528,6 +528,12 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def by_slash(name):
         return next((ag for ag in agents.AGENTS.values() if ag.slash == name), None)
 
+    def flow_inputs(path):
+        try:
+            return yaml.safe_load(Path(path).read_text())["workflow"].get("inputs") or {}
+        except Exception:
+            return {}
+
     def show_card(name):
         ag = by_slash(name)
         with panel.lock:
@@ -558,6 +564,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             b = {}
         uses = (f"<p class=m>Chrome profile {escape(str(b.get('profile_directory')))}, "
                 f"account {escape(str(b.get('account')))}</p>" if b.get("account") else "")
+        ins = flow_inputs(a.path)
+        if ins:   # one field per input; the server check is the authority, the pattern only helps the browser
+            fields = "".join(f"<label>{escape(str(d.get('label', k)))} <input name='{escape('in:' + k)}' required "
+                             f"pattern='{escape(str(d['pattern']) + '/?([?#].*)?')}'></label>" for k, d in ins.items())
+            act = (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='/{escape(slug(a.name))}'>"
+                   f"{fields}<button class=go>Run {escape(a.name)}</button></form>" if a.approved
+                   else "<p class=m>Draft: approve it first.</p>")
+            return f"<section class=appcard><h2>{escape(a.name)}</h2>{uses}{act}</section>"
         act = (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='run {escape(a.name)}'>"
                f"<button class=go>Run {escape(a.name)}</button></form>" if a.approved
                else "<p class=m>Draft: approve it first.</p>")
@@ -708,6 +722,17 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             for fn in later:
                 fn()
 
+    def invalid_input(hit, vals):
+        """Strip and check the run-time inputs in place; the label of the first bad or missing one, else None."""
+        for k, d in flow_inputs(hit.path).items():
+            v = vals.get(k, "")
+            if str(d["pattern"]).startswith("https://"):   # links only today: drop ?query, #fragment and one trailing "/"
+                v = re.split(r"[?#]", v, maxsplit=1)[0].removesuffix("/")
+            if not re.fullmatch(str(d["pattern"]), v):
+                return d.get("label", k)
+            vals[k] = v
+        return None
+
     def command(f, later):
         text = " ".join(f.get("text", "").split())[:200]
         if not text:
@@ -715,16 +740,24 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         code = re.fullmatch(r"[0-9]{6}", text) is not None
         # never a code: any run of 6 digits, spaces allowed between them, is masked
         panel.convo.append("Admin -> " + re.sub(r"[0-9](?: ?[0-9]){5}", "••••••", text))
+        vals = {}   # input values typed for an app that takes them
         sl = re.fullmatch(r"/([A-Za-z0-9_-]{0,64})(?: (.+))?", text)
         if sl:   # a slash command: alone it shows the app's card; with words it runs like "run <app> <words>"
             name, rest = sl[1].lower(), sl[2]
             if name in ("", "help"):
                 tell("Commands: " + ", ".join(slashes()) + ". Type one to see what it needs.")
                 return "/"
-            if rest is None:
+            form = {k[3:]: " ".join(v.split()) for k, v in f.items() if k.startswith("in:")}
+            if rest is None and not form:
                 show_card(name)
                 return "/"
-            text = f"run {name} {rest}" if by_slash(name) else f"run {name.replace('-', ' ')}"   # apps take no words yet
+            app = next((a for a in apps() if slug(a.name) == name or a.id == name), None)
+            ins = flow_inputs(app.path) if app and not by_slash(name) else {}
+            if ins:
+                vals = form or ({next(iter(ins)): rest} if len(ins) == 1 else {})
+                text = f"run {name.replace('-', ' ')}"
+            else:
+                text = f"run {name} {rest}" if by_slash(name) else f"run {name.replace('-', ' ')}"   # apps without inputs take no words yet
         if not panel.session.active():
             if panel.session.id:
                 end_session("expired", later)
@@ -755,8 +788,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         kind, hit = match(text, al := apps())
         if kind == "run" and live():
             tell(f"{panel.app.name} is still running.")
+        elif kind == "run" and (bad := invalid_input(hit, vals)):
+            tell(f"That isn't a valid {bad}.")
         elif kind == "run":
-            r = launcher(hit.path, tickets.create(home, hit.id, hit.digest, panel.session.id))
+            r = launcher(hit.path, tickets.create(home, hit.id, hit.digest, panel.session.id, vals or None), vals or None)
             r.start()
             panel.run, panel.app, panel.card = r, hit, None
             tell(f"Starting {hit.name}.")
