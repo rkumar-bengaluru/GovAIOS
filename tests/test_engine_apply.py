@@ -267,7 +267,7 @@ def test_select_menu_closed_before_enter_escapes(tmp_path):
 
 def test_fill_refuses_control_characters(tmp_path):
     d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period")))
-    r, _, err = run(tmp_path, d, rows=())
+    r, _, err = run(tmp_path, d, rows=(), run_id=None)   # a CLI run: the unmatched field isn't asked
     [f] = engine.read_form(r._form()[1])
     assert err is None and r.fill(f, "a\nb", "admin") is False
     assert not [c for c in d.calls if c[0] in ("type_into", "click")] and "notice" not in d.values
@@ -316,3 +316,92 @@ def test_fill_denied_when_not_permitted(tmp_path):
     d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period")))
     _, e, err = run(tmp_path, d, allow="")
     assert str(err).startswith("denied fill_field") and not d.values
+
+
+# ----- Task 8: asking the admin -----
+import threading  # noqa: E402
+
+from govaios import applyfiles  # noqa: E402
+
+ASKED = ", fill_field, ask_admin"
+
+
+def ask_form(d):
+    opts = [N("native:AXMenuItem", o) for o in ("Select...", "Yes", "No")]
+    return form(text_field(d, "why", "Why us"), N("text", "Sponsor"),
+                N("popup_button", "", value=d.values.get("sel", "Select..."), dom_id="sel", children=opts))
+
+
+def answer_when_asked(tmp_path, answers, seen):
+    def go():
+        for _ in range(2000):
+            ask = applyfiles.read_json(tmp_path, applyfiles.ASK)
+            if ask:
+                seen.append(ask)
+                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": "other", "answers": {}})   # another run's
+                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "answers": answers(ask)})
+                return
+            threading.Event().wait(0.005)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    return t
+
+
+def test_ask_round_trip(tmp_path, capsys):
+    d = FormDesk(ask_form)
+    seen = []
+    t = answer_when_asked(tmp_path, lambda a: {f["key"]: SECRET if f["kind"] == "text" else "" for f in a["fields"]}, seen)
+    _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
+    t.join(1)
+    assert err is None and d.values["why"] == SECRET
+    [ask] = seen
+    assert ask["run"] == "r1" and [(f["label"], f["kind"], f["options"]) for f in ask["fields"]] == [
+        ("Why us", "text", []), ("Sponsor", "select", ["Select...", "Yes", "No"])]
+    [f] = fills(e)
+    assert f["source"] == "admin" and f["outcome"] == "done"
+    assert d.calls.index("raise_pinned") < d.calls.index(("type_into", "why"))
+    assert result(tmp_path) == {"run": "r1", "filled": 1, "total": 2, "yourself": ["Sponsor"], "check": []}
+    assert not (tmp_path / "apply" / "ask.json").exists() and not (tmp_path / "apply" / "reply.json").exists()
+    out = capsys.readouterr()
+    assert SECRET not in (tmp_path / "audit.jsonl").read_text() + out.out + out.err + json.dumps(result(tmp_path))
+    assert any(x.get("action") == "ask_admin" and x["decision"] == "allow" for x in e)
+
+
+def test_ask_timeout_stops_and_cleans(tmp_path, monkeypatch):
+    clock = iter(range(0, 10**6, 60))
+    monkeypatch.setattr(engine.time, "time", lambda: next(clock))
+    d = FormDesk(lambda d: form(text_field(d, "why", "Why us")))
+    _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
+    assert str(err) == "no answer from admin" and not d.values and "raise_pinned" not in d.calls
+    assert not (tmp_path / "apply" / "ask.json").exists() and not (tmp_path / "apply" / "reply.json").exists()
+
+
+@pytest.mark.parametrize("label, value", [
+    ("Nope", "x"), ("Sponsor", "Maybe"), ("Why us", "a\tb"), ("Why us", "x" * 2001), ("Why us", 3)])
+def test_ask_bad_reply_stops(tmp_path, label, value):
+    d = FormDesk(ask_form)
+    keys = lambda a: {f["label"]: f["key"] for f in a["fields"]}   # noqa: E731
+    t = answer_when_asked(tmp_path, lambda a: {keys(a).get(label, label): value}, [])
+    _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
+    t.join(1)
+    assert str(err) == "bad reply" and not d.values and "raise_pinned" not in d.calls
+    assert not (tmp_path / "apply" / "reply.json").exists()
+
+
+def test_cli_run_never_asks(tmp_path):
+    d = FormDesk(lambda d: form(text_field(d, "why", "Why us")))
+    _, e, err = run(tmp_path, d, rows=(), allow=ASKED, run_id=None)
+    assert err is None and not d.values and "raise_pinned" not in d.calls
+    assert not any(x.get("action") == "ask_admin" for x in e)
+    assert not (tmp_path / "apply" / "ask.json").exists()
+
+
+def test_emergency_stop_while_waiting(tmp_path, monkeypatch):
+    def sleep(s):
+        assert (tmp_path / "apply" / "ask.json").exists()
+        (tmp_path / "STOPPED").touch()
+    monkeypatch.setattr(engine.time, "sleep", sleep)
+    d = FormDesk(lambda d: form(text_field(d, "why", "Why us")))
+    _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
+    assert str(err) == "emergency stop" and not d.values
+    assert not (tmp_path / "apply" / "ask.json").exists()

@@ -15,7 +15,7 @@ import yaml
 
 from . import auth, runstate
 from .agents import user_home
-from .applyfiles import BANK, RESULT, write_json
+from .applyfiles import ASK, BANK, REPLY, RESULT, read_json, remove, write_json
 from .formfill import (ASKABLE, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
                        read_form, restricted)
 from .audit.log import AuditLog, url_for_audit
@@ -593,10 +593,46 @@ class Runner:
         self.write_result()
 
     def ask_pending(self):
-        # shortcut: no admin ask yet, pending fields go to the admin's own list; Task 8 replaces this.
+        """Hand the unmatched fields to the admin via the panel (ask.json/reply.json), then type the answers in.
+        A CLI run (no ticket) never asks. Values are never logged."""
         a = self.ctx["apply"]
-        a["yourself"] += [f.label for f in a["pending"]]
-        a["pending"] = []
+        pend, a["pending"] = a["pending"], []
+        if not pend or self.run_id is None:
+            a["yourself"] += [f.label for f in pend]
+            return
+        self.gate("ask_admin", "read")
+        asked = {f.key: f for f in pend}
+        try:
+            write_json(self.home, ASK, {"run": self.run_id, "fields": [
+                {"key": f.key, "label": f.label, "kind": f.kind,
+                 "options": list(f.options) if f.kind in ("select", "radio") else []} for f in pend]})
+            deadline = time.time() + ASK_TIMEOUT_S
+            while True:
+                reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet
+                if reply and reply.get("run") == self.run_id:
+                    break
+                if runstate.stopped(self.home):
+                    raise Stop("emergency stop")
+                if auth.screen_locked():
+                    raise Stop("screen_locked")
+                if time.time() > deadline:
+                    raise Stop("no answer from admin")
+                time.sleep(1)
+        finally:
+            remove(self.home, ASK, REPLY)
+        answers = reply.get("answers")
+        if not isinstance(answers, dict) or not all(
+                k in asked and isinstance(v, str) and len(v) <= 2000 and ok_value(v, asked[k].kind)
+                and (not v or asked[k].kind not in ("select", "radio") or v in asked[k].options)
+                for k, v in answers.items()):
+            raise Stop("bad reply")
+        self._act("raise_pinned", self.d.raise_pinned)
+        for f in pend:
+            v = answers.get(f.key, "")
+            if v:
+                a["filled"] += self.fill(f, v, "admin")
+            else:
+                a["yourself"].append(f.label)
 
     def write_result(self):
         """Counts and labels only, never values."""
