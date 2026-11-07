@@ -24,7 +24,7 @@ KINDS = {"flow_start", "flow_approval", "request", "action", "verify", "stop", "
          "totp_setup", "totp_reset", "session_open", "session_end", "setting"}
 FIELDS = {"flow", "flow_version", "flow_hash", "executor", "step", "action", "risk", "target",
           "destination", "decision", "approver", "channel", "outcome", "reason", "auth", "command",
-          "file_hash", "response_code", "listing_id", "session", "field"}
+          "file_hash", "response_code", "listing_id", "session", "field", "shown"}
 ZERO = "0" * 64
 
 

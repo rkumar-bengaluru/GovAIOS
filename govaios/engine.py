@@ -111,6 +111,7 @@ class Runner:
             raise Stop(f"bad deliver block: {e}") from None
         self.d = desktop
         self.launched = False
+        self.shown = None   # digest of the last approval text shown (set by ask)
         self.report_path = None
         self.app = self.flow["browser"]["application"]
         self.approvals = Approvals(self.home / "approvals.json")
@@ -140,6 +141,8 @@ class Runner:
     def ask(self, question, reason):
         """Authenticated admin prompt; afterwards (any answer) the flow's app is brought back before any further input."""
         ok, how = auth.approve(question, reason, self.home)
+        # audited with the answer: what exactly was shown ("none": the Touch ID prompt never appeared)
+        self.shown = auth.shown_digest(question, None if how == "none" else reason)
         if self.launched:
             self._act("activate", self.d.activate, self.app)
         return ok, how
@@ -165,7 +168,8 @@ class Runner:
             ok, how = self.ask(q + " Approve?", f"{self.flow['id']}: {action} {origin(destination) if destination else ''}".strip())
             verdict, remember = ("allow", bool(destination)) if ok else ("deny", False)
         self._audit("request", action=action, risk=risk, target=target, destination=dest, decision=verdict,
-                    approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how)
+                    approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how,
+                    shown=self.shown if asked else None)
         if remember:   # only once the approval is on record
             self.approvals.approve_destination(self.flow["id"], origin(destination))
         if verdict != "allow":
@@ -178,7 +182,7 @@ class Runner:
         f = self.flow
         ok, how = self.ask(approval_question(f, self.deliver), f"approve flow {f['id']}")
         self._audit("flow_approval", flow_hash=digest, decision="allow" if ok else "deny",
-                    approver="admin", channel="touch_id", auth=how)
+                    approver="admin", channel="touch_id", auth=how, shown=self.shown)
         if not ok:
             raise Stop("flow approval busy" if how == "busy" else "admin did not approve the flow")
         self.approvals.approve_flow(f["id"], digest)

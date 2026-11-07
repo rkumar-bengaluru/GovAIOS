@@ -6,6 +6,8 @@ A proof takes at most the 60 s deadline plus about 3 s (2 s lock wait, 2 s post-
 auth values: biometric, device_owner, failed, none, busy.
 """
 import fcntl
+import hashlib
+import json
 import os
 import subprocess
 import threading
@@ -148,6 +150,12 @@ def _gate(question, reason: str, home: Path, channel: str) -> tuple[bool, str]:
         if cancelled():
             return False, "none"
         return auth in ("biometric", "device_owner"), auth
+
+
+def shown_digest(question, reason: str) -> str:
+    """sha256 of exactly what the admin was shown: the dialog's question and the Touch ID reason (None: not shown).
+    A fingerprint for matching, not a secret: a short reason (e.g. a 4-letter sign-in word) can be guessed from it."""
+    return hashlib.sha256(json.dumps([question, reason]).encode()).hexdigest()
 
 
 def prove(reason: str, home: Path, channel: str = "touch_id") -> tuple[bool, str]:

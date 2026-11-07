@@ -43,7 +43,7 @@ def no_real_touch_id(request, monkeypatch):
         monkeypatch.setattr(auth, "approve", _no_touch_id)
 
 
-WORD = re.compile(r"<b class=word>([ABCDEFGHJKLMNPQRSTUVWXYZ]{4})</b>")
+WORD = re.compile(r"sign in to the GOV-AIOS panel, code ([ABCDEFGHJKLMNPQRSTUVWXYZ]{4})$")   # in the Touch ID reason only
 
 
 def _raw(port, method, path, cookie="", body=None, headers=None):
@@ -58,27 +58,46 @@ def _raw(port, method, path, cookie="", body=None, headers=None):
 
 
 def _signed_out(port, cookie=""):
-    """GET / signed out: (page body, pre token from the form, pre cookie value, shown code word)."""
+    """GET / signed out: (page body, pre token from the form, pre cookie value)."""
     s, body, r = _raw(port, "GET", "/", cookie)
     pre = re.search(r"name=pre value='([^']+)'", body)[1]
-    return body, pre, SimpleCookie(r.getheader("Set-Cookie"))["pre"].value, WORD.search(body)[1]
+    return body, pre, SimpleCookie(r.getheader("Set-Cookie"))["pre"].value
 
 
 def _signin_post(port, cookie_pre, field_pre, headers=None):
     return _raw(port, "POST", "/signin", f"pre={cookie_pre}", {"pre": field_pre}, headers)
 
 
+def _code_post(port, t, word, field_t=None, headers=None):
+    """POST /signin/code with the t cookie from a Touch ID-approved /signin and the typed word."""
+    return _raw(port, "POST", "/signin/code", f"t={t}" if t else "", {"t": t if field_t is None else field_t, "word": word}, headers)
+
+
+def _t(r):
+    """The t cookie a Touch ID-approved /signin set, else None."""
+    c = r.getheader("Set-Cookie")
+    return SimpleCookie(c)["t"].value if c and c.startswith("t=") else None
+
+
+def _s(r):
+    """The s cookie a finished sign-in set, else None."""
+    c = SimpleCookie(r.getheader("Set-Cookie") or "")
+    return c["s"].value if "s" in c else None
+
+
 @pytest.fixture
 def ui(monkeypatch):
     """Panel page helpers. ui.signin(srv): GET /, then POST /signin with its pre pair while Touch ID is faked
-    as approved (only for that one POST); returns the s cookie."""
+    as approved (only for that one POST), then POST /signin/code with the word from that prompt; returns the s cookie."""
     from govaios import auth
 
     def signin(srv):
         port = srv.server_address[1]
-        _, pre, ck, _ = _signed_out(port)
+        _, pre, ck = _signed_out(port)
+        seen = []
         with monkeypatch.context() as m:
-            m.setattr(auth, "prove", lambda r, h, **k: (True, "biometric"))
+            m.setattr(auth, "prove", lambda r, h, **k: (seen.append(r), (True, "biometric"))[1])
             r = _signin_post(port, ck, pre)[2]
-        return SimpleCookie(r.getheader("Set-Cookie"))["s"].value
-    return SimpleNamespace(raw=_raw, signed_out=_signed_out, signin_post=_signin_post, signin=signin, WORD=WORD)
+        return _s(_code_post(port, _t(r), WORD.search(seen[0])[1])[2])
+    return SimpleNamespace(raw=_raw, signed_out=_signed_out, signin_post=_signin_post, signin=signin, WORD=WORD,
+                           code_post=_code_post, t=_t, s=_s)

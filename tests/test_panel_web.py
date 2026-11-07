@@ -159,6 +159,18 @@ def test_code_opens_session_then_run(panel):
     assert P.srv.panel.run is L and P.srv.panel.session.active()
 
 
+def test_code_field_only_while_no_session(panel):
+    P = panel
+    assert "class=otp" not in P.get("/")[1]   # no authenticator set up yet
+    secret = _secret(P)
+    body = P.get("/")[1]
+    assert "<label for=otp>Authenticator code</label>" in body and "autocomplete=one-time-code" in body
+    assert "inputmode=numeric" in body and "maxlength=6" in body and body.count("autofocus") == 1
+    P.say(code_at(secret, time.time()))   # the field posts to /say like the command box
+    body = P.get("/")[1]
+    assert "Session open: 30 min left" in body and "id=otp" not in body
+
+
 def test_no_session_asks_for_code(panel):
     P = panel
     _secret(P)
@@ -545,10 +557,16 @@ def _port(P):
     return P.srv.server_address[1]
 
 
-def test_signed_out_page_shows_code_and_button(panel):
+def _finish(P, r, word=None):
+    """Type the code word of the last Touch ID prompt (or `word`) for the t cookie r set: the response."""
+    return P.ui.code_post(_port(P), P.ui.t(r), word if word is not None else P.ui.WORD.search(P.asked[-1])[1])[2]
+
+
+def test_signed_out_page_has_button_but_no_code(panel):
     P = panel
     s, body, r = P.ui.raw(_port(P), "GET", "/")
-    assert s == 200 and "Sign in with Touch ID" in body and "Locked" in body and P.ui.WORD.search(body)
+    assert s == 200 and "Sign in with Touch ID" in body and "Locked" in body and "class=word" not in body
+    assert "you type it here next" in body and "name=word" not in body
     ck = r.getheader("Set-Cookie")
     assert ck.startswith("pre=") and "HttpOnly" in ck and "SameSite=Strict" in ck and "Max-Age=120" in ck
     assert re.search(r"name=pre value='([^']+)'", body)[1] == SimpleCookie(ck)["pre"].value
@@ -556,27 +574,87 @@ def test_signed_out_page_shows_code_and_button(panel):
     assert "Type a command" not in body and "JobLens" not in body   # nothing of the panel while signed out
 
 
-def test_signin_reason_has_the_page_code(panel):
+def test_signin_needs_the_code_typed_from_the_prompt(panel):
+    from govaios.auth import shown_digest
     P = panel
-    _, pre, ck, word = P.ui.signed_out(_port(P))
-    P.ui.signed_out(_port(P))   # another page's code does not leak into this prompt
-    s, _, r = P.ui.signin_post(_port(P), ck, pre)
+    port = _port(P)
+    n = len(_log(P.home, "ui_login"))   # the fixture's own sign-in
+    _, pre, ck = P.ui.signed_out(port)
+    s, _, r = P.ui.signin_post(port, ck, pre)
+    assert s == 303 and r.getheader("Location") == "/" and P.ui.s(r) is None   # Touch ID alone is not a sign-in
+    t = P.ui.t(r)
+    assert t and "HttpOnly" in r.getheader("Set-Cookie") and "SameSite=Strict" in r.getheader("Set-Cookie")
+    word = P.ui.WORD.search(P.asked[0])[1]
+    s, body, _ = P.ui.raw(port, "GET", "/", f"t={t}")
+    assert s == 200 and "Type the 4-letter code" in body and "name=word" in body and word not in body
+    assert len(_log(P.home, "ui_login")) == n   # audited once, at the typed code
+    s, _, r = P.ui.code_post(port, t, f" {word[:2].lower()} {word[2:]} ")   # case and spaces do not matter
     assert s == 303 and r.getheader("Location") == "/"
-    assert P.asked == [f"sign in to the GOV-AIOS panel, code {word}"]
-    sid = SimpleCookie(r.getheader("Set-Cookie"))["s"].value
+    sid = P.ui.s(r)
     assert "HttpOnly" in r.getheader("Set-Cookie") and "SameSite=Strict" in r.getheader("Set-Cookie")
+    assert "t=;" in r.getheader("Set-Cookie") or any(h == "t=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+                                                    for h in r.headers.get_all("Set-Cookie"))
     assert "Type a command" in P.req("/", cookie=sid)[1]
     e = _log(P.home, "ui_login")[-1]
     assert (e["decision"], e["approver"], e["channel"], e["auth"]) == ("allow", "admin", "touch_id", "biometric")
-    s, _, r = P.ui.signin_post(_port(P), ck, pre)   # a pre pair is spent by its one prompt
+    assert e["shown"] == shown_digest(None, f"sign in to the GOV-AIOS panel, code {word}")
+    assert P.ui.s(P.ui.code_post(port, t, word)[2]) is None   # a t token is spent by its one try
+    s, _, r = P.ui.signin_post(port, ck, pre)   # a pre pair is spent by its one prompt
     assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None) and len(P.asked) == 1
+
+
+def test_signin_wrong_code_refused_audited_and_paused(panel):
+    P = panel
+    port = _port(P)
+    _, pre, ck = P.ui.signed_out(port)
+    r = P.ui.signin_post(port, ck, pre)[2]
+    t, word = P.ui.t(r), P.ui.WORD.search(P.asked[0])[1]
+    wrong = "".join("B" if c == "A" else "A" for c in word)
+    s, _, r = P.ui.code_post(port, t, wrong)
+    assert (s, r.getheader("Location"), P.ui.s(r)) == (303, "/?m=code", None)
+    e = _log(P.home, "ui_login")[-1]
+    assert (e["decision"], e["auth"]) == ("deny", "wrong_code") and word not in json.dumps(e) and wrong not in json.dumps(e)
+    body = P.ui.raw(port, "GET", "/?m=code")[1]
+    assert "That code did not match" in body and "Sign-in paused. Try again in 10 s." in body
+    assert P.ui.s(P.ui.code_post(port, t, word)[2]) is None   # one try: the right word after a wrong one is too late
+    _, pre, ck = P.ui.signed_out(port)
+    assert P.ui.signin_post(port, ck, pre)[2].getheader("Location") == "/" and len(P.asked) == 1   # paused
+
+
+def test_signin_code_forged_or_stale(panel):
+    P = panel
+    port = _port(P)
+    _, pre, ck = P.ui.signed_out(port)
+    r = P.ui.signin_post(port, ck, pre)[2]
+    t, word = P.ui.t(r), P.ui.WORD.search(P.asked[0])[1]
+    n = len(_log(P.home, "ui_login"))
+    assert P.ui.code_post(port, t, word, headers={"Origin": "http://evil"})[0] == 403
+    for resp in (P.ui.code_post(port, None, word, field_t=t)[2],        # no t cookie
+                 P.ui.code_post(port, t, word, field_t="other")[2],     # mismatched field
+                 P.ui.code_post(port, "made-up", word)[2]):             # never issued
+        assert (resp.status, resp.getheader("Location"), P.ui.s(resp)) == (303, "/", None)
+    assert len(_log(P.home, "ui_login")) == n
+    P.wall[0] += 121   # Touch ID was 2 minutes ago: start again
+    assert P.ui.s(P.ui.code_post(port, t, word)[2]) is None
+
+
+def test_signin_lock_before_typing_voids_the_prompt(panel, monkeypatch):
+    from govaios import auth
+    P = panel
+    port = _port(P)
+    _, pre, ck = P.ui.signed_out(port)
+    r = P.ui.signin_post(port, ck, pre)[2]
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    P.srv.panel.tick()
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert P.ui.s(_finish(P, r)) is None
 
 
 def test_signin_forged(panel):
     P = panel
     port = _port(P)
-    _, pre, ck, _ = P.ui.signed_out(port)
-    _, pre2, ck2, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
+    _, pre2, ck2 = P.ui.signed_out(port)
     n = len(_log(P.home, "ui_login"))
     for r in (P.ui.raw(port, "POST", "/signin", "", {"pre": pre})[2],                       # no pre cookie
               P.ui.signin_post(port, ck2, pre)[2]):                                          # mismatched
@@ -588,14 +666,14 @@ def test_signin_forged(panel):
     assert P.ui.signin_post(port, ck, pre, {"Host": "evil.example"})[0] == 403
     assert P.asked == [] and len(_log(P.home, "ui_login")) == n
     s, _, r = P.ui.signin_post(port, ck2, pre2, {"Origin": f"http://127.0.0.1:{port}"})   # the page's own form
-    assert s == 303 and "s=" in r.getheader("Set-Cookie")
+    assert s == 303 and P.ui.t(r)
 
 
 def test_signin_stale_pre_gets_fresh_page(panel):
     P = panel
-    _, pre, ck, _ = P.ui.signed_out(_port(P))
+    _, pre, ck = P.ui.signed_out(_port(P))
     P.wall[0] += 100
-    _, pre2, ck2, _ = P.ui.signed_out(_port(P))
+    _, pre2, ck2 = P.ui.signed_out(_port(P))
     P.wall[0] += 121
     s, _, r = P.ui.signin_post(_port(P), ck, pre)
     assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None) and P.asked == []
@@ -616,8 +694,8 @@ def test_signin_one_prompt_at_a_time(panel, monkeypatch):
         release.wait(5)
         return True, "biometric"
     monkeypatch.setattr(auth, "prove", prove)
-    _, pre, ck, _ = P.ui.signed_out(port)
-    _, pre2, ck2, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
+    _, pre2, ck2 = P.ui.signed_out(port)
     got = []
     t = threading.Thread(target=lambda: got.append(P.ui.signin_post(port, ck, pre)))
     t.start()
@@ -627,36 +705,36 @@ def test_signin_one_prompt_at_a_time(panel, monkeypatch):
     assert "Another sign-in is waiting for Touch ID." in P.ui.raw(port, "GET", "/?m=busy")[1]
     release.set()
     t.join(5)
-    assert got[0][0] == 303 and "s=" in got[0][2].getheader("Set-Cookie") and len(calls) == 1
+    assert got[0][0] == 303 and P.ui.t(got[0][2]) and len(calls) == 1
 
 
 def test_signin_pause_after_refusal(panel):
     P = panel
     port = _port(P)
     P.answers["prove"] = False
-    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
     s, _, r = P.ui.signin_post(port, ck, pre)
     assert s == 303 and r.getheader("Location") == "/?m=no" and r.getheader("Set-Cookie") is None
     e = _log(P.home, "ui_login")[-1]
     assert (e["decision"], e["channel"], e["auth"]) == ("deny", "touch_id", "biometric")
     P.answers["prove"] = True
     P.wall[0] += 9.9
-    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
     assert P.ui.signin_post(port, ck, pre)[2].getheader("Location") == "/" and len(P.asked) == 1
     assert "Sign-in paused. Try again in 1 s." in P.ui.raw(port, "GET", "/")[1]
     P.wall[0] += 0.1
-    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
     r = P.ui.signin_post(port, ck, pre)[2]
-    assert len(P.asked) == 2 and "s=" in r.getheader("Set-Cookie")
+    assert len(P.asked) == 2 and P.ui.t(r)
 
 
 def test_signed_out_get_reuses_valid_pre(panel):
     P = panel
     port = _port(P)
-    _, pre, ck, word = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
     s, body, r = P.ui.raw(port, "GET", "/", f"pre={ck}")
     assert (s, r.getheader("Set-Cookie")) == (200, None)
-    assert re.search(r"name=pre value='([^']+)'", body)[1] == pre and P.ui.WORD.search(body)[1] == word
+    assert re.search(r"name=pre value='([^']+)'", body)[1] == pre
     P.wall[0] += 121   # expired: a fresh pair
     assert P.ui.raw(port, "GET", "/", f"pre={ck}")[2].getheader("Set-Cookie").startswith("pre=")
 
@@ -681,7 +759,7 @@ def test_signin_backoff_doubles_caps_and_resets(panel):
     P.answers["prove"] = False
 
     def attempt():
-        _, pre, ck, _ = P.ui.signed_out(port)
+        _, pre, ck = P.ui.signed_out(port)
         return P.ui.signin_post(port, ck, pre)[2].getheader("Location")
     for n, secs in enumerate((10, 20, 40, 80, 160, 300, 300), 1):
         assert attempt() == "/?m=no"
@@ -691,7 +769,8 @@ def test_signin_backoff_doubles_caps_and_resets(panel):
         assert f"Try again in 1 s." in P.ui.raw(port, "GET", "/")[1]
         P.wall[0] += 0.5
     P.answers["prove"] = True
-    assert "s=" in (lambda: (lambda t: P.ui.signin_post(port, t[2], t[1])[2])(P.ui.signed_out(port)))().getheader("Set-Cookie")
+    _, pre, ck = P.ui.signed_out(port)
+    assert P.ui.s(_finish(P, P.ui.signin_post(port, ck, pre)[2]))   # a finished sign-in resets the count
     P.answers["prove"] = False
     assert attempt() == "/?m=no"
     P.wall[0] += 9.5
@@ -703,7 +782,7 @@ def test_signin_backoff_doubles_caps_and_resets(panel):
 def test_paused_page_shows_whole_seconds_rounded_up(panel):
     P = panel
     P.answers["prove"] = False
-    _, pre, ck, _ = P.ui.signed_out(_port(P))
+    _, pre, ck = P.ui.signed_out(_port(P))
     P.ui.signin_post(_port(P), ck, pre)
     P.wall[0] += 3.2
     assert "Sign-in paused. Try again in 7 s." in P.ui.raw(_port(P), "GET", "/")[1]
@@ -761,14 +840,14 @@ def test_signin_no_prompt_shown_is_busy_not_refused(panel, monkeypatch, how):
     calls = []
     monkeypatch.setattr(auth, "prove", lambda r, h, **k: (calls.append(r), (False, how))[1])
     n = len(_log(P.home, "ui_login"))
-    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
     s, _, r = P.ui.signin_post(port, ck, pre)
     assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/?m=busy", None)
     assert len(_log(P.home, "ui_login")) == n
     monkeypatch.setattr(auth, "prove", lambda r, h, **k: (calls.append(r), (True, "biometric"))[1])
-    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
     r = P.ui.signin_post(port, ck, pre)[2]   # at once: no 10 s pause
-    assert len(calls) == 2 and "s=" in r.getheader("Set-Cookie")
+    assert len(calls) == 2 and P.ui.t(r)
 
 
 def test_signin_lock_during_prompt_no_session(panel, monkeypatch):
@@ -782,7 +861,7 @@ def test_signin_lock_during_prompt_no_session(panel, monkeypatch):
         locked[0] = True   # the screen locks while the approved prompt returns
         return True, "biometric"
     monkeypatch.setattr(auth, "prove", prove)
-    _, pre, ck, _ = P.ui.signed_out(port)
+    _, pre, ck = P.ui.signed_out(port)
     s, _, r = P.ui.signin_post(port, ck, pre)
     assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
     locked[0] = False

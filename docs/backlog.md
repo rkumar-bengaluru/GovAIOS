@@ -23,8 +23,9 @@ Order: Studio phase 1 → attack-suite evaluation → paper and public repo rele
 Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, paper due 26 Jan 2027).
 
 - **Hardening the research exposed** (roadmap Phases 0 and 2; W-numbers are from `docs/research/reports/`):
-  - typed code word in place of compared code (NIST 800-63B-4);
-  - the audit records a digest of what the approver saw;
+  - ~~typed code word in place of compared code (NIST 800-63B-4)~~ done in Phase 0 (branch `feat/phase0-hardening`);
+  - ~~the audit records a digest of what the approver saw~~ done in Phase 0 for panel sign-in and flow/step approvals;
+    still to do: the Claude Code hook, JobLens delivery, executor policy, powers review and authenticator approvals;
   - Secure Enclave–signed approvals over digests;
   - signed and anchored audit heads;
   - Codex hooks fail closed, and `~/.codex` and `AGENTS.md` are protected.
@@ -57,7 +58,7 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 - A startup crash writes a traceback to `panel.log` on each 30 s restart (v2 M4).
 - Not yet seen live: the launch helper surviving a panel crash under launchd and stopping its run.
 - One full-suite run once failed 13 tests (likely two pytest runs sharing temp dirs); watch for it.
-- Voice and hands-free.
+- Voice and hands-free: speak commands and the authenticator code to the panel (admin, 2026-11-07).
 
 ## Plan 3: terms gate and challenge handling (governance-layer spec §5.5, §5.6)
 

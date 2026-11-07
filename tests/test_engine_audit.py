@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import signal
 import shutil
@@ -108,7 +109,7 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, d
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
     f = src / "flows" / "himalayas_job_vetting.yaml"
-    t = f.read_text().replace("count: 5", "count: 1")
+    t = f.read_text().replace("count: 10", "count: 1")
     t = t.replace("rupak.kumar.ambasta02@gmail.com", ACCT)
     t = t.replace("  deliver: { to: joblens, from: jd_selected, source: Himalayas }\n", "")   # start without deliver
     if directory:
@@ -152,6 +153,18 @@ def test_no_content_in_audit(tmp_path):
     low = log.lower()
     assert "secret-description" not in low and "secret-co" not in low and "secret_" not in low
     assert ACCT not in log and "?utm" not in log   # bare "utm" can occur in a base64 signature
+
+
+def test_approvals_record_digest_of_what_was_shown(tmp_path):
+    from govaios.auth import shown_digest
+    from govaios.engine import approval_question
+    r, e, err = run(tmp_path, [True] * 10)
+    assert err is None
+    fa = next(x for x in e if x["kind"] == "flow_approval")
+    assert fa["shown"] == shown_digest(approval_question(r.flow, r.deliver), f"approve flow {r.flow['id']}")
+    asked = [x for x in e if x["kind"] == "request" and x["approver"] == "admin"]
+    assert asked and all(re.fullmatch(r"[0-9a-f]{64}", x["shown"]) for x in asked)
+    assert all(x.get("shown") is None for x in e if x["kind"] == "request" and x["approver"] == "policy")
 
 
 def test_denied_flow_approval_logged(tmp_path):

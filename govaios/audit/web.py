@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from govaios import auth, runstate
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
+from govaios.auth import shown_digest
 from govaios.audit.verify import verify
 from govaios.panel import settings, tickets, totp
 from govaios.panel.apps import list_apps, match
@@ -105,7 +106,11 @@ form{margin:10px 0}
 td form{margin:0}
 .card{max-width:640px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
 .card label{display:block;font-weight:700;margin-bottom:6px}
-.word{font:700 28px var(--mono);letter-spacing:.2em}
+.otp{font:700 28px var(--mono);letter-spacing:1ch;width:12ch;box-sizing:border-box;padding:10px 0 10px .3ch;
+border:0;border-radius:0;caret-color:var(--me);background:repeating-linear-gradient(90deg,transparent 0 2px,var(--card) 2px calc(1.6ch - 2px),transparent calc(1.6ch - 2px) 2ch) 0 2px/11.6ch calc(100% - 4px) no-repeat,repeating-linear-gradient(90deg,var(--line) 0 1.6ch,transparent 1.6ch 2ch) 0 0/11.6ch 100% no-repeat;
+box-shadow:none;outline-offset:4px}
+.otp:focus{background:repeating-linear-gradient(90deg,transparent 0 2px,var(--card) 2px calc(1.6ch - 2px),transparent calc(1.6ch - 2px) 2ch) 0 2px/11.6ch calc(100% - 4px) no-repeat,repeating-linear-gradient(90deg,var(--me) 0 1.6ch,transparent 1.6ch 2ch) 0 0/11.6ch 100% no-repeat}
+.otpbox{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:0 0 16px}
 .qr{display:inline-block;background:#fff;padding:10px;border-radius:8px;border:1px solid var(--line)}
 .qr svg{display:block;max-width:100%;height:auto}
 code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
@@ -232,7 +237,8 @@ NO_SESSION = "Enter the 6-digit code from your authenticator."
 
 SIGNIN_S, SIGNIN_PAUSE_S, SIGNIN_PAUSE_MAX_S, PRE_S = 8 * 3600, 10, 300, 120
 WORD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ"
-NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "no": "Touch ID did not sign you in."}
+NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "no": "Touch ID did not sign you in.",
+         "code": "That code did not match the Touch ID prompt. Sign in again."}
 
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
@@ -302,6 +308,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def signout_all():
         with sign_lock:
             state["sessions"].clear()
+            state["typed"].clear()   # a Touch ID sign-in still waiting for its typed code ends too
 
     def tick():
         locked = auth.screen_locked()
@@ -329,20 +336,34 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             except Exception:
                 pass   # already answering 500; nothing more can be recorded
             raise
-    # sessions: sid -> (signed in at, csrf); pre: token -> (issued at, code word); until: end of the panel-wide pause; n: consecutive refusals
-    state = {"sessions": {}, "pre": {}, "until": float("-inf"), "n": 0}
+    # sessions: sid -> (signed in at, csrf); pre: token -> (issued at, code word); typed: token -> (Touch ID ok at, code word);
+    # until: end of the panel-wide pause; n: consecutive refusals (Touch ID or a wrong typed code)
+    state = {"sessions": {}, "pre": {}, "typed": {}, "until": float("-inf"), "n": 0}
     sign_lock, prompt = threading.Lock(), threading.Lock()   # prompt: one Touch ID sign-in sheet at a time
 
-    def signed_out(pre, word, m):
+    def refused():
+        """One more refusal: the panel-wide pause doubles (10 s up to 300 s). A fresh pre token never resets it."""
+        state["n"] += 1
+        state["until"] = now() + min(SIGNIN_PAUSE_S * 2 ** (state["n"] - 1), SIGNIN_PAUSE_MAX_S)
+
+    def signed_out(pre, m):
+        """The code word is never on the page: only the Touch ID prompt shows it (NIST 800-63B-4: a typed code, not a compared one)."""
         note = NOTES.get(m, "")
         left = state["until"] - now()
         if left > 0:
             note = f"{note} Sign-in paused. Try again in {math.ceil(left)} s.".strip()
         return _page(f"<section class=card><h1>Locked</h1>{f'<p class=fail>{note}</p>' if note else ''}"
-                     f"<p>Code <b class=word>{word}</b></p>"
-                     f"<p>The Touch ID prompt shows this same code. If it shows another, cancel it.</p>"
+                     f"<p>The Touch ID prompt shows a 4-letter code. Remember it: you type it here next.</p>"
                      f"<form method=post action=/signin><input type=hidden name=pre value='{pre}'>"
                      f"<button class=go>Sign in with Touch ID</button></form></section>")
+
+    def type_code(t):
+        return _page(f"<section class=card><h1>Locked</h1>"
+                     f"<p>Type the 4-letter code the Touch ID prompt showed.</p>"
+                     f"<form method=post action=/signin/code><input type=hidden name=t value='{t}'>"
+                     f"<input name=word maxlength=4 autocomplete=off autocapitalize=characters spellcheck=false autofocus "
+                     f"aria-label='Code from the Touch ID prompt'>"
+                     f"<button class=go>Finish signing in</button></form></section>")
 
     def banner():
         try:
@@ -461,9 +482,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                f"<b>{escape(panel.name[:1])}</b></div><div><h1>{escape(panel.name)}</h1>"
                f"<div class=s>{ring}</div></div></div>{end}<form method=post action=/signout>{hidden(csrf)}"
                f"<button>Sign out</button></form></header>")
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{steps}"
+        # no session yet: the authenticator code gets its own 6-box field (the command box still takes it too)
+        otp = (f"<form class=otpbox method=post action=/say>{hidden(csrf)}<label for=otp>Authenticator code</label>"
+               f"<input class=otp id=otp name=text inputmode=numeric pattern='[0-9]{{6}}' maxlength=6 "
+               f"autocomplete=one-time-code required autofocus><button class=go>Open session</button></form>"
+               if not s.active() and store.load() is not None else "")
+        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{steps}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
-                     f"</label><input id=cmd name=text autocomplete=off autofocus placeholder='Type: run joblens'>"
+                     f"</label><input id=cmd name=text autocomplete=off{'' if otp else ' autofocus'} placeholder='Type: run joblens'>"
                      f"<button class=go>Send</button></form>",
                      '<meta http-equiv="refresh" content="2">' if live() else "",
                      f"<h2>Approved</h2><ul>{ok}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
@@ -480,7 +506,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"<div class=qr role=img aria-label='QR code for your authenticator app'>"
                      f"{totp.qr_svg(totp.otpauth_uri(secret))}</div><p>Key: <code>{key}</code></p>"
                      f"<form method=post action=/totp/setup>{hidden(csrf)}<label for=code>6-digit code</label>"
-                     f"<input id=code name=code inputmode=numeric autocomplete=off> <button class=go>Confirm</button>"
+                     f"<input class=otp id=code name=code inputmode=numeric pattern='[0-9]{{6}}' maxlength=6 "
+                     f"autocomplete=one-time-code required> <button class=go>Confirm</button>"
                      f"</form></section>")
 
     def say(f):
@@ -672,23 +699,29 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             """The Locked page. Only GET / makes a pre-login token (cookie + form field) and code word;
             a browser that still holds a valid one gets the same pair back."""
             ck, m = self._cookie("pre"), parse_qs(query).get("m", [""])[0]
+            tc = self._cookie("t")
             with sign_lock:
+                typed = state["typed"]
+                for k in [k for k, (t, *_) in typed.items() if now() - t >= PRE_S]:
+                    typed.pop(k)
+                if tc is not None and any(hmac.compare_digest(k.encode(), tc.encode()) for k in typed):
+                    return self._send(200, type_code(tc))
                 pres = state["pre"]
                 for k in [k for k, (t, _) in pres.items() if now() - t >= PRE_S]:
                     pres.pop(k)
                 hit = next((k for k in pres if ck is not None and hmac.compare_digest(k.encode(), ck.encode())), None)
                 if hit is not None:
-                    return self._send(200, signed_out(hit, pres[hit][1], m))
+                    return self._send(200, signed_out(hit, m))
                 pre, word = secrets.token_urlsafe(32), "".join(secrets.choice(WORD_ABC) for _ in range(4))
                 for k in list(pres)[:max(0, len(pres) - 63)]:
                     pres.pop(k)   # at most 64 kept: a page loaded in a loop cannot grow it
                 pres[pre] = (now(), word)
-            self._send(200, signed_out(pre, word, m),
+            self._send(200, signed_out(pre, m),
                        (("Set-Cookie", f"pre={pre}; HttpOnly; SameSite=Strict; Path=/; Max-Age={PRE_S}"),))
 
         def _signin(self, f):
             """POST /signin: the pre pair must match a token this server issued; one Touch ID prompt at a time,
-            paused SIGNIN_PAUSE_S after a refusal. The prompt names the code word shown on that page."""
+            paused after a refusal. The prompt alone shows the code word; POST /signin/code finishes the sign-in."""
             ck, field = self._cookie("pre"), f.get("pre", "")
             if ck is None or not hmac.compare_digest(ck.encode(), field.encode()):
                 return self._redirect("/")   # a bad Host/Origin was already 403; this is a stale or missing pair
@@ -702,24 +735,59 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             try:
                 if now() < state["until"]:
                     return self._redirect("/")   # the Locked page tells how long
-                ok, how = auth.prove(f"sign in to the GOV-AIOS panel, code {word}", home)
+                reason = f"sign in to the GOV-AIOS panel, code {word}"
+                ok, how = auth.prove(reason, home)
                 if not ok and how in ("busy", "none"):
                     return self._redirect("/?m=busy")   # no sheet was shown: nothing refused, no pause
-                state["n"] = 0 if ok else state["n"] + 1
                 if not ok:
-                    state["until"] = now() + min(SIGNIN_PAUSE_S * 2 ** (state["n"] - 1), SIGNIN_PAUSE_MAX_S)
-                log.append("ui_login", decision="allow" if ok else "deny", approver="admin", channel="touch_id",
-                           auth=how)   # audit first, then the cookie
+                    with sign_lock:   # the same lock /signin/code counts under
+                        refused()
+                    log.append("ui_login", decision="deny", approver="admin", channel="touch_id", auth=how,
+                               shown=shown_digest(None, reason))
             finally:
                 prompt.release()
             if not ok:
                 return self._redirect("/?m=no")
             if auth.screen_locked():   # locked while the sheet was up: that lock signs this browser out too
                 return self._redirect("/")
+            t = secrets.token_urlsafe(32)
+            with sign_lock:
+                for k in list(state["typed"])[:max(0, len(state["typed"]) - 7)]:
+                    state["typed"].pop(k)   # at most 8 waiting for their typed code
+                state["typed"][t] = (now(), word, how)
+            self._redirect("/", (("Set-Cookie", f"t={t}; HttpOnly; SameSite=Strict; Path=/; Max-Age={PRE_S}"),))
+
+        def _signin_code(self, f):
+            """POST /signin/code: the code word from the Touch ID prompt, typed. One try per prompt; a wrong one
+            counts as a refusal (the same pause) and is audited."""
+            ck, field = self._cookie("t"), f.get("t", "")
+            clear = (("Set-Cookie", "t=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"),)
+            if ck is None or not hmac.compare_digest(ck.encode(), field.encode()):
+                return self._redirect("/", clear)
+            with sign_lock:   # spent by this one try
+                hit = next((k for k in state["typed"] if hmac.compare_digest(k.encode(), ck.encode())), None)
+                at, word, how = state["typed"].pop(hit) if hit is not None else (None, None, None)
+            if at is None or now() - at >= PRE_S:
+                return self._redirect("/", clear)
+            reason = f"sign in to the GOV-AIOS panel, code {word}"
+            ok = hmac.compare_digest("".join(f.get("word", "").split()).upper().encode(), word.encode())
+            with sign_lock:
+                if not ok:
+                    refused()
+                else:
+                    state["n"] = 0
+            locked = ok and auth.screen_locked()   # locked since the sheet: that lock signs this browser out too
+            log.append("ui_login", decision="allow" if ok and not locked else "deny", approver="admin",
+                       channel="touch_id", auth="screen_lock" if locked else how if ok else "wrong_code",
+                       shown=shown_digest(None, reason))   # audit first, then the cookie
+            if not ok:
+                return self._redirect("/?m=code", clear)
+            if locked:
+                return self._redirect("/", clear)
             sid = secrets.token_urlsafe(32)
             with sign_lock:
                 state["sessions"][sid] = (now(), secrets.token_urlsafe(32))
-            self._redirect("/", (("Set-Cookie", f"s={sid}; HttpOnly; SameSite=Strict; Path=/"),))
+            self._redirect("/", (("Set-Cookie", f"s={sid}; HttpOnly; SameSite=Strict; Path=/"), *clear))
 
         @guarded
         def do_GET(self):
@@ -745,13 +813,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         def do_POST(self):
             path = urlsplit(self.path).path
             act = POSTS.get(path)
-            if act is None and path not in ("/signin", "/signout"):
+            if act is None and path not in ("/signin", "/signin/code", "/signout"):
                 return self._send(405)
             sess = self._session()
             origin = self.headers.get("Origin")  # absent is fine (row 37); a wrong one is not
             if origin is not None and origin != f"http://127.0.0.1:{self.server.server_address[1]}":
                 return self._send(403)
-            if not sess and path != "/signin":
+            if not sess and path not in ("/signin", "/signin/code"):
                 return self._send(403)
             try:
                 n = int(self.headers.get("Content-Length", "0"))
@@ -760,9 +828,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if not 0 <= n <= 65536:
                 return self._send(400)
             f = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "replace")).items()}
-            if path == "/signin":
+            if path in ("/signin", "/signin/code"):
                 try:
-                    return self._signin(f)
+                    return self._signin(f) if path == "/signin" else self._signin_code(f)
                 except Exception:   # body stays fixed; nothing about the failure reaches the page
                     return self._send(500, "internal error")
             if not hmac.compare_digest(f.get("csrf", "").encode(), sess[1].encode()):

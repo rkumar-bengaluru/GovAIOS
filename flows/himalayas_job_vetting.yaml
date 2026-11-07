@@ -28,7 +28,7 @@ workflow:
         himalayas_matches: continue
         himalayas_logged_out: stop_and_request_user
         unknown: stop_and_report
-    - { id: select_jobs, action: select_items, target: himalayas_matches.job_cards, count: 5 }
+    - { id: select_jobs, action: select_items, target: himalayas_matches.job_cards, count: 10 }
     - id: each_job
       action: for_each_item
       steps:
