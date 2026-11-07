@@ -6,6 +6,7 @@ a = Analysis(
     pathex=[ROOT],
     datas=[(ROOT + "/govaios/roles.yaml", "govaios"), (ROOT + "/flows", "flows"), (ROOT + "/pages", "pages")],
     hiddenimports=["objc", "AppKit", "Foundation", "ApplicationServices", "Quartz", "LocalAuthentication", "yaml", "cryptography", "segno"],
+    excludes=["govaios.win", "govaios.desktop.windows"],
 )
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="gov-aios", console=True)
