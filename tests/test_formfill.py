@@ -213,3 +213,20 @@ def test_locate_finds_by_key_in_new_tree():
     t2 = tree()
     assert ff.locate(t2, f) is t2.children[1]
     assert ff.locate(t2, ff.Field("#zz", "", "text", (), False)) is None
+
+
+def test_question_scan_stops_at_field_bearing_sibling():
+    r = N("group", "", N("group", "", N("text", "Q1")),
+          N("group", "", N("text_field", "Email", dom_id="e")),
+          N("group", "", N("text_field")))
+    assert [f.label for f in ff.read_form(r)] == ["Email", ""]
+
+
+def test_twin_siblings_resolve_by_identity():
+    t = N("group", "", N("group", "", N("text", "X")), N("text_field"), N("text_field"))
+    assert [f.label for f in ff.read_form(t)] == ["X", ""]
+
+
+def test_option_with_control_char_not_returned():
+    f = _f("Notice period", "radio", ("Immediate", "30\x07 Days"))
+    assert ff.answer_for(f, _bank(("n", ["Notice period"], "30 days")), [f]) is None

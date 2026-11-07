@@ -163,9 +163,12 @@ def _question(start, parents) -> str:
         p = parents.get(id(n))
         if p is None:
             return ""
-        for sib in reversed(p.children[:p.children.index(n)]):
+        i = next(i for i, c in enumerate(p.children) if c is n)  # identity: Node == is structural
+        for sib in reversed(p.children[:i]):
             kids = list(sib.walk())
-            if any(k.role == "text" for k in kids) and not any(_is_field(k) for k in kids):
+            if any(_is_field(k) for k in kids):
+                break  # never look past a field-bearing sibling
+            if any(k.role == "text" for k in kids):
                 return sib.text().rstrip("*✱ \t\r\n")
         n = p
     return ""
@@ -247,5 +250,5 @@ def answer_for(f: Field, bank: Bank, fields: list[Field]) -> tuple[str, str] | N
     e = hits[0]
     if f.kind in ("select", "radio"):
         m = [o for o in f.options if normalize(o) == normalize(e.answer)]
-        return (m[0], f"bank:{e.key}") if len(m) == 1 else None
+        return (m[0], f"bank:{e.key}") if len(m) == 1 and ok_value(m[0], f.kind) else None
     return e.answer, f"bank:{e.key}"
