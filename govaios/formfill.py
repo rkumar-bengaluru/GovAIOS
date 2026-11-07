@@ -111,6 +111,16 @@ def cv_path(bank: Bank, user_home: Path) -> Path | None:
         return None
 
 
+def stage_text(path: Path, text: str) -> Path:
+    """Write text to a fresh 0600 temp file beside path (never through a link); the caller replaces or removes it."""
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    return tmp
+
+
 def add_answer(path: Path, label: str, answer: str) -> str:
     if not ok_value(answer, "textarea") or len(answer) > 2000:
         raise BankError("answer refused")
@@ -128,12 +138,7 @@ def add_answer(path: Path, label: str, answer: str) -> str:
            + [{"key": key, "labels": [label], "answer": answer}]}
     if bank.cv_file:
         doc["cv_file"] = bank.cv_file
-    path.parent.mkdir(mode=0o700, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w") as f:
-        yaml.safe_dump(doc, f, allow_unicode=True)
-    os.replace(tmp, path)
+    os.replace(stage_text(path, yaml.safe_dump(doc, allow_unicode=True)), path)
     return key
 
 

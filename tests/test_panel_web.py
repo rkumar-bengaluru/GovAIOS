@@ -1472,3 +1472,42 @@ def test_done_run_finish_message_survives_cleanup_error(cc):
 def test_long_field_key_capped_in_form(cc):
     _asking(cc, [{"key": "#" + "k" * 5000, "label": "L", "kind": "text", "options": []}])
     assert "k" * 300 not in cc.get("/")[1]
+
+
+GOOD_BANK = "answers:\n- key: why\n  labels: [\"Why us?\"]\n  answer: BANKSECRET\n"
+
+
+def test_bank_page_needs_session(cc):
+    from govaios import applyfiles
+    assert cc.req("/apply/bank", cookie=None)[0] in (303, 404)
+    cc.req("/apply/bank", "POST", body={"text": GOOD_BANK})
+    assert not (cc.home / applyfiles.BANK).exists()
+    st, page = cc.get("/apply/bank")[:2]
+    assert st == 200 and "<textarea" in page and "<script" not in page
+
+
+def test_bank_page_saves_valid(cc):
+    from govaios import applyfiles
+    cc.post("/apply/bank", text=GOOD_BANK.replace("\n", "\r\n"))
+    p = cc.home / applyfiles.BANK
+    assert p.read_text() == GOOD_BANK and (p.stat().st_mode & 0o777) == 0o600
+    assert not [x for x in p.parent.iterdir() if x.name != p.name]
+    b = _log(cc.home, "bank_updated")
+    assert len(b) == 1 and b[0]["field"] == "all" and "outcome" not in b[0]
+    assert "BANKSECRET" not in AuditLog(cc.home).path.read_text() and "BANKSECRET" not in "".join(cc.srv.panel.convo)
+    assert "BANKSECRET" in cc.get("/apply/bank")[1]
+
+
+def test_bank_page_rejects_malformed_and_keeps_old(cc):
+    from govaios import applyfiles
+    p = cc.home / applyfiles.BANK
+    cc.post("/apply/bank", text=GOOD_BANK)
+    for bad in ("answers: [unclosed\n", "answers:\n- key: x\n  labels: [a]\n  answer: \"\\x01\"\n", "x" * 70000):
+        cc.post("/apply/bank", text=bad)
+        assert p.read_text() == GOOD_BANK
+    cc.post("/apply/bank", text="answers: [unclosed SECRETBAD\n")
+    page = cc.get("/apply/bank")[1]
+    assert "YAML error" in page and page.count("SECRETBAD") == 1   # only inside the textarea
+    assert "YAML error" not in cc.get("/apply/bank")[1]
+    assert not [x for x in p.parent.iterdir() if x.name != p.name]
+    assert "SECRETBAD" not in AuditLog(cc.home).path.read_text()

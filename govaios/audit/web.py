@@ -22,7 +22,8 @@ from urllib.parse import parse_qs, urlsplit
 import yaml
 
 from govaios import agents, applyfiles, auth, runstate
-from govaios.formfill import add_answer, ok_value
+import os
+from govaios.formfill import BankError, add_answer, load_bank, ok_value, stage_text
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
@@ -244,7 +245,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/claude|/codex")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/claude|/codex")
 DOES = {"claude_code": "Every command Claude Code runs is checked by GOV-AIOS first and written to the audit log.",
         "codex": "Shell commands, file edits and plugin calls are checked by GOV-AIOS first and written to the audit "
                  "log. Plugins stay on; each new plugin tool asks you once."}
@@ -577,7 +578,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             act = (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='/{escape(slug(a.name))}'>"
                    f"{fields}<button class=go>Run {escape(a.name)}</button></form>" if a.approved
                    else "<p class=m>Draft: approve it first.</p>")
-            return f"<section class=appcard><h2>{escape(a.name)}</h2>{uses}{act}</section>"
+            return (f"<section class=appcard><h2>{escape(a.name)}</h2>{uses}{act}"
+                    f"<p class=m><a href='/apply/bank'>My answer bank</a></p></section>")
         act = (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='run {escape(a.name)}'>"
                f"<button class=go>Run {escape(a.name)}</button></form>" if a.approved
                else "<p class=m>Draft: approve it first.</p>")
@@ -763,7 +765,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return (f"<section class=appcard><h2>Job Apply</h2><p>Filled {num('filled')} of {num('total')} "
                 f"fields. Review the form in Chrome and press Submit yourself.</p>"
                 + (f"<p>Fill in Chrome yourself:</p>{you}" if you else "")
-                + (f"<p>Check:</p>{chk}" if chk else "") + "</section>")
+                + (f"<p>Check:</p>{chk}" if chk else "")
+                + "<p class=m><a href='/apply/bank'>My answer bank</a></p></section>")
 
     def apply_answer(f):
         """Check every answer, then write reply.json once for this ask. Values are never logged or echoed."""
@@ -795,6 +798,50 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     except Exception:
                         tell("That answer couldn't be saved to your bank.")
         return "/"
+
+    rejected = {}   # the last refused bank edit, shown once: {"msg": fixed BankError text, "text": the admin's own YAML}
+
+    def bank_page(csrf):
+        bad = rejected.pop("msg", None), rejected.pop("text", None)
+        try:
+            text = bad[1] if bad[1] is not None else (home / applyfiles.BANK).read_text()
+        except OSError:
+            text = ""
+        return _page(f"<section class=appcard><h1>My answer bank</h1><p class=m>YAML. Your own answers, used to fill "
+                     f"job forms; they are never sent anywhere else.</p>"
+                     f"{f'<p class=fail>{escape(bad[0])}</p>' if bad[0] else ''}"
+                     f"<form method=post action=/apply/bank>{hidden(csrf)}"
+                     f"<textarea name=text rows=24 cols=80 spellcheck=false aria-label='Answer bank YAML'>{escape(text)}</textarea>"
+                     f"<button class=go>Save</button></form></section>")
+
+    def bank_post(f):
+        """Validate the posted YAML with load_bank on a temp file, then replace the bank. Contents are never logged."""
+        text = f.get("text", "").replace("\r\n", "\n")
+        path = home / applyfiles.BANK
+        if len(text.encode()) > 60000:
+            rejected.update(msg="answer bank too large", text=text[:60000])
+            return "/apply/bank"
+        tmp = None
+        try:
+            tmp = stage_text(path, text)
+            load_bank(tmp, agents.user_home())
+        except BankError as e:
+            rejected.update(msg=str(e), text=text)
+            if tmp:
+                os.unlink(tmp)
+            return "/apply/bank"
+        except BaseException:
+            if tmp:
+                os.unlink(tmp)
+            raise
+        try:
+            audited("bank_updated", {"field": "all"}, lambda: os.replace(tmp, path))
+        except BaseException:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
+            raise
+        tell("Saved your answer bank.")
+        return "/apply/bank"
 
     def say(f):
         later = []   # an expired session's run stop, run once the lock is released
@@ -1116,7 +1163,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         audited("revoke", fields, apply)
         return "/approvals"
 
-    POSTS = {"/apply/answer": apply_answer, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+    POSTS = {"/apply/answer": apply_answer, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
@@ -1293,6 +1340,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
+                        else bank_page(sess[1]) if u.path == "/apply/bank"
                         else market_page() if u.path == "/market" else agent_page(ap, sess[1]) if ap
                         else market_setup_page(sess[1], mk[1]) if mk
                         else cc_session_page(by_slash(cs[1]), cs[2]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
