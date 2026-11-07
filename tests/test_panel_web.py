@@ -9,6 +9,7 @@ from http.cookies import SimpleCookie
 from urllib.parse import urlencode
 
 import pytest
+import yaml
 
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
@@ -71,7 +72,8 @@ def panel(tmp_path, monkeypatch, ui):
     spoken = []
     mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
     srv = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
-                            now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None)
+                            now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None,
+                            chrome_state=tmp_path / "Local State")
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
 
@@ -924,3 +926,72 @@ def test_default_name_from_account_on_page(tmp_path, monkeypatch, ui, gecos, sho
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def _chrome(P, profiles):
+    info = {d: {"name": n, "user_name": a} for d, n, a in profiles}
+    (P.home.parent / "Local State").write_text(json.dumps({"profile": {"info_cache": info}}))
+
+
+def test_marketplace_lists_templates_installed_and_not(panel):
+    P = panel
+    (P.flows / "morning_inbox_briefing.yaml").unlink()
+    body = P.get("/market")[1]
+    assert "Morning Gmail Briefing" in body and "Sync Himalayas to JobLens" in body
+    assert "Installed as JobLens" in body and "href='/market/setup/morning_inbox_briefing'" in body
+    assert "href='/market/setup/himalayas_job_vetting'" not in body and "aria-current=page>Marketplace" in body
+
+
+def test_marketplace_setup_from_chrome_profile_makes_a_draft(panel):
+    P = panel
+    (P.flows / "morning_inbox_briefing.yaml").unlink()
+    _chrome(P, [("Profile 3", "Work", "work.person@example.com"), ("Profile 4", "No Google", "")])
+    body = P.get("/market/setup/morning_inbox_briefing")[1]
+    assert "value='Profile 3'" in body and "work.person@example.com" in body and "Profile 4" not in body
+    s, _, r = P.post("/market/setup", template="morning_inbox_briefing", profile="Profile 3",
+                     account="attacker@example.com")   # ignored: the account comes from Chrome
+    assert s == 303 and r.getheader("Location") == "/"
+    b = yaml.safe_load((P.flows / "morning_inbox_briefing.yaml").read_text())["workflow"]["browser"]
+    assert (b["profile_directory"], b["account"]) == ("Profile 3", "work.person@example.com")
+    app = next(a for a in list_apps(P.flows, P.home) if a.id == "morning_inbox_briefing")
+    assert not app.approved   # a draft until Touch ID approval
+    body = P.get("/")[1]
+    assert "Morning Gmail Briefing is set up as a draft. Approve it to let it run." in body
+    e = _log(P.home, "setting")[-1]
+    assert (e["field"], e["flow"]) == ("app_setup", "morning_inbox_briefing") and "example.com" not in json.dumps(e)
+    assert "Installed as" in P.get("/market")[1].split("Morning Gmail Briefing")[1].split("</section>")[0]
+
+
+def test_marketplace_setup_refuses_unknown_profile_installed_and_forged(panel):
+    P = panel
+    _chrome(P, [("Profile 3", "Work", "work.person@example.com")])
+    before = (P.flows / "himalayas_job_vetting.yaml").read_text()
+    assert P.post("/market/setup", template="himalayas_job_vetting", profile="Profile 3")[0] == 400   # installed
+    assert (P.flows / "himalayas_job_vetting.yaml").read_text() == before
+    (P.flows / "morning_inbox_briefing.yaml").unlink()
+    assert P.post("/market/setup", template="morning_inbox_briefing", profile="Profile 9")[0] == 400
+    assert P.post("/market/setup", template="nope", profile="Profile 3")[0] == 400
+    s = P.req("/market/setup", "POST", cookie=P.sid, body={"csrf": "x", "template": "morning_inbox_briefing",
+                                                          "profile": "Profile 3"})[0]
+    assert s == 403 and not (P.flows / "morning_inbox_briefing.yaml").exists()
+
+
+def test_marketplace_setup_typed_when_chrome_unreadable(panel):
+    P = panel
+    (P.flows / "morning_inbox_briefing.yaml").unlink()
+    body = P.get("/market/setup/morning_inbox_briefing")[1]
+    assert "could not be read" in body and "name=account" in body
+    assert P.post("/market/setup", template="morning_inbox_briefing", profile="Profile 1",
+                  account="bad\nname: x")[0] == 400
+    assert P.post("/market/setup", template="morning_inbox_briefing", profile="Profile 1",
+                  account="me@example.com")[0] == 303
+    b = yaml.safe_load((P.flows / "morning_inbox_briefing.yaml").read_text())["workflow"]["browser"]
+    assert (b["profile_directory"], b["account"]) == ("Profile 1", "me@example.com")
+
+
+def test_marketplace_signed_out_goes_to_locked_page(panel):
+    P = panel
+    for path in ("/market", "/market/setup/morning_inbox_briefing"):
+        s, _, r = P.ui.raw(P.srv.server_address[1], "GET", path)
+        assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
+
