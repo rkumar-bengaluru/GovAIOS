@@ -1,6 +1,6 @@
 # OpenAI Codex under GOV-AIOS: integration test
 
-Status: **built 2026-11-07, live test pending.** Codex CLI 0.162.1 (`/opt/homebrew/bin/codex`) and the
+Status: **built and live-tested 2026-11-07: tests A–E passed (admin).** Codex CLI 0.162.1 (`/opt/homebrew/bin/codex`) and the
 Codex inside ChatGPT.app on this Mac. Background: `docs/superpowers/spikes/2026-11-06-codex-governance.md`.
 
 ## What it does

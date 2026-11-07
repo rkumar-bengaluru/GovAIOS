@@ -19,8 +19,8 @@ Updated 2026-11-06 after control panel v2 (PR #10).
   their `/app` card.
 - **Change Claude Code folders from the panel:** setup keeps an existing policy's folders.
 - ~~Govern OpenAI Codex like Claude Code~~ built 2026-11-07 (branch `feat/codex-template`); live test
-  in `docs/codex-integration-test.md`. Still open: Codex network allow-list (`experimental_network`),
-  Codex built-in tools beyond Bash/apply_patch/MCP, whether ChatGPT.app's Codex reads the file.
+  and live-tested (A–E passed) per `docs/codex-integration-test.md`. Still open: Codex network allow-list (`experimental_network`),
+  Codex built-in tools beyond Bash/apply_patch/MCP.
 - **JobLens integration** (admin, 2026-11-07): next after Codex is verified.
 - **Inbox brief short app name** (`app:` in `flows/morning_inbox_briefing.yaml`) so the panel
   accepts "run inbox brief".
