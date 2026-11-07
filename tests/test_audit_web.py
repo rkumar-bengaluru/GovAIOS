@@ -289,7 +289,7 @@ def test_locked_signin_refused_and_server_stays(tmp_path, monkeypatch, ui):
     srv = _start(tmp_path / "h", Clock())
     monkeypatch.setattr(srv, "shutdown", lambda: pytest.fail("the panel never shuts itself down"))
     port = srv.server_address[1]
-    _, pre, ck, _ = ui.signed_out(port)
+    _, pre, ck = ui.signed_out(port)
     monkeypatch.setattr(auth, "screen_locked", lambda: True)
     assert ui.signin_post(port, ck, pre)[0] == 403   # no_auth: prove would fail the test
     monkeypatch.setattr(auth, "screen_locked", lambda: False)
