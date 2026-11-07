@@ -1114,7 +1114,7 @@ def test_claude_code_in_talk_and_audit(cc):
                decision="deny", reason="not allowed", approver="admin", auth="biometric")
     log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="make --version",
                decision="allow", approver="admin", auth="biometric")
-    assert "Claude Code<span class=m>Governed" in cc.get("/")[1]
+    assert "Claude Code<span class=m>Governed: type /claude" in cc.get("/")[1]
     idx = cc.get("/audit")[1]
     assert "Coding agents" in idx and "href='/audit/app/claude_code'" in idx
     assert re.search(r"<td>Governed</td><td>3</td><td>1</td>", idx)
@@ -1149,18 +1149,23 @@ def _cc_ready(cc):
 def test_claude_start_form_suggests_approved_folders(cc):
     assert "action=/claude/start" not in cc.get("/")[1]   # not governed yet
     _cc_ready(cc)
+    assert "action=/claude/start" not in cc.get("/")[1]   # the side list stays as it was
+    cc.say("/claude")
     page = cc.get("/")[1]
     real = str(cc.proj.resolve())
     assert "<datalist id=ccdirs>" in page and f"<option value='{real}/alpha'>" in page
     assert ".hidden" not in page and f"<option value='{real}/Beta'>" in page
     cc.post("/claude/start", folder=f"{real}/alpha")
     assert cc.started == [f"{real}/alpha"] and "Starting Claude Code" in _tells(cc)[-1]
+    assert "action=/claude/start" not in cc.get("/")[1]   # started: the card closes
+    cc.say("/claude")
     assert f"id=ccf name=folder list=ccdirs value='{real}/alpha'" in cc.get("/")[1]   # the last folder is prefilled
     e = _log(cc.home, "claude_start")[-1]
     assert (e["target"], e["outcome"]) == (f"{real}/alpha", "0")
 
 
 @pytest.mark.parametrize("text,ok", [("run claude beta", "Beta"), ("start claude code in alpha", "alpha"),
+                                     ("/claude alpha", "alpha"),
                                      ("run claude", None), ("run claude /etc", None), ("open claude nope", None)])
 def test_claude_start_typed(cc, text, ok):
     _cc_ready(cc)
@@ -1175,3 +1180,24 @@ def test_claude_start_needs_code_session(cc):
     cc.post("/claude/setup", folders=str(cc.proj))
     cc.post("/claude/start", folder=str(cc.proj))
     assert cc.started == [] and "authenticator" in _tells(cc)[-1]
+
+
+def test_slash_commands_listed_and_app_card(cc):
+    page = cc.get("/")[1]
+    assert "<datalist id=cmds><option value='/joblens'><option value='/help'></datalist>" in page   # approved apps only
+    cc.say("/joblens")
+    page = cc.get("/")[1]
+    assert "<h2>JobLens</h2>" in page and "name=text value='run JobLens'" in page and "account " in page
+    cc.say("/inbox-briefing")
+    assert "Draft: approve it first." in cc.get("/")[1]
+    cc.say("/nope")
+    assert "No command /nope" in _tells(cc)[-1] and cc.made == []
+    cc.say("/")
+    assert _tells(cc)[-1].startswith("GOV-AIOS -> Commands: /joblens, /help")
+
+
+def test_slash_app_with_session_runs_and_closes_card(cc):
+    _open(cc)
+    cc.say("/joblens")
+    cc.say("run JobLens")
+    assert len(cc.made) == 1 and "value='run JobLens'" not in cc.get("/")[1]

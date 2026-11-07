@@ -18,6 +18,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+import yaml
+
 from govaios import auth, claudecode, runstate
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
@@ -92,6 +94,11 @@ background:var(--card);border:1px solid var(--line);overflow-wrap:anywhere}
 background:var(--ok);border:2px solid var(--ok)}
 .run li:last-child{font-weight:700}
 .run li:last-child::before{background:var(--amber);border-color:var(--amber)}
+.appcard{max-width:640px;padding:14px 16px;background:var(--card);border:1px solid var(--line);border-radius:12px;margin:0 0 12px}
+.appcard h2{margin:0 0 4px;font-size:16px;font-weight:600}
+.appcard .m{margin:0 0 10px}
+.appcard form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.appcard input{flex:1;min-width:220px}
 .cmd{display:flex;gap:10px;margin:18px 0 0;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .cmd input{flex:1}
 .note{background:var(--card);border-left:4px solid var(--amber);padding:10px 14px}
@@ -274,7 +281,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
                             speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
-                            told=None, voice=None)
+                            told=None, voice=None, card=None)
 
     def tell(line):
         panel.convo.append(f"GOV-AIOS -> {line}")
@@ -485,6 +492,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         log.append("claude_start", flow=claudecode.ID, executor=claudecode.ID, target=folder, approver="admin")   # first
         code = starter(folder)
         log.append("claude_start", flow=claudecode.ID, executor=claudecode.ID, target=folder, outcome=str(code))
+        if code == 0:
+            panel.card = None
         tell(f"Starting Claude Code in {claudecode.tilde(folder)}. It opens in Terminal." if code == 0
              else "Claude Code did not start.")
 
@@ -495,6 +504,46 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             claude_start(f.get("folder", ""))
         return "/"
 
+    def slug(name):
+        return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+    def slashes():
+        out = ["/claude"] if cc_roots() is not None else []
+        return out + [f"/{slug(a.name)}" for a in apps() if a.approved] + ["/help"]
+
+    def show_card(name):
+        with panel.lock:
+            if name == "claude":
+                panel.card = ("claude", None) if cc_roots() is not None else None
+                if panel.card is None:
+                    tell("Claude Code is not governed yet. Set it up in Marketplace first.")
+                return
+            hit = next((a for a in apps() if slug(a.name) == name or a.id == name), None)
+            panel.card = ("app", hit.id) if hit else None
+        if hit is None:
+            tell(f"No command /{name}. Commands: {', '.join(slashes())}.")
+
+    def card(csrf):
+        c = panel.card
+        if c is None:
+            return ""
+        if c[0] == "claude":
+            return (f"<section class=appcard><h2>Claude Code</h2><p class=m>Opens Terminal in the folder and runs Claude "
+                    f"Code there, governed. Suggestions show as you type.</p>{cc_form(csrf)}</section>")
+        a = next((a for a in apps() if a.id == c[1]), None)
+        if a is None:
+            return ""
+        try:
+            b = yaml.safe_load(a.path.read_text())["workflow"].get("browser") or {}
+        except Exception:
+            b = {}
+        uses = (f"<p class=m>Chrome profile {escape(str(b.get('profile_directory')))}, "
+                f"account {escape(str(b.get('account')))}</p>" if b.get("account") else "")
+        act = (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='run {escape(a.name)}'>"
+               f"<button class=go>Run {escape(a.name)}</button></form>" if a.approved
+               else "<p class=m>Draft: approve it first.</p>")
+        return f"<section class=appcard><h2>{escape(a.name)}</h2>{uses}{act}</section>"
+
     def cc_form(csrf):
         roots = cc_roots()
         if roots is None:
@@ -504,9 +553,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      if e and e.get("kind") == "claude_start" and e.get("outcome") == "0"), None)
         value = claudecode.tilde(last) if last else (sugg[1] if len(sugg) > 1 else sugg[0] if sugg else "")
         opts = "".join(f"<option value='{escape(x)}'>" for x in sugg)
-        return (f"<form class=cmd method=post action=/claude/start>{hidden(csrf)}<label for=ccf>Start Claude Code in"
-                f"</label><input id=ccf name=folder list=ccdirs value='{escape(value)}' autocomplete=off required>"
-                f"<datalist id=ccdirs>{opts}</datalist><button class=go>Start</button></form>")
+        return (f"<form method=post action=/claude/start>{hidden(csrf)}<label class=vh for=ccf>Folder</label>"
+                f"<input id=ccf name=folder list=ccdirs value='{escape(value)}' autocomplete=off required>"
+                f"<datalist id=ccdirs>{opts}</datalist><button class=go>Start Claude Code</button></form>")
 
     def app_page(app_id):
         if app_id == claudecode.ID:
@@ -576,7 +625,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"{form('all', label='Revoke all', cls=' class=stop')}{authn}", here="/approvals")
 
     def talk(csrf):
-        cc_li = ("<li class=ok>Claude Code<span class=m>Governed: start it in Terminal</span></li>"
+        cc_li = ("<li class=ok>Claude Code<span class=m>Governed: type /claude</span></li>"
                  if claudecode.governed(home, managed)[0] else "")
         report()   # the page refresh stops once the run is done: show its result on that same load
         s, run, al = panel.session, panel.run, apps()
@@ -605,12 +654,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                f"<input class=otp id=otp name=text inputmode=numeric pattern='[0-9]{{6}}' maxlength=6 "
                f"autocomplete=one-time-code required autofocus><button class=go>Open session</button></form>"
                if not s.active() and store.load() is not None else "")
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{steps}{otp}"
+        cmds = "".join(f"<option value='{escape(x)}'>" for x in slashes())
+        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
-                     f"</label><input id=cmd name=text autocomplete=off{'' if otp else ' autofocus'} placeholder='Type: run joblens'>"
+                     f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp else ' autofocus'} "
+                     f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
                      f"<button class=go>Send</button></form>",
                      '<meta http-equiv="refresh" content="2">' if live() else "",
-                     f"<h2>Approved</h2><ul>{ok}{cc_li}</ul>{cc_form(csrf)}<h2>Drafts</h2><ul>{drafts}</ul>", "/")
+                     f"<h2>Approved</h2><ul>{ok}{cc_li}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
 
     def setup(csrf, bad):
         if store.load() is not None:
@@ -644,6 +695,16 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         code = re.fullmatch(r"[0-9]{6}", text) is not None
         # never a code: any run of 6 digits, spaces allowed between them, is masked
         panel.convo.append("Admin -> " + re.sub(r"[0-9](?: ?[0-9]){5}", "••••••", text))
+        sl = re.fullmatch(r"/([A-Za-z0-9_-]{0,64})(?: (.+))?", text)
+        if sl:   # a slash command: alone it shows the app's card; with words it runs like "run <app> <words>"
+            name, rest = sl[1].lower(), sl[2]
+            if name in ("", "help"):
+                tell("Commands: " + ", ".join(slashes()) + ". Type one to see what it needs.")
+                return "/"
+            if rest is None:
+                show_card(name)
+                return "/"
+            text = f"run claude {rest}" if name == "claude" else f"run {name.replace('-', ' ')}"   # apps take no words yet
         if not panel.session.active():
             if panel.session.id:
                 end_session("expired", later)
@@ -677,7 +738,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         elif kind == "run":
             r = launcher(hit.path, tickets.create(home, hit.id, hit.digest, panel.session.id))
             r.start()
-            panel.run, panel.app = r, hit
+            panel.run, panel.app, panel.card = r, hit, None
             tell(f"Starting {hit.name}.")
         elif kind == "draft":
             tell(f"{hit.name} is a draft. Get it approved first.")
