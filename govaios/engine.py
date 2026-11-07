@@ -14,6 +14,9 @@ from pathlib import Path
 import yaml
 
 from . import auth, runstate
+from .agents import user_home
+from .applyfiles import BANK, RESULT, write_json
+from .formfill import _ASKABLE, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, read_form, restricted
 from .audit.log import AuditLog, url_for_audit
 from .delivery import TARGETS, check_block
 from .approvals import Approvals, pages_used, read_bound
@@ -24,6 +27,8 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 
 
 NO_DEST = object()
+FORM_PASSES = 3
+ASK_TIMEOUT_S = 900
 
 
 def _emergency_stop(signum, frame):
@@ -87,6 +92,32 @@ def approval_question(f, deliver):
             f"max element risk {f['permissions']['max_element_risk']}; destinations "
             f"{', '.join(f['destinations'])}"
             f"{'; delivers to: ' + TARGETS[deliver['to']]['label'] if deliver else ''}. Approve this flow?")
+
+
+def _lists(root):
+    """`list` nodes by their path of child indexes from the root (handles change between snapshots)."""
+    out = {}
+
+    def walk(n, path):
+        if n.role == "list":
+            out[path] = n
+        for i, c in enumerate(n.children):
+            walk(c, path + (i,))
+    walk(root, ())
+    return out
+
+
+def _named(n, value):
+    """Outermost descendants whose name or text equals value (an option, not also its own text child)."""
+    for c in n.children:
+        if c.name == value or c.text() == value:
+            yield c
+        else:
+            yield from _named(c, value)
+
+
+def _option(group, value):
+    return next((n for n in group.walk() if n.role == "radio" and n.name == value), None)
 
 
 # ---------- executor ----------
@@ -450,3 +481,116 @@ class Runner:
         self.gate("navigate", "navigate")
         self._act("press", self.d.press, "browser_back")
         time.sleep(2)
+
+    # ----- job-application form -----
+    def _form(self):
+        page = self.ctx["page"]
+        root = self.snapshot()
+        if not identify(self.pages[page], root):
+            raise Stop("left the form page")
+        return root, self.element(f"{page}.form_region", root)[0]
+
+    def _node(self, region, f, value):
+        n = locate(region, f)
+        if n is not None and f.kind == "radio":
+            n = _option(n, value)
+        return n if n is not None and n.role in FIELD_ROLES else None
+
+    def fill(self, f, value, source):
+        """One bank/admin answer into one field, re-found by key in a fresh snapshot, then read back.
+        Never logs the value; Enter only inside a confirmed-open native menu."""
+        root, region = self._form()
+        node, label = self._node(region, f, value), f.label[:80]
+        ok = node is not None
+        if ok:
+            self.gate("fill_field", "modify", target=label, destination=self.d.current_url(self.app))
+            ok = self._enter(f.kind, node, value, root, label)
+        if ok:
+            _, region = self._form()
+            n = self._node(region, f, value)
+            if f.kind == "radio":
+                ok = n is not None and n.value == "1"
+            elif f.kind == "select":
+                ok = n is not None and value in (n.value, n.name)
+            else:
+                ok = n is not None and n.value == value
+                if not ok and n is not None and f.kind == "combo":
+                    parent = next((p for p in region.walk() if any(c is n for c in p.children)), None)
+                    ok = parent is not None and any(
+                        d.role == "text" and (d.value or d.name) == value for d in parent.walk())
+            node = n or node
+        if not ok and node is not None and f.kind in ("text", "textarea", "combo") and self.d.focused_is(node):
+            self._act("press", self.d.press, "select_all", target=label)
+            self._act("press", self.d.press, "delete_back", target=label)
+        self._audit("action", action="fill_field", target=label, source=source, outcome="done" if ok else "mismatch")
+        if not ok:
+            self.ctx["apply"]["yourself"].append(f.label)
+        return ok
+
+    def _enter(self, kind, node, value, root, label):
+        if kind in ("text", "textarea"):
+            self._act("click", self.d.click, node, target=label)
+            if not self.d.focused_is(node):
+                return False
+            self._act("type_into", self.d.type_into, node, value, target=label)
+        elif kind == "combo":
+            before = set(_lists(root))
+            self._act("click", self.d.click, node, target=label)
+            self._act("type_into", self.d.type_into, node, value, target=label)
+            new = [l for p, l in _lists(self.snapshot()).items() if p not in before]
+            cands = list({id(c): c for l in new for c in _named(l, value)}.values())
+            if len(cands) != 1:
+                self._act("press", self.d.press, "escape", target=label)
+                return False
+            self._act("click", self.d.click, cands[0], target=label)
+        elif kind == "select":
+            self._act("click", self.d.click, node, target=label)
+            if not self.d.menu_open():
+                self._act("press", self.d.press, "escape", target=label)
+                return False
+            self._act("type_text", self.d.type_text, value, target=label)
+            self._act("press", self.d.press, "enter", target=label)   # inside the native menu, confirmed open
+        else:   # radio: node is the option named value
+            self._act("click", self.d.click, node, target=label)
+        return True
+
+    def do_fill_form(self, s):
+        try:
+            bank = load_bank(self.home / BANK, user_home())
+        except BankError as e:
+            raise Stop(f"answer bank: {e}") from None
+        a = self.ctx["apply"] = {"bank": bank, "filled": 0, "total": 0, "yourself": [], "check": [], "pending": []}
+        done = set()
+        for _ in range(FORM_PASSES):   # a fill can reveal conditional fields
+            fields = read_form(self._form()[1])
+            new = [f for f in fields if f.key not in done]
+            if not new:
+                break
+            for f in new:
+                done.add(f.key)
+                a["total"] += 1
+                hit = None if f.filled else answer_for(f, bank, fields)
+                if f.filled:
+                    a["check"].append(f.label)
+                elif hit:
+                    a["filled"] += self.fill(f, *hit)
+                elif restricted(f) or not normalize(f.label) or f.kind not in _ASKABLE:
+                    a["yourself"].append(f.label)
+                else:
+                    a["pending"].append(f)
+        self.ask_pending()
+        self.write_result()
+
+    def ask_pending(self):
+        # shortcut: no admin ask yet, pending fields go to the admin's own list; Task 8 replaces this.
+        a = self.ctx["apply"]
+        a["yourself"] += [f.label for f in a["pending"]]
+        a["pending"] = []
+
+    def write_result(self):
+        """Counts and labels only, never values."""
+        a = self.ctx["apply"]
+        if self.run_id is not None:
+            write_json(self.home, RESULT, {"run": self.run_id, "filled": a["filled"], "total": a["total"],
+                                           "yourself": a["yourself"], "check": a["check"]})
+        print(f"apply: filled {a['filled']} of {a['total']}", flush=True)
