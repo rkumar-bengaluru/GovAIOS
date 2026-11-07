@@ -1,0 +1,12 @@
+# jobs.lever.co/<co>/<id>/apply form. The admin submits; Submit and Apply with LinkedIn are never clicked.
+page:
+  id: lever_application
+  identification:
+    title_matches: '.'
+    anchors: [form_region, submit, resume_input]
+  elements:
+    form_region:   { role: group, dom_id: application-form, risk: read }
+    submit:        { role: button, dom_id: btn-submit, risk: submit }
+    linkedin:      { role: button, name: "Apply with LinkedIn", risk: submit }
+    resume_attach: { role: link, name_matches: '^ATTACH RESUME/CV', risk: modify }
+    resume_input:  { role: button, dom_id: resume-upload-input, risk: read }   # name ends "No file chosen" until attached

@@ -1,0 +1,18 @@
+# himalayas_job_detail with Apply rated navigate, for the job_apply flow only (the vetting flow keeps it submit).
+page:
+  id: himalayas_job_apply
+  identification:
+    title_matches: ' hiring .* \| Himalayas$'
+    anchors: [job_title, description, apply_heading]
+  elements:
+    main:          { role: main, risk: read }
+    job_title:     { role: heading, within: main, index: 0, risk: read }
+    company:       { role: link, within: main, exclude_names: ["Save"], index: 0, risk: navigate }
+    description:   { role: article, within: main, index: 0, text: true, risk: read }
+    apply_heading: { role: heading, name: "Apply now", risk: read }   # same in both states
+    # Save / Apply now are links when logged out and buttons when logged in.
+    save_link:     { role: link, name: "Save", within: main, risk: submit }
+    save_button:   { role: button, name: "Save", within: main, risk: submit }
+    apply_link:    { role: link, name: "Apply now", risk: navigate }
+    apply_button:  { role: button, name: "Apply now", risk: navigate }
+    job_expired:   { role: button, name: "Job expired?", risk: submit }

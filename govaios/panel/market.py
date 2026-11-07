@@ -25,6 +25,9 @@ CATALOG = (
     Template("himalayas_job_vetting", "Sync Himalayas to JobLens",
              "Vets your Himalayas job matches and sends the good ones to JobLens on this Mac.",
              ("Google account", "Chrome", "JobLens"), "Reads himalayas.app only. Never applies for or saves a job."),
+    Template("job_apply", "Job Apply",
+             "Opens a Himalayas job you paste, fills its Greenhouse or Lever form from your answers and attaches your CV.",
+             ("Google account", "Chrome", "Touch ID"), "Never submits: you check the form and submit it yourself."),
 )
 PROFILE_DIR = re.compile(r"Default|Profile [0-9]{1,3}")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){1,4}")

@@ -330,7 +330,7 @@ def test_approve_draft_uses_native_dialog(panel):
     assert P.asked == [approval_question(wf, None)]
     P.answers["approve"] = True
     P.post("/approve", flow="morning_inbox_briefing")
-    assert all(a.approved for a in list_apps(P.flows, P.home))
+    assert all(a.approved for a in list_apps(P.flows, P.home) if a.id != "job_apply")   # job_apply stays a draft
     fa = _log(P.home, "flow_approval")
     assert [e["decision"] for e in fa] == ["deny", "allow"] and {e["executor"] for e in fa} == {"gov_runner"}
     P.post("/approve", flow="no_such_flow")
