@@ -69,6 +69,8 @@ def load_bank(path: Path, user_home: Path) -> Bank:
         except yaml.YAMLError as e:
             mark = getattr(e, "problem_mark", None)
             raise BankError(f"YAML error at line {mark.line + 1}" if mark else "YAML error") from None
+        except (ValueError, RecursionError):   # e.g. a date like 2001-13-45, or nesting too deep
+            raise BankError("YAML error") from None
     if data is None:
         return Bank()
     if not isinstance(data, dict):
@@ -113,11 +115,16 @@ def cv_path(bank: Bank, user_home: Path) -> Path | None:
 
 def stage_text(path: Path, text: str) -> Path:
     """Write text to a fresh 0600 temp file beside path (never through a link); the caller replaces or removes it."""
+    _check_dir(path)
     path.parent.mkdir(mode=0o700, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+    except BaseException:
+        os.unlink(tmp)   # a failed save must not block the next one
+        raise
     return tmp
 
 

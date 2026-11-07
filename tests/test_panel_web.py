@@ -1479,7 +1479,7 @@ GOOD_BANK = "answers:\n- key: why\n  labels: [\"Why us?\"]\n  answer: BANKSECRET
 
 def test_bank_page_needs_session(cc):
     from govaios import applyfiles
-    assert cc.req("/apply/bank", cookie=None)[0] in (303, 404)
+    assert cc.req("/apply/bank", cookie=None)[0] == 303
     cc.req("/apply/bank", "POST", body={"text": GOOD_BANK})
     assert not (cc.home / applyfiles.BANK).exists()
     st, page = cc.get("/apply/bank")[:2]
@@ -1511,3 +1511,47 @@ def test_bank_page_rejects_malformed_and_keeps_old(cc):
     assert "YAML error" not in cc.get("/apply/bank")[1]
     assert not [x for x in p.parent.iterdir() if x.name != p.name]
     assert "SECRETBAD" not in AuditLog(cc.home).path.read_text()
+
+
+def _bad(cc, text):
+    from govaios import applyfiles
+    cc.post("/apply/bank", text=text)
+    return (cc.home / applyfiles.BANK).exists(), cc.get("/apply/bank")[1]
+
+
+def test_bank_page_refusals_keep_nothing(cc):
+    for bad, msg in (("- a\n- b\n", "must be a mapping"),
+                     ("answers:\n" + "".join(f"- key: k{i}\n  labels: [a]\n  answer: b\n" for i in range(301)), "at most 300"),
+                     ("a: 2001-13-45\n", "YAML error"),
+                     ("a: " + "[" * 5000 + "\n", "YAML error"),
+                     ("cv_file: /etc/passwd.pdf\n", "inside your home"),
+                     ("cv_file: ~/../../etc/x.pdf\n", "inside your home")):
+        exists, page = _bad(cc, bad)
+        assert not exists and msg in page, msg
+    exists, _ = _bad(cc, "cv_file: ~/not-yet.pdf\n")   # a CV that is not there yet is fine
+    assert exists
+
+
+def test_bank_page_escapes_textarea_and_too_large_not_echoed(cc):
+    cc.post("/apply/bank", text="# </textarea><b>x\nanswers: []\n")
+    page = cc.get("/apply/bank")[1]
+    assert "&lt;/textarea&gt;&lt;b&gt;x" in page and "</textarea><b>" not in page
+    cc.post("/apply/bank", text="# BIGMARK\n" + "x" * 61000)
+    page = cc.get("/apply/bank")[1]
+    assert "too large" in page and "BIGMARK" not in page
+
+
+def test_bank_page_post_needs_csrf(cc):
+    from govaios import applyfiles
+    cc.req("/apply/bank", "POST", cookie=cc.sid, body={"text": GOOD_BANK})
+    cc.req("/apply/bank", "POST", cookie=cc.sid, body={"csrf": "wrong", "text": GOOD_BANK})
+    assert not (cc.home / applyfiles.BANK).exists()
+
+
+def test_bank_page_symlinked_dir_refused(cc):
+    from govaios import applyfiles
+    real = cc.tmp / "elsewhere"
+    real.mkdir()
+    (cc.home / "apply").symlink_to(real)
+    _, page = _bad(cc, GOOD_BANK)
+    assert "symlink" in page and list(real.iterdir()) == []

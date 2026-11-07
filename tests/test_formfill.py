@@ -230,3 +230,24 @@ def test_twin_siblings_resolve_by_identity():
 def test_option_with_control_char_not_returned():
     f = _f("Notice period", "radio", ("Immediate", "30\x07 Days"))
     assert ff.answer_for(f, _bank(("n", ["Notice period"], "30 days")), [f]) is None
+
+
+def test_stage_text_refuses_symlinked_dir_and_cleans_temp(tmp_path, monkeypatch):
+    from govaios.formfill import stage_text
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "apply").symlink_to(real)
+    with pytest.raises(ff.BankError):
+        stage_text(tmp_path / "apply" / "answers.yaml", "x")
+    assert list(real.iterdir()) == []
+    (tmp_path / "ok").mkdir()
+    with pytest.raises(UnicodeEncodeError):   # a failed write leaves no temp behind
+        stage_text(tmp_path / "ok" / "answers.yaml", "\ud800")
+    assert list((tmp_path / "ok").iterdir()) == []
+
+
+@pytest.mark.parametrize("text", ["a: 2001-13-45\n", "a: " + "[" * 5000 + "\n"])
+def test_load_bank_yaml_exceptions_become_bankerror(tmp_path, text):
+    (tmp_path / "answers.yaml").write_text(text)
+    with pytest.raises(ff.BankError, match="YAML error"):
+        ff.load_bank(tmp_path / "answers.yaml", tmp_path)

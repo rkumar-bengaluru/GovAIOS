@@ -819,27 +819,27 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         text = f.get("text", "").replace("\r\n", "\n")
         path = home / applyfiles.BANK
         if len(text.encode()) > 60000:
-            rejected.update(msg="answer bank too large", text=text[:60000])
+            rejected.update(msg="answer bank too large")
             return "/apply/bank"
-        tmp = None
-        try:
-            tmp = stage_text(path, text)
-            load_bank(tmp, agents.user_home())
-        except BankError as e:
-            rejected.update(msg=str(e), text=text)
-            if tmp:
-                os.unlink(tmp)
-            return "/apply/bank"
-        except BaseException:
-            if tmp:
-                os.unlink(tmp)
-            raise
-        try:
-            audited("bank_updated", {"field": "all"}, lambda: os.replace(tmp, path))
-        except BaseException:
-            if os.path.lexists(tmp):
-                os.unlink(tmp)
-            raise
+        with panel.lock:   # apply_answer's bank saves hold it too: one temp name, one writer
+            tmp = None
+            try:
+                tmp = stage_text(path, text)
+                cv = load_bank(tmp, agents.user_home()).cv_file
+                if cv:   # a file not there yet is fine; one that would resolve outside home is not
+                    uh = os.path.realpath(agents.user_home())
+                    if not Path(os.path.realpath(Path(uh, cv[2:]) if cv.startswith("~/") else cv)).is_relative_to(uh):
+                        raise BankError("cv_file must be inside your home folder")
+                audited("bank_updated", {"field": "all"}, lambda: os.replace(tmp, path))
+            except BankError as e:
+                rejected.update(msg=str(e), text=text)
+                if tmp and os.path.lexists(tmp):
+                    os.unlink(tmp)
+                return "/apply/bank"
+            except BaseException:
+                if tmp and os.path.lexists(tmp):
+                    os.unlink(tmp)
+                raise
         tell("Saved your answer bank.")
         return "/apply/bank"
 
