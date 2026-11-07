@@ -146,3 +146,26 @@ Unfilled fields and the end state are logged too ("stopped before Submit").
 - Whether Greenhouse shows a CAPTCHA, and the real AX roles of its fields: from the first capture.
 - CV attach through the macOS open panel is the most fragile step; the fallback is above.
 - Some companies host Greenhouse on their own domain (an embedded form). v1 stops on any other host.
+
+## Capture findings (form 1 of 3, 2026-11-07)
+
+Read-only `gov-aios dump` of one Greenhouse form, untouched, Touch ID; summary of roles and labels only.
+
+- 19 of 19 fields have a label and a DOM id: 6 text fields, 13 dropdowns exposed as `combo_box`. Custom
+  questions use ids like `#question_<10 digits>`; standard ones `#first_name`, `#email`, `#resume`.
+  `fill_field` anchors on id plus label, not label alone.
+- CV: `#resume` has Attach, Dropbox, Google Drive and **Enter manually** (paste text). Pasting avoids the macOS
+  open panel; the cost is that the employer gets plain text, not the PDF. Designer's call: v1 offers both,
+  and the admin picks once in the bank.
+- `Submit application` and `Autofill my application` (MyGreenhouse) are named buttons; both are rated
+  `submit` and never pressed.
+- No CAPTCHA node before submit.
+- A dropdown's options aren't in the tree while it's closed, and it closes when focus leaves Chrome, so a
+  manual open-then-dump shows nothing. So: fill a dropdown by typing the bank answer into it, pressing Enter,
+  and reading the value back. If the value read back isn't exactly the bank answer, clear it and send the
+  field to the admin.
+- Greenhouse's public job-board API (`boards-api.greenhouse.io/v1/boards/<board>/jobs/<id>?questions=true`)
+  returns the same questions, with matching field names and their options. Options are company-specific (CTC
+  bands, notice-period ranges, regions), so a bank answer only fills a dropdown when one option matches it
+  exactly; otherwise the field goes to the admin. The runtime doesn't call this API: that would add a network
+  path outside Chrome. It's used only as an oracle when testing.
