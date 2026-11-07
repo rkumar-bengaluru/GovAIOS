@@ -169,3 +169,22 @@ Read-only `gov-aios dump` of one Greenhouse form, untouched, Touch ID; summary o
   bands, notice-period ranges, regions), so a bank answer only fills a dropdown when one option matches it
   exactly; otherwise the field goes to the admin. The runtime doesn't call this API: that would add a network
   path outside Chrome. It's used only as an oracle when testing.
+
+## Other systems seen (2026-11-07)
+
+Of the four applications the admin tried, Apply landed on Greenhouse once, Workable once and Lever twice. So
+v1 can't be Greenhouse-only in practice.
+
+- **Lever** (`jobs.lever.co`): terms checked. Lever's Terms of Service (last updated 2023-08-25) cover its
+  customers only and say nothing about bots or automated access. Its job-seeker page says the employer "uses
+  our software to manage their job postings and applications", and its GDPR help says customers give
+  candidates their own notice. Same position as Greenhouse: silence, the employer's notice governs, and the
+  admin submits. One employer's form says the employer may use AI to screen; nothing about applicants.
+  The form (public page, read via fetch, not yet through AX) is one page:
+  - Resume/CV is a required file upload with no paste option, so the macOS open panel can't be avoided;
+  - free-text salary and skills fields;
+  - an availability choice, likely radio buttons, which hit the `tab` role mapping in `roles.yaml`;
+  - a location search;
+  - a "LinkedIn import" button, never pressed;
+  - "Submit application".
+- **Workable** (`apply.workable.com`): not checked; it may have its own candidate terms.
