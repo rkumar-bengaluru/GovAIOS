@@ -422,14 +422,18 @@ def test_claude_settings_output(monkeypatch, capsys, tmp_path, govaios_home):
 
 
 def test_claude_settings_not_approved(monkeypatch, capsys, tmp_path, govaios_home):
+    import hashlib
+
     from govaios.approvals import Approvals
-    from govaios.executor import load
+    from govaios.executor import POLICY_PATH, default_policy
     root = tmp_path / "proj"
     root.mkdir()
+    digest = hashlib.sha256(default_policy(str(root.resolve())).encode()).hexdigest()
     _settings(monkeypatch, (False, "failed"))
     assert main(["claude-settings", "--root", str(root)]) == 1
     assert capsys.readouterr().out == ""
-    assert not Approvals(govaios_home / "approvals.json").flow_ok("claude_code", load(govaios_home)[1])
+    assert not (govaios_home / POLICY_PATH).exists()   # written only once approved
+    assert not Approvals(govaios_home / "approvals.json").flow_ok("claude_code", digest)
 
 
 @pytest.mark.parametrize("pick", [lambda h: h, lambda h: h.parent, lambda h: "/", lambda h: h / "sub",

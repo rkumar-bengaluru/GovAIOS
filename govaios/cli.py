@@ -17,11 +17,8 @@ def _doctor(args) -> int:
 
     home = data_home()
     c = identity.check()
-    try:
-        st = hook.MANAGED_SETTINGS.stat()   # follows a link: who can change the content is what counts
-        managed = st.st_uid == 0 and st.st_mode & 0o022 == 0
-    except OSError:
-        managed = False
+    from .claudecode import root_owned
+    managed = root_owned(hook.MANAGED_SETTINGS)
     try:   # row 32: the hook's own comparison
         current = hook.drift(hook.MANAGED_SETTINGS, executor.load(home)[0]) is None
     except Exception:   # no or bad policy: not current
@@ -245,50 +242,33 @@ def _hook(args) -> int:
 
 
 def _claude_settings(args) -> int:
-    import hashlib
-    import json
-
-    from . import auth, executor
-    from .approvals import Approvals
+    from . import auth, claudecode
     from .audit.log import AuditLog
-    from .hook import ID, bad_destination, bad_root, managed_settings
+    from .hook import ID
     from .home import data_home
 
     home = data_home()
-    path = home / executor.POLICY_PATH
-    if any(bad_root(r, home) for r in args.root):
-        print("refused: a project root equals, contains or sits inside a protected path", file=sys.stderr)
+    try:
+        path, raw, pol, digest = claudecode.draft(home, args.root)
+    except ValueError as e:   # our own message
+        print(f"refused: {e}", file=sys.stderr)
         return 1
     if path.exists():
         print(f"note: {path} exists; its project_roots are used, not --root", file=sys.stderr)
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.write_text(executor.default_policy(*(os.path.realpath(r) for r in args.root)))
-    raw = path.read_bytes()   # shown and approved bytes must be the hashed bytes (Rule 11)
-    try:
-        pol, digest = executor.load(home)
-    except ValueError as e:   # our own message: field names only
-        print(f"refused: {path}: {e}", file=sys.stderr)
-        return 1
-    if hashlib.sha256(raw).hexdigest() != digest:
-        print("refused: policy changed while reading; try again", file=sys.stderr)
-        return 1
-    if not pol.get("project_roots") or any(bad_root(r, home) for r in pol["project_roots"]):
-        print(f"refused: {path} needs project_roots, none inside or above a protected path", file=sys.stderr)
-        return 1
-    dests = pol.get("destinations")
-    if not isinstance(dests, list) or any(bad_destination(d) for d in dests):
-        print(f"refused: {path} destinations must be bare host names (e.g. github.com)", file=sys.stderr)
-        return 1
-    q = f"Approve this Claude Code executor policy ({path})?\n\n" + raw.decode(errors="replace")
-    ok, how = auth.approve(q, "approve Claude Code executor policy", home)
+    q = claudecode.question(path, raw)   # shown and approved bytes are the hashed bytes (Rule 11)
+    ok, how = auth.approve(q, claudecode.REASON, home)
     AuditLog(home).append("flow_approval", flow=ID, flow_hash=digest, executor=ID, decision="allow" if ok else "deny",
-                          approver="admin", channel="touch_id", auth=how)
+                          approver="admin", channel="touch_id", auth=how,
+                          shown=auth.shown_digest(q, None if how == "none" else claudecode.REASON))
     if not ok:
         print("approval busy" if how == "busy" else "not approved", file=sys.stderr)
         return 1
-    Approvals(home / "approvals.json").approve_flow(ID, digest)
-    print(json.dumps(managed_settings(pol, home), indent=2))
+    try:
+        claudecode.commit(home, path, raw, digest)
+    except (OSError, ValueError) as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
+    print(claudecode.settings_bytes(pol, home).decode(), end="")
     return 0
 
 

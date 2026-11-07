@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
-from govaios import auth, runstate
+from govaios import auth, claudecode, runstate
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
@@ -75,7 +75,7 @@ background:var(--card);color:var(--steel);border:1px solid var(--line)}
 button.go,a.go{background:var(--me);color:#fff;border-color:var(--me)}
 a.go{display:inline-block;font-weight:700;border-radius:10px;padding:9px 14px;text-decoration:none;border:1px solid var(--me)}
 button.stop{color:var(--stop);border:2px solid var(--stop)}
-input{font:inherit;color:var(--ink);background:var(--card);padding:10px 14px;border:1px solid var(--line);border-radius:10px;min-width:0}
+input,textarea{font:inherit;color:var(--ink);background:var(--card);padding:10px 14px;border:1px solid var(--line);border-radius:10px;min-width:0}
 .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .talk{list-style:none;margin:0;padding:0}
 .talk li{max-width:640px;width:fit-content;margin:0 0 12px;padding:10px 14px;border-radius:12px;
@@ -227,7 +227,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/claude")
 APP_ID = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -248,12 +248,17 @@ NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "no": "Touch ID did
 
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
-                name=None, session=None, tick_s=1.0, helper=None, chrome_state=None, templates=None):
+                name=None, session=None, tick_s=1.0, helper=None, chrome_state=None, templates=None, managed=None,
+                admin=None):
     """Returns the server; server.panel holds the run session, current run and conversation.
     Browsers sign in on the page with Touch ID (POST /signin); the server never shuts itself down. tick_s=None starts no ticker (tests call server.panel.tick()).
-    helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed."""
+    helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed.
+    managed: Claude Code's managed settings file; admin(action, digest) -> int runs the Mac-password step (helper.claude)."""
     launcher = launcher or (helper.run if helper else RunLaunch)
     speak = speak or (helper.say if helper else _say)
+    admin = admin or getattr(helper, "claude", None)
+    from govaios.hook import MANAGED_SETTINGS
+    managed = Path(managed or MANAGED_SETTINGS)
     home = Path(home)
     log = AuditLog(home)
     approvals_path = home / "approvals.json"
@@ -643,6 +648,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             needs = "".join(f"<span class=need>{escape(n)}</span>" for n in t.needs)
             cards.append(f"<section class=tpl><h2>{escape(t.title)}</h2><p>{escape(t.does)}</p>"
                          f"<p class=m>{escape(t.limits)}</p><div>{needs}</div>{act}</section>")
+        ok, _ = claudecode.governed(home, managed)
+        where = claudecode.found()
+        cc = ("<p class=state>Governed</p>" if ok else "<p><a class=go href='/claude'>Set up</a></p>")
+        cards.append("<section class=tpl><h2>Claude Code, governed</h2><p>Every command Claude Code runs is checked by "
+                     "GOV-AIOS first and written to the audit log.</p>"
+                     f"<p class=m>{'Found at ' + escape(where) if where else 'Not found in the usual places on this Mac.'}"
+                     "</p><div><span class=need>Claude Code</span><span class=need>Your Mac password</span>"
+                     f"<span class=need>Touch ID</span></div>{cc}</section>")
         nodir = "" if flows_dir else "<p class=note>No apps folder given, so nothing can be set up here.</p>"
         return _page(f"<h1>Marketplace</h1><p>Templates that ship with GOV-AIOS. Setting one up makes a draft app; "
                      f"it runs only after you approve it with Touch ID.</p>{nodir}{''.join(cards)}", here="/market")
@@ -690,6 +703,91 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         tell(f"{t.title} is set up as a draft. Approve it to let it run.")
         return "/"
 
+    def claude_page(csrf):
+        ok, roots = claudecode.governed(home, managed)
+        if ok:
+            body = (f"<p class=state>Governed. Claude Code may work in: {escape(', '.join(roots))}</p>"
+                    "<p>Turning it off removes the managed settings (Touch ID, then your Mac password). Claude Code "
+                    "then runs without GOV-AIOS checks from its next session.</p>"
+                    f"<form method=post action=/claude/off>{hidden(csrf)}<button>Turn off…</button></form>")
+        else:
+            try:
+                pol = claudecode.executor.load(home)[0]
+            except Exception:
+                pol = None
+            ask = (f"<p>Claude Code may work in the folders of your existing policy: "
+                   f"{escape(', '.join(pol.get('project_roots', [])))}</p>" if pol else
+                   "<label for=folders>Which folders may Claude Code work in? One per line. Anything outside is "
+                   "refused and logged.</label><textarea id=folders name=folders rows=3 required>~/Documents/2026"
+                   "</textarea>")
+            body = ("<ul><li>Rules: every command is checked first and every action is logged (always on).</li>"
+                    "<li>You approve the policy with Touch ID.</li><li>macOS asks for your Mac password to write the "
+                    "managed settings.</li></ul>"
+                    f"<form method=post action=/claude/setup>{hidden(csrf)}{ask}"
+                    "<p><button class=go>Approve and install…</button> <a href='/market'>Cancel</a></p></form>"
+                    "<p class=m>Sessions already open stay ungoverned until they restart.</p>")
+        where = claudecode.found()
+        found = f"Found at {escape(where)}." if where else "Not found in the usual places on this Mac."
+        return _page(f"<section class=card><h1>Claude Code, governed</h1><p class=m>{found}</p>{body}</section>",
+                     here="/market")
+
+    def _folders(text):
+        uh = claudecode.user_home()
+        out = [str(uh / l.strip()[2:]) if l.strip().startswith("~/") else l.strip() for l in text.splitlines() if l.strip()]
+        if not 0 < len(out) <= 10 or not all(r.startswith("/") and Path(r).is_dir() for r in out):
+            raise ValueError("each folder must be an existing folder, written in full or starting with ~/")
+        return out
+
+    def claude_setup(f):
+        if admin is None:
+            tell("Claude Code setup needs the installed panel.")
+            return "/"
+        try:
+            roots = [] if (home / claudecode.executor.POLICY_PATH).exists() else _folders(f.get("folders", ""))
+            path, raw, pol, digest = claudecode.draft(home, roots)
+        except ValueError as e:   # our own messages
+            tell(f"Claude Code was not set up: {e}.")
+            return "/"
+        q = claudecode.question(path, raw)
+        ok, how = auth.approve(q, claudecode.REASON, home)
+        log.append("flow_approval", flow=claudecode.ID, flow_hash=digest, executor=claudecode.ID,
+                   decision="allow" if ok else "deny", approver="admin", channel="touch_id", auth=how,
+                   shown=shown_digest(q, None if how == "none" else claudecode.REASON))
+        if not ok:
+            tell("Claude Code was not set up: the policy was not approved.")
+            return "/"
+        try:
+            claudecode.commit(home, path, raw, digest)
+        except (OSError, ValueError):
+            tell("Claude Code was not set up: the policy changed while it was being approved. Try again.")
+            return "/"
+        code = admin("install", claudecode.stage(home, pol))
+        log.append("setting", field="claude_code", action="install", outcome=str(code))
+        if code == 0 and claudecode.governed(home, managed)[0]:
+            tell("Claude Code is governed. Sessions already open stay ungoverned until they restart.")
+        elif code == 2:
+            tell("Claude Code was not set up: the Mac password was cancelled. The policy stays approved; "
+                 "press Approve and install again to finish.")
+        else:
+            tell("Claude Code was not set up: writing the managed settings failed.")
+        return "/"
+
+    def claude_off(f):
+        if admin is None:
+            tell("Turning Claude Code off needs the installed panel.")
+            return "/"
+        ok, how = auth.prove("turn off Claude Code governance", home)
+        log.append("setting", field="claude_code", action="remove", decision="allow" if ok else "deny",
+                   approver="admin", channel="touch_id", auth=how)
+        if not ok:
+            return "/claude"
+        code = admin("remove", "")
+        log.append("setting", field="claude_code", action="remove", outcome=str(code))
+        tell("Claude Code governance is off. New sessions run without GOV-AIOS checks." if code == 0
+             else "Claude Code governance is still on: the Mac password was cancelled." if code == 2
+             else "Claude Code governance is still on: removing the managed settings failed.")
+        return "/"
+
     def revoke(f):
         kind, flow, dest = f.get("kind"), f.get("flow", ""), f.get("destination", "")
         ap = Approvals(approvals_path)
@@ -705,7 +803,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/approvals"
 
     POSTS = {"/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
-             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
+             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/claude/setup": claude_setup,
+             "/claude/off": claude_off}
 
     # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
     SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
@@ -876,7 +975,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
-                        else market_page() if u.path == "/market" else market_setup_page(sess[1], mk[1]) if mk
+                        else market_page() if u.path == "/market" else claude_page(sess[1]) if u.path == "/claude"
+                        else market_setup_page(sess[1], mk[1]) if mk
                         else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed
                 return self._send(500, "internal error")

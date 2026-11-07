@@ -45,6 +45,23 @@ class FakeLaunch:
         self.stopped = self.stopped_reason = reason
 
 
+def _fake_admin(home, ms):
+    """The Mac-password step without root: what ROOT_SCRIPT does, as this user."""
+    def run(action, digest):
+        import hashlib
+        dst = ms / "managed-settings.json"
+        if action == "remove":
+            dst.unlink(missing_ok=True)
+            return 0
+        data = (home / "executors" / "managed-settings.json").read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            return 3
+        ms.mkdir(exist_ok=True)
+        dst.write_bytes(data)
+        return 0
+    return run
+
+
 @pytest.fixture
 def panel(tmp_path, monkeypatch, ui):
     from govaios import auth
@@ -69,11 +86,13 @@ def panel(tmp_path, monkeypatch, ui):
     settings.set_name(home, "Rupak")
     made = []
     launcher = type("L", (FakeLaunch,), {"made": made})
+    admin_calls, admin_answer = [], [_fake_admin(home, tmp_path / "ClaudeCode")]
     spoken = []
     mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
     srv = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
                             now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None,
-                            chrome_state=tmp_path / "Local State")
+                            chrome_state=tmp_path / "Local State", managed=tmp_path / "ClaudeCode" / "managed-settings.json",
+                            admin=lambda a, d: (admin_calls.append((a, d)), admin_answer[0](a, d))[1])
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
 
@@ -92,6 +111,7 @@ def panel(tmp_path, monkeypatch, ui):
     P = type("P", (), {})()
     P.home, P.flows, P.srv, P.made, P.answers, P.asked, P.req, P.sid = home, flows, srv, made, answers, asked, req, sid
     P.spoken, P.mono, P.wall, P.launcher, P.ui = spoken, mono, wall, launcher, ui
+    P.admin_calls, P.admin_answer, P.tmp = admin_calls, admin_answer, tmp_path
     P.get = lambda path: req(path, cookie=sid)
     P.csrf = lambda: re.search(r"name=csrf value='([^']+)'", P.get("/")[1])[1]
     P.post = lambda path, headers=None, **f: req(path, "POST", cookie=sid, headers=headers,
@@ -995,3 +1015,88 @@ def test_marketplace_signed_out_goes_to_locked_page(panel):
         s, _, r = P.ui.raw(P.srv.server_address[1], "GET", path)
         assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
 
+
+
+@pytest.fixture
+def cc(panel, monkeypatch):
+    from govaios import claudecode
+    monkeypatch.setattr(claudecode, "root_owned", lambda p: p.exists())   # the fake step cannot chown to root
+    proj = panel.tmp / "proj"
+    proj.mkdir()
+    panel.proj = proj
+    return panel
+
+
+def _tells(P):
+    return [l for l in P.srv.panel.convo if l.startswith("GOV-AIOS -> ")]
+
+
+def test_claude_code_card_and_page(cc):
+    body = cc.get("/market")[1]
+    assert "Claude Code, governed" in body and "href='/claude'" in body
+    page = cc.get("/claude")[1]
+    assert "<textarea id=folders name=folders" in page and "~/Documents/2026" in page and "<script" not in page
+
+
+def test_claude_code_setup_approves_then_installs(cc):
+    from govaios.executor import POLICY_PATH
+    st, _, r = cc.post("/claude/setup", folders=str(cc.proj))
+    assert st == 303 and r.getheader("Location") == "/"
+    pol_text = (cc.home / POLICY_PATH).read_text()
+    assert str(cc.proj.resolve()) in pol_text and any(pol_text in q for q in cc.asked)
+    (act, digest), = cc.admin_calls
+    assert act == "install" and len(digest) == 64
+    assert "Claude Code is governed" in _tells(cc)[-1]
+    assert "<p class=state>Governed</p>" in cc.get("/market")[1] and "Turn off" in cc.get("/claude")[1]
+    fa = _log(cc.home, "flow_approval")[-1]
+    assert fa["flow"] == "claude_code" and fa["decision"] == "allow" and len(fa["shown"]) == 64
+    s = _log(cc.home, "setting")[-1]
+    assert (s["field"], s["action"], s["outcome"]) == ("claude_code", "install", "0")
+
+
+def test_claude_code_not_approved_writes_nothing(cc):
+    from govaios.executor import POLICY_PATH
+    cc.answers["approve"] = False
+    cc.post("/claude/setup", folders=str(cc.proj))
+    assert not (cc.home / POLICY_PATH).exists() and cc.admin_calls == []
+    assert "not approved" in _tells(cc)[-1]
+
+
+def test_claude_code_password_cancelled_then_retried(cc):
+    cc.admin_answer[0], real = (lambda a, d: 2), cc.admin_answer[0]
+    cc.post("/claude/setup", folders=str(cc.proj))
+    assert "Mac password was cancelled" in _tells(cc)[-1] and "Set up" in cc.get("/market")[1]
+    cc.admin_answer[0] = real
+    page = cc.get("/claude")[1]
+    assert "existing policy" in page and "<textarea" not in page   # the approved folders are kept
+    cc.post("/claude/setup")
+    assert "Claude Code is governed" in _tells(cc)[-1]
+
+
+@pytest.mark.parametrize("folders", ["", "relative/dir", "/no/such/folder", "~/no-such-folder-xyz"])
+def test_claude_code_bad_folders_never_ask(cc, folders):
+    n = len(cc.asked)
+    cc.post("/claude/setup", folders=folders)
+    assert len(cc.asked) == n and cc.admin_calls == [] and "was not set up" in _tells(cc)[-1]
+
+
+def test_claude_code_protected_folder_refused(cc):
+    n = len(cc.asked)
+    cc.post("/claude/setup", folders=str(cc.home))
+    assert len(cc.asked) == n and cc.admin_calls == [] and "protected path" in _tells(cc)[-1]
+
+
+def test_claude_code_turn_off_needs_touch_id(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    cc.answers["prove"] = False
+    cc.post("/claude/off")
+    assert [a for a, _ in cc.admin_calls] == ["install"]
+    cc.answers["prove"] = True
+    cc.post("/claude/off")
+    assert [a for a, _ in cc.admin_calls] == ["install", "remove"]
+    assert "governance is off" in _tells(cc)[-1] and "Set up" in cc.get("/market")[1]
+
+
+def test_claude_code_setup_forged_without_csrf(cc):
+    st = cc.req("/claude/setup", "POST", cookie=cc.sid, body={"folders": str(cc.proj)})[0]
+    assert st == 403 and cc.admin_calls == []
