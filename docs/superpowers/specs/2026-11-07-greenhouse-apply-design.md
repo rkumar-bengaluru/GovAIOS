@@ -209,3 +209,17 @@ Read-only AX dump of one `jobs.lever.co/…/apply` form, untouched.
 - **hCaptcha is present** (`#h-captcha`, next to Submit). The admin presses Submit, so a challenge there is
   the admin's to solve. If it ever appears before the fill, the CAPTCHA rule applies (card, admin solves it).
 - `Apply with LinkedIn` is never pressed; `SUBMIT APPLICATION` (`#btn-submit`) is `submit`.
+
+## Capture findings, Lever form 2 (2026-11-07)
+
+A second company's Lever form:
+
+- **The Lever template is consistent:** the same `#resume-upload-input`, `#btn-submit` and `#h-captcha`, and
+  the same standard fields with names.
+- **This form has about 15 employer questions,** most of them self-assessment radio groups with long,
+  company-written options ("5–7 years — Solid professional experience…"). So "only a handful differ" holds for
+  some employers, not all. On a form like this, early runs fill the standard fields and send most of the rest
+  to the admin. The fill rate per form is the number to report.
+- **3 native `<select>` dropdowns, unnamed** (same rule: the question text from the group's label node). Unlike
+  Greenhouse's dropdowns, their options are readable as menu items while closed.
+- **The admin card must support single-choice questions with long option text.**
