@@ -601,12 +601,15 @@ class Runner:
             a["yourself"] += [f.label for f in pend]
             return
         self.gate("ask_admin", "read")
+        # a select's first option is its placeholder (formfill's rule): never offered, never accepted
+        offered = {f.key: list(f.options[1:] if f.kind == "select" else f.options if f.kind == "radio" else ())
+                   for f in pend}
         asked = {f.key: f for f in pend}
         try:
+            remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
             write_json(self.home, ASK, {"run": self.run_id, "fields": [
-                {"key": f.key, "label": f.label, "kind": f.kind,
-                 "options": list(f.options) if f.kind in ("select", "radio") else []} for f in pend]})
-            deadline = time.time() + ASK_TIMEOUT_S
+                {"key": f.key, "label": f.label, "kind": f.kind, "options": offered[f.key]} for f in pend]})
+            deadline = time.monotonic() + ASK_TIMEOUT_S
             while True:
                 reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet
                 if reply and reply.get("run") == self.run_id:
@@ -615,7 +618,7 @@ class Runner:
                     raise Stop("emergency stop")
                 if auth.screen_locked():
                     raise Stop("screen_locked")
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     raise Stop("no answer from admin")
                 time.sleep(1)
         finally:
@@ -623,7 +626,7 @@ class Runner:
         answers = reply.get("answers")
         if not isinstance(answers, dict) or not all(
                 k in asked and isinstance(v, str) and len(v) <= 2000 and ok_value(v, asked[k].kind)
-                and (not v or asked[k].kind not in ("select", "radio") or v in asked[k].options)
+                and (not v or asked[k].kind not in ("select", "radio") or v in offered[k])
                 for k, v in answers.items()):
             raise Stop("bad reply")
         self._act("raise_pinned", self.d.raise_pinned)

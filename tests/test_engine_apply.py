@@ -356,7 +356,7 @@ def test_ask_round_trip(tmp_path, capsys):
     assert err is None and d.values["why"] == SECRET
     [ask] = seen
     assert ask["run"] == "r1" and [(f["label"], f["kind"], f["options"]) for f in ask["fields"]] == [
-        ("Why us", "text", []), ("Sponsor", "select", ["Select...", "Yes", "No"])]
+        ("Why us", "text", []), ("Sponsor", "select", ["Yes", "No"])]
     [f] = fills(e)
     assert f["source"] == "admin" and f["outcome"] == "done"
     assert d.calls.index("raise_pinned") < d.calls.index(("type_into", "why"))
@@ -369,7 +369,7 @@ def test_ask_round_trip(tmp_path, capsys):
 
 def test_ask_timeout_stops_and_cleans(tmp_path, monkeypatch):
     clock = iter(range(0, 10**6, 60))
-    monkeypatch.setattr(engine.time, "time", lambda: next(clock))
+    monkeypatch.setattr(engine.time, "monotonic", lambda: next(clock))
     d = FormDesk(lambda d: form(text_field(d, "why", "Why us")))
     _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
     assert str(err) == "no answer from admin" and not d.values and "raise_pinned" not in d.calls
@@ -377,7 +377,7 @@ def test_ask_timeout_stops_and_cleans(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("label, value", [
-    ("Nope", "x"), ("Sponsor", "Maybe"), ("Why us", "a\tb"), ("Why us", "x" * 2001), ("Why us", 3)])
+    ("Nope", "x"), ("Sponsor", "Maybe"), ("Sponsor", "Select..."), ("Why us", "a\tb"), ("Why us", "x" * 2001), ("Why us", 3)])
 def test_ask_bad_reply_stops(tmp_path, label, value):
     d = FormDesk(ask_form)
     keys = lambda a: {f["label"]: f["key"] for f in a["fields"]}   # noqa: E731
@@ -385,7 +385,7 @@ def test_ask_bad_reply_stops(tmp_path, label, value):
     _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
     t.join(1)
     assert str(err) == "bad reply" and not d.values and "raise_pinned" not in d.calls
-    assert not (tmp_path / "apply" / "reply.json").exists()
+    assert not (tmp_path / "apply" / "reply.json").exists() and not (tmp_path / "apply" / "ask.json").exists()
 
 
 def test_cli_run_never_asks(tmp_path):
@@ -405,3 +405,20 @@ def test_emergency_stop_while_waiting(tmp_path, monkeypatch):
     _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
     assert str(err) == "emergency stop" and not d.values
     assert not (tmp_path / "apply" / "ask.json").exists()
+
+
+def test_screen_locked_while_waiting(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: (tmp_path / "apply" / "ask.json").exists())
+    d = FormDesk(lambda d: form(text_field(d, "why", "Why us")))
+    _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
+    assert str(err) == "screen_locked" and not d.values and "raise_pinned" not in d.calls
+    assert not (tmp_path / "apply" / "ask.json").exists()
+
+
+def test_stale_reply_cleared_before_asking(tmp_path):
+    applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": "r1", "answers": {"x": "old"}})   # left from an earlier ask
+    d = FormDesk(ask_form)
+    t = answer_when_asked(tmp_path, lambda a: {}, [])
+    _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
+    t.join(1)
+    assert err is None and result(tmp_path)["yourself"] == ["Why us", "Sponsor"]
