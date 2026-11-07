@@ -529,3 +529,38 @@ def test_attach_missing_check_element_goes_to_yourself(tmp_path):
     desk.build = lambda d: form(N("button", "Attach"))
     r, entries, err = attach(tmp_path, desk, rows=[])
     assert err is None and result(tmp_path)["yourself"] == ["Resume/CV"]
+
+
+class StopAfterSheet(CvDesk):
+    """The emergency stop lands while the engine waits for the page after the file sheet: STOPPED first, then SIGTERM."""
+
+    def __init__(self, home):
+        super().__init__()
+        self.home, self.armed = home, False
+
+    def choose_file(self, path):
+        super().choose_file(path)
+        (self.home / "STOPPED").touch()
+        self.armed = True
+
+    def web_root(self, app):
+        if self.armed:
+            raise engine.Stop("emergency stop")   # what the SIGTERM handler raises
+        return super().web_root(app)
+
+
+@pytest.mark.usefixtures('touch_id_ok')
+def test_emergency_stop_after_file_sheet_ends_run(tmp_path):
+    r, entries, err = attach(tmp_path, StopAfterSheet(tmp_path))
+    assert str(err) == "emergency stop"
+    assert not any(x.get("kind") == "flow_end" and x.get("outcome") == "done" for x in entries)
+    assert result(tmp_path)["yourself"] == ["Resume/CV"]   # the card lists the CV until it is attached
+
+
+@pytest.mark.usefixtures('touch_id_ok')
+def test_stop_at_cv_prompt_leaves_cv_on_card(tmp_path, monkeypatch):
+    def prompt(*a, **k):
+        raise engine.Stop("emergency stop")
+    monkeypatch.setattr(engine.auth, "approve", prompt)
+    r, entries, err = attach(tmp_path, CvDesk())
+    assert str(err) == "emergency stop" and result(tmp_path)["yourself"] == ["Resume/CV"]

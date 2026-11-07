@@ -600,6 +600,8 @@ class Runner:
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
         from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
         a, ref = self.ctx["apply"], self.ref(s["target"])
+        a["yourself"].append("Resume/CV")   # until attached: a stop from here on leaves it on the result card
+        self.write_result()
         p = cv_path(a["bank"], user_home())
         if p is not None:
             _, spec = self.page_element(ref)
@@ -626,9 +628,11 @@ class Runner:
                 if "No file chosen" in chk.name:
                     p = None
             except Stop:   # the check element is missing or ambiguous
+                if runstate.stopped(self.home):   # an emergency stop (STOPPED is touched before SIGTERM)
+                    raise
                 p = None
-        if p is None:
-            a["yourself"].append("Resume/CV")
+        if p is not None:
+            a["yourself"].remove("Resume/CV")
         self.write_result()
 
     def ask_pending(self):

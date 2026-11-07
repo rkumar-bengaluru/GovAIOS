@@ -13,7 +13,8 @@ The run:
 - for a question the bank can't answer, shows an **answer card** in the panel. It waits up to 15 minutes.
   You can tick "save to my bank" to keep the answer;
 - attaches your CV after Touch ID (every time, never remembered);
-- shows a **result card** (filled, asked, left for you), and **stops before Submit**. You review and submit.
+- shows a **result card** (filled of total, "fill in Chrome yourself", "check"), and **stops before Submit**.
+  You review and submit. If the run stopped early, the card says so: check the form in Chrome.
 
 Fields it can't fill or read back are left for you ("fill yourself"). Nothing is ever submitted by GOV-AIOS.
 
@@ -44,17 +45,24 @@ placeholders: `https://himalayas.app/companies/<company>/jobs/<job>`.
 
 **A. Greenhouse job.** Pick a job whose Apply leads to Greenhouse. In Talk: `/job-apply <link>`. Expect: the
 form fills from the bank; a question not in the bank shows the answer card (answer it once with "save to my
-bank" and once without); Touch ID is asked before the CV attaches; the result card lists what was filled,
-asked and left; the run stops with Submit untouched.
+bank" and once without). Before sending, type an answer and wait 10 s: it must still be there (the page doesn't
+reload while the card shows). Touch ID is asked before the CV attaches; the result card shows filled of total,
+what to fill yourself and what to check; the run stops with Submit untouched.
 
 **B. Lever job.** The same on a Lever job (`jobs.lever.co/<company>/<id>/apply`).
 
 **C. Workable job.** Expect the run to stop with "unexpected page" and touch nothing.
 
 **D. Emergency stop.** Start a run, wait for the answer card, press **ctrl+option+cmd+.** The run must stop and
-its temporary files must be removed. Clear the stop from the panel.
+its temporary files must be removed. Clear the stop from the panel. Repeat twice more, stopping (1) while the
+CV Touch ID prompt is up and (2) right after the file sheet closes. Each time the panel must say the run
+stopped (not "finished"), and the result card must say the run stopped and list Resume/CV under "fill in Chrome
+yourself" unless it was attached.
 
 **E. Audit.** Panel → Audit log: each fill shows its source (bank or your answer) and no values.
+
+**E2. Logged out.** Log out of Himalayas in that Chrome profile and run `/job-apply <link>`. Expect the run to stop
+on the job page and ask you (Touch ID) to log in and resume; nothing is clicked. Log back in after.
 
 **F. New tab or new window.** Note whether Himalayas' Apply opens a tab or a window. A window stops the run
 (see Known gaps); report which you saw.
@@ -68,7 +76,8 @@ All four work as before, with no new approval prompt (their flow digests are pin
 - A pasted link with `?utm...`, a `#fragment` or a trailing `/` is trimmed before it is checked.
 - A select's placeholder ("Select...") is never offered as an answer.
 - A dropdown drawn outside the form goes to "fill yourself".
-- `cv_file` must be inside your home folder (a symlink out is refused). A missing file is allowed in the bank,
+- `cv_file` must be inside your home folder. At run time any symlinked CV is refused (even one pointing inside
+  home, e.g. a synced or aliased folder): point `cv_file` at the real file. A missing file is allowed in the bank,
   but the run then leaves the CV for you.
 - The bank page refuses edits over about 60 KB, and shows a message rather than saving part of it.
 - An unfocusable combo box stops the run; a combo whose text doesn't match the read-back goes to "fill yourself".

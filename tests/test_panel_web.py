@@ -1,6 +1,7 @@
 import base64
 import http.client
 import json
+import os
 import re
 import shutil
 import threading
@@ -1555,3 +1556,80 @@ def test_bank_page_symlinked_dir_refused(cc):
     (cc.home / "apply").symlink_to(real)
     _, page = _bad(cc, GOOD_BANK)
     assert "symlink" in page and list(real.iterdir()) == []
+
+
+REFRESH = '<meta http-equiv="refresh" content="2">'
+
+
+def test_answer_card_stops_refresh_and_autofocus(cc):
+    from govaios import applyfiles
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.say(f"/job-apply {LINK}")
+    page = cc.get("/")[1]   # live, nothing asked: today's refresh and focus
+    assert REFRESH in page and re.search(r"<input id=cmd [^>]*autofocus", page)
+    from govaios.panel.tickets import run_id
+    rid = run_id(cc.made[-1].ticket)
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": rid, "fields": ASKED})
+    page = cc.get("/")[1]   # the admin is typing: nothing may reload or steal focus
+    assert "Save to my bank" in page and "refresh" not in page and not re.search(r"<input id=cmd [^>]*autofocus", page)
+    applyfiles.write_json(cc.home, applyfiles.REPLY, {"run": rid, "answers": {}})
+    page = cc.get("/")[1]
+    assert REFRESH in page and re.search(r"<input id=cmd [^>]*autofocus", page)
+
+
+def _result(cc, done_ok):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.RESULT, {"run": rid, "filled": 2, "total": 3,
+                                                       "yourself": ["Resume/CV"], "check": []})
+    cc.made[-1].done, cc.made[-1].code = True, 0 if done_ok else 70
+    if not done_ok:
+        cc.made[-1].stopped_reason = "emergency stop"
+    return cc.get("/")[1]
+
+
+def test_result_card_finished_says_submit_yourself(cc):
+    page = _result(cc, True)
+    assert "press Submit yourself" in page and "stopped" not in page.split("Job Apply</h2>")[-1]
+
+
+def test_result_card_stopped_run_says_check_form(cc):
+    page = _result(cc, False).split("Job Apply</h2>")[-1]
+    assert "press Submit yourself" not in page
+    assert "The run stopped. Check the form in Chrome." in page and "Resume/CV" in page
+
+
+def test_bank_post_limit_raised_for_bank_only(cc):
+    from govaios import applyfiles
+    big = GOOD_BANK + ("#" + ":" * 99 + "\n") * 500   # ~50 KB; ':' and newline url-encode to 3 bytes each
+    assert 50000 <= len(big) <= 60000 and len(urlencode({"text": big})) > 3 * 50000
+    st = cc.post("/apply/bank", text=big)[0]
+    assert st in (302, 303) and (cc.home / applyfiles.BANK).read_text() == big
+    st = cc.post("/say", text="x" * 70000)[0]   # every other route keeps the old limit
+    assert st == 400
+
+
+def test_bank_page_get_refuses_symlink_and_fifo(cc):
+    from govaios import applyfiles
+    (cc.home / "apply").mkdir(mode=0o700)
+    secret = cc.tmp / "secret.yaml"
+    secret.write_text("answers: []\n# LINKEDSECRET\n")
+    (cc.home / applyfiles.BANK).symlink_to(secret)
+    st, page = cc.get("/apply/bank")[:2]
+    assert st == 200 and "LINKEDSECRET" not in page
+    (cc.home / applyfiles.BANK).unlink()
+    os.mkfifo(cc.home / applyfiles.BANK)
+    t = threading.Thread(target=lambda: cc.get("/apply/bank"), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "GET /apply/bank hung on a FIFO"
+
+
+def test_bank_page_get_refuses_symlinked_dir(cc):
+    from govaios import applyfiles
+    real = cc.tmp / "elsewhere2"
+    real.mkdir()
+    (real / "answers.yaml").write_text("# DIRSECRET\n")
+    (cc.home / "apply").symlink_to(real)
+    assert "DIRSECRET" not in cc.get("/apply/bank")[1]

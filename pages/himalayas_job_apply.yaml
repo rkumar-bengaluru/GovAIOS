@@ -3,7 +3,7 @@ page:
   id: himalayas_job_apply
   identification:
     title_matches: ' hiring .* \| Himalayas$'
-    anchors: [job_title, description, apply_heading]
+    anchors: [job_title, description, apply_heading, apply_button]   # logged out, Apply now is a link
   elements:
     main:          { role: main, risk: read }
     job_title:     { role: heading, within: main, index: 0, risk: read }

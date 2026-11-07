@@ -51,26 +51,34 @@ def _check_dir(path: Path) -> None:
         pass
 
 
-def load_bank(path: Path, user_home: Path) -> Bank:
+def read_bank(path: Path) -> bytes | None:
+    """The bank's bytes, None when there is none. Never follows a link; a FIFO can't block (O_NONBLOCK)."""
     _check_dir(path)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return Bank()
+        return None
     except OSError:
         raise BankError("answer bank cannot be opened") from None
     with os.fdopen(fd, "rb") as f:
         if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
             raise BankError("answer bank is not a regular file")
-        try:
-            data = yaml.safe_load(f.read().decode("utf-8"))
-        except UnicodeDecodeError:
-            raise BankError("answer bank is not UTF-8") from None
-        except yaml.YAMLError as e:
-            mark = getattr(e, "problem_mark", None)
-            raise BankError(f"YAML error at line {mark.line + 1}" if mark else "YAML error") from None
-        except (ValueError, RecursionError):   # e.g. a date like 2001-13-45, or nesting too deep
-            raise BankError("YAML error") from None
+        return f.read()
+
+
+def load_bank(path: Path, user_home: Path) -> Bank:
+    raw = read_bank(path)
+    if raw is None:
+        return Bank()
+    try:
+        data = yaml.safe_load(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise BankError("answer bank is not UTF-8") from None
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        raise BankError(f"YAML error at line {mark.line + 1}" if mark else "YAML error") from None
+    except (ValueError, RecursionError):   # e.g. a date like 2001-13-45, or nesting too deep
+        raise BankError("YAML error") from None
     if data is None:
         return Bank()
     if not isinstance(data, dict):
@@ -189,10 +197,12 @@ def _question(start, parents) -> str:
 def _read(region):
     parents = {id(c): n for n in region.walk() for c in n.children}
     out, seen, counts, done = [], set(), {}, set()
+    ids = [n.dom_id for n in region.walk() if _is_field(n) and n.dom_id]
+    dup = {i for i in ids if ids.count(i) > 1}   # a repeated id would give two questions one key
 
     def add(node, label, kind, options, filled, use_id=True):
         nl = normalize(label)
-        if use_id and node.dom_id:
+        if use_id and node.dom_id and node.dom_id not in dup:
             key = "#" + node.dom_id
         else:
             key = f"label:{nl}:{counts.get(nl, 0)}"

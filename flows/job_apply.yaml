@@ -29,6 +29,7 @@ workflow:
       on_match:
         himalayas_job_apply: continue
         himalayas_logged_out: stop_and_request_user
+        himalayas_job_logged_out: stop_and_request_user
         unknown: stop_and_report
     - { id: apply, action: click, target: himalayas_job_apply.apply_button }
     - id: on_form

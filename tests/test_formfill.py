@@ -251,3 +251,28 @@ def test_load_bank_yaml_exceptions_become_bankerror(tmp_path, text):
     (tmp_path / "answers.yaml").write_text(text)
     with pytest.raises(ff.BankError, match="YAML error"):
         ff.load_bank(tmp_path / "answers.yaml", tmp_path)
+
+
+def test_load_bank_refuses_symlinked_file_and_fifo_without_hanging(tmp_path):
+    import threading
+    (tmp_path / "apply").mkdir()
+    p = tmp_path / "apply" / "answers.yaml"
+    (tmp_path / "real.yaml").write_text(yaml.safe_dump(GOOD))
+    p.symlink_to(tmp_path / "real.yaml")
+    with pytest.raises(ff.BankError):
+        ff.load_bank(p, tmp_path)
+    p.unlink()
+    os.mkfifo(p)
+    out = []
+    t = threading.Thread(target=lambda: out.append(pytest.raises(ff.BankError, ff.read_bank, p)), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive() and out, "load_bank blocked on a FIFO"
+
+
+def test_repeated_dom_id_falls_back_to_label_keys():
+    r = N("group", "", N("text_field", "First", dom_id="dup"), N("text_field", "Second", dom_id="dup"),
+          N("text_field", "Email", dom_id="e"))
+    fs = ff.read_form(r)
+    assert [f.key for f in fs] == ["label:first:0", "label:second:0", "#e"]
+    assert ff.locate(r, fs[1]) is r.children[1]

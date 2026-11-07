@@ -16,7 +16,7 @@ JOB = "https://himalayas.app/companies/acme-test/jobs/staff-engineer"
 GH = "https://job-boards.greenhouse.io/acmetest/jobs/1234567"
 LV = "https://jobs.lever.co/acmetest/0000-1111/apply"
 DESTS = ["https://www.google.com", "https://himalayas.app", "https://job-boards.greenhouse.io", "https://jobs.lever.co"]
-NEW_PAGES = ("himalayas_job_apply", "greenhouse_application", "lever_application")
+NEW_PAGES = ("himalayas_job_apply", "himalayas_job_logged_out", "greenhouse_application", "lever_application")
 CV = "Resume-Test.pdf"
 SECRET = "SECRET-NOTICE"   # an answer value: must never reach the audit log or output
 
@@ -32,7 +32,7 @@ def submit_elements():
 def test_flow_loads_and_binds_pages():
     digest, raw = read_bound(FLOW, REPO / "pages")
     wf = yaml.safe_load(raw[FLOW])["workflow"]
-    assert pages_used(wf) == {"google_home", "himalayas_job_apply", "himalayas_logged_out",
+    assert pages_used(wf) == {"google_home", "himalayas_job_apply", "himalayas_logged_out", "himalayas_job_logged_out",
                               "greenhouse_application", "lever_application"}
     assert (wf["id"], wf["app"], wf["permissions"]["max_element_risk"], wf["destinations"]) == \
         ("job_apply", "Job Apply", "modify", DESTS)
@@ -77,14 +77,36 @@ def test_existing_flow_digests_unchanged():
 
 # ---------- end to end on fake trees ----------
 
-SUBMIT_NAMES = {"Submit application", "SUBMIT APPLICATION", "Autofill my application", "Apply with LinkedIn"}
+def _page(pid):
+    return yaml.safe_load((REPO / "pages" / f"{pid}.yaml").read_text())["page"]
 
 
-def job_page():
+# every submit-rated element of every page the flow uses: the fake desktop refuses to click any of them
+SUBMIT_SPECS = [spec for pid in sorted(pages_used(yaml.safe_load(FLOW.read_text())["workflow"]))
+                for spec in _page(pid)["elements"].values() if spec["risk"] == "submit"]
+
+
+def test_submit_guard_covers_himalayas_and_forms():
+    names = {s.get("name") or s.get("dom_id") for s in SUBMIT_SPECS}
+    assert {"Save", "Job expired?", "Submit application", "Autofill my application", "btn-submit",
+            "Apply with LinkedIn"} <= names
+
+
+def job_page(logged_in=True):
+    kind = "button" if logged_in else "link"   # Save / Apply now are links when logged out
     return N("document", "Acme Test hiring Staff Engineer | Himalayas", children=[
-        N("main", children=[N("heading", "Staff Engineer"), N("link", "Acme Test"), N("button", "Save"),
+        N("banner", children=[] if logged_in else [N("link", "Log in")]),
+        N("main", children=[N("heading", "Staff Engineer"), N("link", "Acme Test"), N(kind, "Save"),
                             N("article", children=[N("text", "A job.")])]),
-        N("heading", "Apply now"), N("button", "Apply now"), N("button", "Job expired?")])
+        N("heading", "Apply now"), N(kind, "Apply now"), N("button", "Job expired?")])
+
+
+@pytest.mark.parametrize("logged_in,want", [(True, "himalayas_job_apply"), (False, "himalayas_job_logged_out")])
+def test_job_page_classified_by_login_state(logged_in, want):
+    guard = next(s for s in yaml.safe_load(FLOW.read_text())["workflow"]["steps"] if s["id"] == "authentication_guard")
+    hits = [p for p in guard["on_match"] if p != "unknown" and engine.identify(_page(p), job_page(logged_in))]
+    assert hits == [want]
+    assert guard["on_match"][want] == ("continue" if logged_in else "stop_and_request_user")
 
 
 def greenhouse(d):
@@ -157,7 +179,7 @@ class ApplyDesk(FakeDesktop):
             self.values[node.dom_id or node.name or "q1"] = text
 
     def click(self, node):
-        assert node.name not in SUBMIT_NAMES and node.dom_id != "btn-submit", f"clicked {node.name}"
+        assert not any(engine.matches(node, spec) for spec in SUBMIT_SPECS), f"clicked {node.name}"
         self.calls.append(("click", node.dom_id or node.name))
         if node.name == "Apply now":
             self.url = self.form_url
@@ -229,14 +251,16 @@ def test_end_to_end_fake_greenhouse(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.usefixtures("env")
-def test_end_to_end_fake_lever(tmp_path, monkeypatch):
+def test_end_to_end_fake_lever(tmp_path, monkeypatch, capsys):
     d = ApplyDesk(LV)
     e, res = run_apply(tmp_path, d)
     assert e[-1]["kind"] == "flow_end"
     assert {k: d.values[k] for k in ("Full name✱", "Email✱", "q1", "radio", "cv")} == \
         {"Full name✱": "Testa Example", "Email✱": "testa@example.invalid", "q1": SECRET, "radio": "Yes", "cv": CV}
     assert res == {"run": "r1", "filled": 4, "total": 4, "yourself": [], "check": []}
-    assert SECRET not in (tmp_path / "audit.jsonl").read_text()
+    out = capsys.readouterr()
+    for blob in ((tmp_path / "audit.jsonl").read_text(), out.out, out.err):
+        assert SECRET not in blob and str(tmp_path / CV) not in blob
 
 
 def test_job_apply_in_marketplace_and_set_up_as_draft(tmp_path):

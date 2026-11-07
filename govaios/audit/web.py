@@ -23,7 +23,7 @@ import yaml
 
 from govaios import agents, applyfiles, auth, runstate
 import os
-from govaios.formfill import BankError, add_answer, load_bank, ok_value, stage_text
+from govaios.formfill import BankError, add_answer, load_bank, ok_value, read_bank, stage_text
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
@@ -34,7 +34,7 @@ from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
 
 COLS = ["kind", "flow", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason",
-        "response_code", "listing_id", "auth", "command", "file_hash"]
+        "response_code", "listing_id", "auth", "command", "file_hash", "source"]
 # the journey-v2 mockup in one stylesheet: system fonts, no images, no script (CSP allows inline style only)
 CSS = """
 :root{color-scheme:light dark;--bg:#E8ECF2;--paper:#F5F7FA;--card:#fff;--ink:#14213D;--steel:#2B3A55;
@@ -697,12 +697,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                f"autocomplete=one-time-code required autofocus><button class=go>Open session</button></form>"
                if not s.active() and store.load() is not None else "")
         cmds = "".join(f"<option value='{escape(x)}'>" for x in slashes())
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{answer_card(csrf)}{result_card()}{otp}"
+        ans = answer_card(csrf)   # the admin is typing answers: no reload wipes them, no box steals focus
+        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{ans}{result_card()}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
-                     f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp else ' autofocus'} "
+                     f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp or ans else ' autofocus'} "
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
                      f"<button class=go>Send</button></form>",
-                     '<meta http-equiv="refresh" content="2">' if live() else "",
+                     '<meta http-equiv="refresh" content="2">' if live() and not ans else "",
                      f"<h2>Approved</h2><ul>{ok}{cc_li}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
 
     def setup(csrf, bad):
@@ -762,8 +763,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if isinstance(r.get(k), list) and r.get(k) else ""
         you, chk = labels("yourself"), labels("check")
         num = lambda k: r.get(k) if type(r.get(k)) is int else 0   # a garbled count must not break the Talk page
-        return (f"<section class=appcard><h2>Job Apply</h2><p>Filled {num('filled')} of {num('total')} "
-                f"fields. Review the form in Chrome and press Submit yourself.</p>"
+        done = panel.run.code == 0 and panel.run.stopped_reason is None
+        return (f"<section class=appcard><h2>Job Apply</h2><p>Filled {num('filled')} of {num('total')} fields. "
+                + ("Review the form in Chrome and press Submit yourself." if done
+                   else "The run stopped. Check the form in Chrome.") + "</p>"
                 + (f"<p>Fill in Chrome yourself:</p>{you}" if you else "")
                 + (f"<p>Check:</p>{chk}" if chk else "")
                 + "<p class=m><a href='/apply/bank'>My answer bank</a></p></section>")
@@ -804,8 +807,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def bank_page(csrf):
         bad = rejected.pop("msg", None), rejected.pop("text", None)
         try:
-            text = bad[1] if bad[1] is not None else (home / applyfiles.BANK).read_text()
-        except OSError:
+            text = bad[1] if bad[1] is not None else (read_bank(home / applyfiles.BANK) or b"").decode()
+        except (OSError, BankError, UnicodeDecodeError):
             text = ""
         return _page(f"<section class=appcard><h1>My answer bank</h1><p class=m>YAML. Your own answers, used to fill "
                      f"job forms; they are never sent anywhere else.</p>"
@@ -1364,7 +1367,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 n = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 n = -1
-            if not 0 <= n <= 65536:
+            if not 0 <= n <= (262144 if path == "/apply/bank" else 65536):   # the bank's 60000 chars may encode 3x
                 return self._send(400)
             f = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "replace")).items()}
             if path in ("/signin", "/signin/code"):
