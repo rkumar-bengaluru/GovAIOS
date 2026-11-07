@@ -16,7 +16,7 @@ import yaml
 from . import auth, runstate
 from .agents import user_home
 from .applyfiles import ASK, BANK, REPLY, RESULT, read_json, remove, write_json
-from .formfill import (ASKABLE, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
+from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
                        read_form, restricted)
 from .audit.log import AuditLog, url_for_audit
 from .delivery import TARGETS, check_block
@@ -590,6 +590,34 @@ class Runner:
                 else:
                     a["pending"].append(f)
         self.ask_pending()
+        self.write_result()
+
+    def do_attach_file(self, s):
+        """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
+        a = self.ctx["apply"]
+        p = cv_path(a["bank"], user_home())
+        if p is not None:
+            node, _ = self.page_element(self.ref(s["target"]))
+            try:
+                self.gate("attach_file", "modify", target=self.ref(s["target"]),
+                          question=f"Attach your CV ({p.name}) to this application?")
+            except Stop as e:
+                if not str(e).startswith("denied attach_file"):
+                    raise
+                p = None
+        if p is not None:
+            self._act("click", self.d.click, node, target=self.ref(s["target"]))
+            try:
+                self._act("choose_file", self.d.choose_file, str(p), target=self.ref(s["target"]))
+            except Stop:   # InputRefused: fixed text, no path
+                self._act("press", self.d.press, "escape", target=self.ref(s["target"]))
+                p = None
+        if p is not None:
+            chk, _ = self.page_element(self.ref(s["check"]))
+            if "No file chosen" in chk.name:
+                p = None
+        if p is None:
+            a["yourself"].append("Resume/CV")
         self.write_result()
 
     def ask_pending(self):

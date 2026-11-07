@@ -20,13 +20,15 @@ FLOW = """workflow:
   destinations: ["https://job-boards.greenhouse.io"]
   steps:
     - {{ id: on_form, action: classify_page, on_match: {{ gh_form: continue, unknown: stop_and_report }} }}
-    - {{ id: fill, action: fill_form }}
+    - {{ id: fill, action: fill_form }}{attach}
 """
 PAGE = """page:
   id: gh_form
   identification: { title_matches: 'Job Application', anchors: [form_region] }
   elements:
     form_region: { role: form, risk: read }
+    attach_btn: { role: button, name: Attach, risk: modify }
+    cv_input: { role: text, dom_id: cv, risk: read }
 """
 
 
@@ -87,22 +89,22 @@ def text_field(d, dom_id, label):
     return N("text_field", label, value=d.values.get(dom_id, ""), dom_id=dom_id)
 
 
-def write_bank(home, rows):
+def write_bank(home, rows, cv=None):
     (home / "apply").mkdir(mode=0o700, exist_ok=True)
-    (home / "apply" / "answers.yaml").write_text(json.dumps({"answers": rows}))
+    (home / "apply" / "answers.yaml").write_text(json.dumps({"answers": rows, **({"cv_file": cv} if cv else {})}))
 
 
 NOTICE = {"key": "notice", "labels": ["Notice period"], "answer": SECRET}
 
 
-def run(tmp_path, desk, rows=(NOTICE,), allow=", fill_field", run_id="r1"):
+def run(tmp_path, desk, rows=(NOTICE,), allow=", fill_field", run_id="r1", attach="", cv=None):
     src = tmp_path / "src"
     (src / "flows").mkdir(parents=True)
     (src / "pages").mkdir()
-    (src / "flows" / "test_apply.yaml").write_text(FLOW.format(extra=allow))
+    (src / "flows" / "test_apply.yaml").write_text(FLOW.format(extra=allow, attach=attach))
     (src / "pages" / "gh_form.yaml").write_text(PAGE)
     if rows is not None:
-        write_bank(tmp_path, list(rows))
+        write_bank(tmp_path, list(rows), cv)
     r = Runner(src / "flows" / "test_apply.yaml", desk, tmp_path)
     r.approvals.approve_flow(r.flow["id"], r.digest)
     r.approvals.approve_destination(r.flow["id"], "https://job-boards.greenhouse.io")
@@ -422,3 +424,75 @@ def test_stale_reply_cleared_before_asking(tmp_path):
     _, e, err = run(tmp_path, d, rows=(), allow=ASKED)
     t.join(1)
     assert err is None and result(tmp_path)["yourself"] == ["Why us", "Sponsor"]
+
+
+ATTACH = "\n    - { id: attach, action: attach_file, target: current_page.attach_btn, check: current_page.cv_input }"
+ALLOW_ATTACH = ", fill_field, click, attach_file"
+CV = "Resume-Jane.pdf"
+
+
+class CvDesk(FormDesk):
+    def __init__(self, chooses=True, refuse=False):
+        super().__init__(lambda d: form(N("button", "Attach"), N(
+            "text", d.values.get("cv", "No file chosen"), dom_id="cv")))
+        self.chooses, self.refuse = chooses, refuse
+
+    def choose_file(self, path):
+        super().choose_file(path)
+        if self.refuse:
+            raise engine.Stop("input refused: no file sheet")
+        if self.chooses:
+            self.values["cv"] = CV
+
+
+@pytest.fixture(autouse=True)
+def touch_id_ok(monkeypatch):
+    monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (True, "biometric"))
+
+
+def attach(tmp_path, desk, cv="~/" + CV, make=True):
+    if make:
+        (tmp_path / CV).write_bytes(b"%PDF")
+    return run(tmp_path, desk, rows=[], allow=ALLOW_ATTACH, attach=ATTACH, cv=cv)
+
+
+def test_attach_skips_without_cv(tmp_path):
+    desk = CvDesk()
+    r, entries, err = attach(tmp_path, desk, cv=None)
+    assert err is None and ("choose_file",) not in desk.calls
+    assert result(tmp_path)["yourself"] == ["Resume/CV"]
+
+
+def test_attach_denied_goes_to_yourself(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (False, "cancel"))
+    desk = CvDesk()
+    r, entries, err = attach(tmp_path, desk)
+    assert err is None and ("choose_file",) not in desk.calls
+    assert result(tmp_path)["yourself"] == ["Resume/CV"]
+
+
+def test_attach_happy_path(tmp_path, monkeypatch):
+    asked = []
+    monkeypatch.setattr(engine.auth, "approve", lambda q, *a, **k: (asked.append(q), (True, "biometric"))[1])
+    desk = CvDesk()
+    r, entries, err = attach(tmp_path, desk)
+    assert err is None and ("choose_file",) in desk.calls
+    assert asked and CV in asked[-1] and str(tmp_path) not in asked[-1]
+    assert str(tmp_path / CV) not in (tmp_path / "audit.jsonl").read_text()
+    assert CV not in (tmp_path / "audit.jsonl").read_text() and result(tmp_path)["yourself"] == []
+
+
+def test_attach_still_no_file_goes_to_yourself(tmp_path):
+    r, entries, err = attach(tmp_path, CvDesk(chooses=False))
+    assert err is None and result(tmp_path)["yourself"] == ["Resume/CV"]
+
+
+def test_attach_refused_dialog_escapes(tmp_path):
+    desk = CvDesk(refuse=True)
+    r, entries, err = attach(tmp_path, desk)
+    assert err is None and "escape" in desk.calls and result(tmp_path)["yourself"] == ["Resume/CV"]
+
+
+def test_result_rewritten_after_attach(tmp_path):
+    attach(tmp_path, CvDesk(), cv=None)
+    assert result(tmp_path)["yourself"] == ["Resume/CV"]
