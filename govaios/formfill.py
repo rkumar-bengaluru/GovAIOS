@@ -116,6 +116,8 @@ def add_answer(path: Path, label: str, answer: str) -> str:
         raise BankError("answer refused")
     _check_dir(path)
     bank = load_bank(path, path.parent)
+    if len(label) > 300 or len(bank.entries) >= 300:
+        raise BankError("label too long or bank full")
     base = normalize(label).replace(" ", "_")[:40] or "answer"
     key, n = base, 1
     taken = {e.key for e in bank.entries}

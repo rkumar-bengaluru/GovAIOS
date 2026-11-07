@@ -94,3 +94,17 @@ def test_add_answer_keys_and_mode(tmp_path):
     assert [e.answer for e in b.entries] == ["30 days", "60 days"]
     with pytest.raises(ff.BankError):
         ff.add_answer(p, "x", "a\tb")
+
+
+def test_add_answer_refuses_what_load_would_reject(tmp_path):
+    p = tmp_path / "apply" / "answers.yaml"
+    with pytest.raises(ff.BankError):
+        ff.add_answer(p, "x" * 301, "a")
+    assert not p.exists()
+    rows = [{"key": f"k{i}", "labels": ["l"], "answer": "a"} for i in range(300)]
+    _write(tmp_path, yaml.safe_dump({"answers": rows}))
+    before = p.read_text()
+    with pytest.raises(ff.BankError):
+        ff.add_answer(p, "one more", "a")
+    assert p.read_text() == before
+    assert len(ff.load_bank(p, tmp_path).entries) == 300
