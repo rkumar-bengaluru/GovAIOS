@@ -1,11 +1,17 @@
 """Panel settings in <data home>/panel.json (0600, no-follow, atomic). Only the owner's name so far."""
 import json
 import os
-import pwd
+import sys
 import unicodedata
 from pathlib import Path
 
 from govaios.panel.totp import _read_nofollow, _replace
+
+WIN = sys.platform == "win32"
+if WIN:
+    from govaios.win import files as winfiles
+else:
+    import pwd
 
 MAX = 40
 
@@ -26,7 +32,7 @@ def name(home: Path) -> str:
     v = _load(home).get("name")
     if isinstance(v, str) and 0 < len(v) <= MAX:
         return v
-    return default_name(pwd.getpwuid(os.getuid()).pw_gecos)
+    return default_name(winfiles.display_name() if WIN else pwd.getpwuid(os.getuid()).pw_gecos)
 
 
 def check(value: str) -> str:

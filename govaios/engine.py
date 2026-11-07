@@ -419,7 +419,7 @@ class Runner:
         print(f"report: {self.report_items} items -> {self.report_path}", flush=True)
 
     def _append_report(self, line):
-        fd = os.open(self.report_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(self.report_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
         with os.fdopen(fd, "a") as f:
             f.write(line)
 

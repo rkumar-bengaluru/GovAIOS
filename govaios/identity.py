@@ -1,6 +1,9 @@
 import os
-import pwd
 import sys
+
+WIN = sys.platform == "win32"
+if not WIN:
+    import pwd
 
 
 def check() -> dict:

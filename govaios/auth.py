@@ -5,15 +5,24 @@ A new emergency stop (STOPPED appearing while a prompt waits) cancels it as deny
 A proof takes at most the 60 s deadline plus about 3 s (2 s lock wait, 2 s post-invalidate wait, 1 s osascript slack) (rows 4-8, 35, 36).
 auth values: biometric, device_owner, failed, none, busy.
 """
-import fcntl
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
-import LocalAuthentication as LA
-import Quartz
+WIN = sys.platform == "win32"
+if WIN:
+    from .win import files as winfiles
+else:
+    import fcntl
+if sys.platform == "darwin":
+    import LocalAuthentication as LA
+    import Quartz
+else:
+    LA = None   # presence proof on Windows: Task 8
+    Quartz = None
 
 from . import runstate
 
@@ -128,7 +137,10 @@ def _gate(question, reason: str, home: Path, channel: str) -> tuple[bool, str]:
         until = _now() + LOCK_WAIT_S
         while True:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if WIN:
+                    winfiles.flock_ex(lock, blocking=False)
+                else:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if _now() >= until:

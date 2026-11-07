@@ -15,7 +15,7 @@ def block_all_network() -> None:
 
     def guarded_init(self, family=-1, type=-1, proto=-1, fileno=None):
         # allowlist, not blocklist: only AF_UNIX (family -1 defaults to AF_INET, so it is blocked too)
-        if family != socket.AF_UNIX:
+        if family != getattr(socket, "AF_UNIX", object()):   # Windows has no AF_UNIX: nothing is allowed
             raise PermissionError(_BLOCKED)
         _ORIG_INIT(self, family, type, proto, fileno)
 

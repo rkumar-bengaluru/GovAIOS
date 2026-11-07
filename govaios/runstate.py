@@ -8,6 +8,7 @@ Stop lives here (not in engine) so auth can let a run's emergency-stop Stop pass
 import ctypes
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -19,14 +20,18 @@ class Stop(Exception):
     """Flow stopped: unexpected state, denial, or admin needed (Rule 2). Re-exported as engine.Stop."""
 
 
-_libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
-_libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-_libproc.proc_pidpath.restype = ctypes.c_int
+WIN = sys.platform == "win32"
+if not WIN:
+    _libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+    _libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    _libproc.proc_pidpath.restype = ctypes.c_int
 _PATH_MAX = 4 * 1024   # PROC_PIDPATHINFO_MAXSIZE
 
 
 def _exe_path(pid: int) -> str | None:
     """Executable path of a live pid, None if it is gone (no /bin/ps: setuid exec is denied in the sandbox, row 49)."""
+    if WIN:
+        return None   # Windows process identity comes in Task 6
     buf = ctypes.create_string_buffer(_PATH_MAX)
     n = _libproc.proc_pidpath(pid, buf, _PATH_MAX)
     return buf.value.decode(errors="replace") if n > 0 else None

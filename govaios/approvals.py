@@ -1,12 +1,18 @@
 """Remembered approvals: approved flows (by hash) and approved destinations."""
-import fcntl
 import hashlib
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import yaml
+
+WIN = sys.platform == "win32"
+if WIN:
+    from govaios.win import files as winfiles
+else:
+    import fcntl
 
 
 def pages_used(flow):
@@ -88,7 +94,10 @@ class Approvals:
 
     def _update(self, mutate):
         with open(self.path.with_name("approvals.lock"), "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            if WIN:
+                winfiles.flock_ex(lock)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_EX)
             data = self.snapshot()
             mutate(data)
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".approvals.")

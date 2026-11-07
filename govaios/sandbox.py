@@ -1,5 +1,10 @@
 """OS-level network block (decision row 22). sandbox_init cannot be undone: call once, early, in the CLI process."""
 import ctypes
+import sys
+
+WIN = sys.platform == "win32"
+WIN_NOTICE = "DEV: no OS network lockdown on Windows; in-process block only"
+_noticed = False
 
 # Final strings, verbatim from row 22. The mDNSResponder deny stays last so it overrides the unix-socket allow.
 _BASE = ('(version 1) (allow default) (deny network*) (allow network* (remote unix-socket)) '
@@ -11,6 +16,12 @@ UI_PROFILE = _BASE + ' (allow network-bind network-inbound (local ip "localhost:
 
 
 def apply(profile: str) -> None:
+    global _noticed
+    if WIN:
+        if not _noticed:
+            _noticed = True
+            print(WIN_NOTICE, file=sys.stderr)
+        return
     lib = ctypes.CDLL("/usr/lib/libsandbox.1.dylib")
     lib.sandbox_init.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_char_p)]
     lib.sandbox_init.restype = ctypes.c_int

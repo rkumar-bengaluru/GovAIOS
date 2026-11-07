@@ -1,12 +1,18 @@
 """Claude Code executor: tool categories, protected paths, policy file, request building."""
 import hashlib
 import os
-import pwd
+import sys
 from pathlib import Path
 
 import yaml
 
 from govaios.home import data_home
+
+WIN = sys.platform == "win32"
+if WIN:
+    from govaios.win import files as winfiles
+else:
+    import pwd
 
 CATEGORIES = {
     "Read": "read", "Glob": "read", "Grep": "read", "LSP": "read",
@@ -32,7 +38,7 @@ DEFAULT_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "Bash"
 def protected_paths(home):
     """Always-deny paths (row 16), realpathed. `home` is the GOV-AIOS data home; `~` comes from passwd.
     Order is fixed: policy.CLAUDE_IDX points at ~/.claude."""
-    user = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    user = winfiles.user_home() if WIN else Path(pwd.getpwuid(os.getuid()).pw_dir)
     raw = [home, "/Library/Application Support/GOV-AIOS", "/Library/Application Support/ClaudeCode",
            "/Applications/gov-aios.app", user / ".claude", user / ".claude.json", user / "Library/LaunchAgents"]
     # realpathed forms first (CLAUDE_IDX), then the as-given forms, for textual matching in commands

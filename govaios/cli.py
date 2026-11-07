@@ -8,6 +8,8 @@ import sys
 
 from . import identity, sandbox
 
+WIN = sys.platform == "win32"
+
 PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE, "panel": sandbox.UI_PROFILE, "deliver": sandbox.DELIVER_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
 
 
@@ -420,6 +422,8 @@ def _write_exit(code: int) -> None:
 def _write_shim_file(var: str, value) -> None:
     """Only into an existing empty regular file (the shim's mktemp), never through a link: the hook's env may be
     shaped by Claude (M-6). Anything else is skipped silently; the shim then just lacks the value."""
+    if WIN:
+        return   # no shim on Windows
     f = os.environ.get(var)
     if not f:
         return

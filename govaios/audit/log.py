@@ -7,17 +7,23 @@ of the entry without hash/sig. sig = base64 DER ECDSA-P256-SHA256 over the hash 
 prev = previous entry's hash, 64 zeros for seq 1. Only metadata is allowed: no content.
 """
 import base64
-import fcntl
 import hashlib
 import json
 import os
 import stat
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+
+WIN = sys.platform == "win32"
+if WIN:
+    from govaios.win import files as winfiles
+else:
+    import fcntl
 
 KINDS = {"flow_start", "flow_approval", "request", "action", "verify", "stop", "flow_end",
          "emergency_stop", "revoke", "ui_login", "powers_review", "resume", "delivery",
@@ -64,7 +70,7 @@ class AuditLog:
         if self.path.exists() and self.path.stat().st_size > 0:
             raise AuditError("audit key missing but audit log exists; refusing to start a new chain")
         key = ec.generate_private_key(ec.SECP256R1())
-        fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                       serialization.NoEncryption()))
@@ -75,11 +81,12 @@ class AuditLog:
                 serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
             f.flush()
             os.fsync(f.fileno())
-        dfd = os.open(self.home, os.O_RDONLY)  # make the new directory entries durable before any log write
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        if not WIN:   # Windows cannot open or fsync a directory (R5)
+            dfd = os.open(self.home, os.O_RDONLY)  # make the new directory entries durable before any log write
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
         return key
 
     def _last(self):
@@ -116,7 +123,10 @@ class AuditLog:
                 raise AuditError(f"audit field {k} must be str, int, bool or None")
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(self.home / "audit.lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            if WIN:
+                winfiles.flock_ex(lock)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_EX)
             key = self._key()
             seq, prev = self._last()
             entry = {"seq": seq + 1, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -132,7 +142,7 @@ class AuditLog:
                 f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
-            if not os.stat(self.path).st_flags & stat.UF_APPEND:  # also re-arms after admin recovery
+            if not WIN and not os.stat(self.path).st_flags & stat.UF_APPEND:  # also re-arms after admin recovery
                 os.chflags(self.path, stat.UF_APPEND)
         return entry
 

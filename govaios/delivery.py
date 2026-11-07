@@ -1,5 +1,4 @@
 """Delivery of a flow's saved job files to a local service (block check, payload, once-only tracking)."""
-import fcntl
 import hashlib
 import http.client
 import json
@@ -18,6 +17,12 @@ from urllib.parse import urlsplit
 
 from . import runstate
 from .runstate import Stop
+
+WIN = sys.platform == "win32"
+if WIN:
+    from .win import files as winfiles
+else:
+    import fcntl
 
 TARGETS = {"joblens": {"url": "http://127.0.0.1:8100/api/discover/listings", "label": "joblens (local)"}}
 
@@ -142,7 +147,10 @@ class Deliveries:
 
     def record(self, file_hash, outcome, listing_id):
         with open(self.path.with_name("deliveries.lock"), "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            if WIN:
+                winfiles.flock_ex(lock)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_EX)
             data = self._load()
             data[file_hash] = {"outcome": outcome, "listing_id": listing_id}
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".deliveries.")

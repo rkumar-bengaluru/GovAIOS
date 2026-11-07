@@ -9,7 +9,7 @@ CAP = 1_000_000
 
 
 def _append(p: Path) -> TextIO:
-    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
     os.fchmod(fd, 0o600)   # a file made earlier with looser bits
     return os.fdopen(fd, "a", buffering=1)
 
@@ -46,7 +46,7 @@ def once(home: Path, line: str, now=time.time, every: float = 60, cap: int = CAP
     with _append(home / "panel.log") as f:   # same inode the process holds; never rotates
         f.write(line + "\n")
     tmp = home / "panel.log.last.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
     os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump({"line": line, "ts": now()}, f)
