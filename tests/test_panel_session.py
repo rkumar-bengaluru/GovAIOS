@@ -1,3 +1,4 @@
+import sys
 import json
 import os
 import time
@@ -6,6 +7,8 @@ import pytest
 
 from govaios.panel import tickets
 from govaios.panel.session import SESSION_S, Session
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 
 
 class Clock:

@@ -1,3 +1,4 @@
+import sys
 import io
 import os
 import json
@@ -49,6 +50,7 @@ def entries(env):
     return [json.loads(line) for line in (env["home"] / "audit.jsonl").read_text().splitlines()]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: Claude Code path rules not supported this cycle")
 def test_allow_inside_root(env):
     code, out, err = call(env, tool(env, "Read", file_path=str(env["root"] / "a.py")))
     assert code == 0 and err == ""
@@ -189,6 +191,7 @@ def test_no_content_in_audit(env):
     assert len(entries(env)) == 2 and "SECRET" not in text
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: Claude Code path rules not supported this cycle")
 def test_managed_settings_row14(env):
     pol, _ = load(env["home"])
     s = json.loads(json.dumps(hook.managed_settings(pol, env["home"])))
@@ -240,6 +243,7 @@ def test_project_claude_dir_read_denied(env):
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: Claude Code path rules not supported this cycle")
 def test_managed_settings_deny_project_config(env):
     pol, _ = load(env["home"])
     deny = hook.managed_settings(pol, env["home"])["permissions"]["deny"]
@@ -271,6 +275,7 @@ def _nested_paths(env):
     lambda p: ("Bash", {"command": f"ls {p}"}),
     lambda p: ("Bash", {"command": "cat " + p[p.index("/proj/") + 6:]}),   # relative mention
 ])
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: Claude Code path rules not supported this cycle")
 def test_nested_project_claude_config_denied(env, which, make):
     """I-N1: a later session started in <root>/<sub> would load these."""
     name, inp = make(_nested_paths(env)[which])
@@ -288,12 +293,14 @@ def test_glob_and_grep_config_patterns_denied(env, pat):
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny", (name, pat)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: Claude Code path rules not supported this cycle")
 def test_config_like_names_still_allowed(env):
     for p in ("sub/.claude.json", "sub/claude/x", "sub/my.claude/x", "sub/x.mcp.json.bak"):
         code, out, _ = call(env, tool(env, "Read", file_path=str(env["root"] / p)))
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow", p
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: Claude Code path rules not supported this cycle")
 def test_managed_settings_deny_nested_config(env):
     deny = hook.managed_settings(load(env["home"])[0], env["home"])["permissions"]["deny"]
     r = os.path.realpath(env["root"])

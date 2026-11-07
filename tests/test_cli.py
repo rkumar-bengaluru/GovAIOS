@@ -12,6 +12,7 @@ from govaios.cli import main
 OK = {"bundle_id": "com.govaios.cli", "frozen": True, "accessibility": True, "screen_recording": True}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_run_refused_outside_app(capsys):
     with pytest.raises(SystemExit) as e:
         main(["run", "flows/himalayas_job_vetting.yaml"])
@@ -19,6 +20,7 @@ def test_run_refused_outside_app(capsys):
     assert capsys.readouterr().err.count("com.govaios.cli") == 1   # printed once, not again by the re-raise
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_run_dev_blocks_network(tmp_path):
     driver = textwrap.dedent("""
         import socket
@@ -66,11 +68,13 @@ def _doctor_env(monkeypatch, tmp_path, root_owned=True, domains=None):
             (*real_stat(self, **k)[:4], 0, *real_stat(self, **k)[5:])) if self == managed else real_stat(self, **k))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_doctor_fields(monkeypatch, tmp_path):
     _doctor_env(monkeypatch, tmp_path)
     assert main(["doctor", "--dev"]) == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_doctor_reports_new_checks(monkeypatch, tmp_path, capsys, govaios_home):
     import json
     _doctor_env(monkeypatch, tmp_path, root_owned=False)   # owned by the test user, not root
@@ -100,6 +104,7 @@ def test_doctor_wrong_bundle(monkeypatch):
     assert main(["doctor"]) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_selftest_requires_dev(tmp_path, monkeypatch):
     f = tmp_path / "exit"
     f.write_text("")   # the shim's mktemp file
@@ -117,6 +122,7 @@ def test_verify_audit_exit():
     assert main(["verify-audit"]) == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_frozen_app_ignores_govaios_home(tmp_path, monkeypatch):
     from govaios.home import data_home
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -218,6 +224,7 @@ def test_run_preflight_refusal(monkeypatch, capsys, govaios_home):
 
 
 @pytest.mark.parametrize("exc", [None, RuntimeError("x")])
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_run_registers_and_unregisters(monkeypatch, govaios_home, exc):
     import os
     from govaios import engine
@@ -239,6 +246,7 @@ def test_run_registers_and_unregisters(monkeypatch, govaios_home, exc):
     assert during == [True] and not (govaios_home / "runs" / str(os.getpid())).exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_dev_requires_tmp_home(monkeypatch, tmp_path):
     import os
     import pwd
@@ -257,6 +265,7 @@ def test_dev_requires_tmp_home(monkeypatch, tmp_path):
         assert f.read_text() == "1" and "executor" not in seen
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_dump_needs_proof(monkeypatch, capsys, govaios_home):
     from govaios import auth, desktop
     _fake_run(monkeypatch, None)
@@ -348,6 +357,7 @@ def test_review_powers_subcommand(monkeypatch, govaios_home):
     assert seen == [(govaios_home, ["Zoom", "1Password"]), (govaios_home, ["Zoom"])]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_run_unexpected_error_prints_type_only(monkeypatch, capsys):
     _fake_run(monkeypatch, ValueError("SECRET page text"))
     assert main(["run", "x.yaml", "--dev"]) == 1
@@ -355,6 +365,7 @@ def test_run_unexpected_error_prints_type_only(monkeypatch, capsys):
     assert "ERROR: ValueError" in out.err and "SECRET" not in out.out + out.err
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_run_executor_label(monkeypatch):
     seen = _fake_run(monkeypatch, None)
     main(["run", "x.yaml", "--dev"])
@@ -402,6 +413,7 @@ ROW14_SANDBOX = {"enabled", "failIfUnavailable", "allowUnsandboxedCommands", "en
 ROW14_NETWORK = {"allowManagedDomainsOnly", "allowedDomains", "allowAllUnixSockets", "allowLocalBinding"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: Claude Code managed settings and Mac paths")
 def test_claude_settings_output(monkeypatch, capsys, tmp_path, govaios_home):
     import json
 
@@ -434,6 +446,7 @@ def test_claude_settings_not_approved(monkeypatch, capsys, tmp_path, govaios_hom
 
 @pytest.mark.parametrize("pick", [lambda h: h, lambda h: h.parent, lambda h: "/", lambda h: h / "sub",
                                   lambda h: str(h.parent).upper()])
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: Claude Code managed settings and Mac paths")
 def test_claude_settings_refuses_protected_root(monkeypatch, capsys, govaios_home, pick):
     govaios_home.mkdir(parents=True, exist_ok=True)
     asked = _settings(monkeypatch, (True, "biometric"))
@@ -442,6 +455,7 @@ def test_claude_settings_refuses_protected_root(monkeypatch, capsys, govaios_hom
     assert asked == [] and out.out == "" and out.err.count("\n") == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: Claude Code managed settings and Mac paths")
 def test_claude_settings_refuses_hand_edited_root(monkeypatch, capsys, tmp_path, govaios_home):
     from govaios.executor import POLICY_PATH, default_policy
     (govaios_home / "executors").mkdir(parents=True)
@@ -555,6 +569,7 @@ def test_panel_starts_without_prove(monkeypatch, capsys, govaios_home, tmp_path)
     assert "Control panel: http://127.0.0.1:1234/" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 def test_panel_sigterm_ends_session_and_stops_run(monkeypatch, govaios_home):
     """The shim's trap sends SIGTERM: the panel must still end the session and stop its run, once."""
     import json
@@ -595,6 +610,7 @@ def test_audit_ui_alias_same_handler(monkeypatch):
     assert main(["audit-ui"]) == 0 and main(["panel"]) == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_doctor_reports_drift_and_mode(monkeypatch, tmp_path, capsys):
     """M-3: row 32's drift check (the hook's comparison) and a group/other-writable managed file."""
     _doctor_env(monkeypatch, tmp_path)
@@ -610,6 +626,7 @@ def test_doctor_reports_drift_and_mode(monkeypatch, tmp_path, capsys):
     assert "managed_settings: False" in capsys.readouterr().out.splitlines()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_dump_is_a_registered_run(monkeypatch, govaios_home):
     """M-12: registered before preflight, unregistered afterwards (a stop finds it)."""
     import os
@@ -624,6 +641,7 @@ def test_dump_is_a_registered_run(monkeypatch, govaios_home):
 
 
 @pytest.mark.parametrize("var", ["GOVAIOS_PID_FILE", "GOVAIOS_EXIT_FILE"])
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: symlink creation needs a privilege on Windows")
 def test_shim_files_never_follow_links_or_truncate(monkeypatch, tmp_path, var):
     """M-6: only an existing empty regular file (the shim's mktemp) is written."""
     victim = tmp_path / "victim"
@@ -643,6 +661,7 @@ def test_shim_files_never_follow_links_or_truncate(monkeypatch, tmp_path, var):
 
 @pytest.mark.parametrize("deliver,exc,want", [({"to": "joblens"}, None, "deliver"), (None, None, ""),
                                               ({"to": "joblens"}, "stop", "")])
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_run_writes_next_file_only_for_deliver_flows(monkeypatch, tmp_path, deliver, exc, want):
     from govaios import engine
     _fake_run(monkeypatch, None)
@@ -662,6 +681,7 @@ def test_run_writes_next_file_only_for_deliver_flows(monkeypatch, tmp_path, deli
     assert f.read_text() == want
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_deliver_is_a_registered_run_and_preflighted(monkeypatch, capsys, govaios_home):
     from govaios import delivery
     _checks(monkeypatch, stopped=True, ident={"bundle_id": "x"})
@@ -682,6 +702,7 @@ def test_deliver_refused_when_screen_locked(monkeypatch, capsys, govaios_home):
     assert not any((govaios_home / "runs").iterdir())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_cli_run_passes_ticket_env(monkeypatch):
     seen = _fake_run(monkeypatch, None)
     monkeypatch.setenv("GOVAIOS_RUN_TICKET", "abc")
@@ -689,6 +710,7 @@ def test_cli_run_passes_ticket_env(monkeypatch):
     assert seen["ticket"] == "abc"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 9")
 def test_cli_empty_ticket_env_is_no_ticket(monkeypatch):
     seen = _fake_run(monkeypatch, None)
     monkeypatch.setenv("GOVAIOS_RUN_TICKET", "")
@@ -726,6 +748,7 @@ def test_agent_args(monkeypatch, govaios_home):
     assert "Control panel: http://127.0.0.1:8765/" in (govaios_home / "panel.log").read_text()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 def test_agent_missing_apps_dir(monkeypatch, govaios_home, ui):
     import threading
     from govaios.audit import web
@@ -753,6 +776,7 @@ def test_agent_missing_apps_dir(monkeypatch, govaios_home, ui):
     assert got["audit"][0] == 200 and "No apps yet." in got["audit"][1]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 def test_agent_port_busy_exits_1_and_logs_once(monkeypatch, govaios_home):
     import socket
     _agent_env(monkeypatch, govaios_home)
@@ -767,6 +791,7 @@ def test_agent_port_busy_exits_1_and_logs_once(monkeypatch, govaios_home):
     assert log == f"panel: port {port} is in use\n"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 def test_agent_no_ui_login_at_start(monkeypatch, govaios_home):
     from govaios import auth
     from govaios.audit import web

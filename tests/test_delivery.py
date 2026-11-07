@@ -1,3 +1,4 @@
+import sys
 import json
 import os
 import threading
@@ -223,6 +224,7 @@ def batch(home):
     return delivery.deliver_batch(home, FLOW, GOOD, AuditLog(home))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_batch_sends_once(govaios_home, fake):
     f = fake([(202, {"id": 1}), (200, {"id": 2, "duplicate": True})])
     job(govaios_home, "a.json", at="1")
@@ -233,6 +235,7 @@ def test_batch_sends_once(govaios_home, fake):
     assert len(f.bodies) == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_batch_changed_file_sent_again(govaios_home, fake):
     f = fake([(202, {"id": 1}), (202, {"id": 2})])
     p = job(govaios_home, "a.json")
@@ -242,6 +245,7 @@ def test_batch_changed_file_sent_again(govaios_home, fake):
     assert len(f.bodies) == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_409_stops_batch_rest_pending(govaios_home, fake):
     f = fake([(202, {"id": 1}), (409, {})])
     for i in "abc":
@@ -253,6 +257,7 @@ def test_409_stops_batch_rest_pending(govaios_home, fake):
     assert len(f.bodies) == 4
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_unreachable_is_retry(govaios_home, monkeypatch):
     monkeypatch.setitem(delivery.TARGETS["joblens"], "url", "http://127.0.0.1:1/x")
     job(govaios_home, "a.json")
@@ -261,6 +266,7 @@ def test_unreachable_is_retry(govaios_home, monkeypatch):
         not Deliveries(govaios_home / "deliveries.json").done(h) for h in Deliveries(govaios_home / "deliveries.json")._load())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_order_oldest_captured_first(govaios_home, fake):
     f = fake([(202, {"id": 1}), (202, {"id": 2})])
     job(govaios_home, "a.json", at="2026-02", title="Newer Role")
@@ -269,6 +275,7 @@ def test_order_oldest_captured_first(govaios_home, fake):
     assert [b["title"] for b in f.bodies] == ["Older Role", "Newer Role"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_other_flow_files_ignored(govaios_home, fake):
     f = fake([])
     job(govaios_home, "a.json", flow="other")
@@ -276,6 +283,7 @@ def test_other_flow_files_ignored(govaios_home, fake):
     assert not f.bodies and not any(c.values())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_corrupt_json_failed_and_batch_continues(govaios_home, fake):
     f = fake([(202, {"id": 1})])
     (govaios_home / "jd_selected").mkdir(parents=True)
@@ -285,6 +293,7 @@ def test_corrupt_json_failed_and_batch_continues(govaios_home, fake):
     assert c["failed"] == 1 and c["delivered"] == 1 and len(f.bodies) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_symlink_not_followed(govaios_home, fake, tmp_path):
     f = fake([])
     out = job(tmp_path, "real.json")
@@ -295,6 +304,7 @@ def test_symlink_not_followed(govaios_home, fake, tmp_path):
     assert not f.bodies
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_stop_flag_stops_before_next_file(govaios_home, fake):
     f = fake([(202, {"id": 1}), (202, {"id": 2})], on_answer=lambda: (govaios_home / "STOPPED").write_text(""))
     job(govaios_home, "a.json", at="1")
@@ -305,6 +315,7 @@ def test_stop_flag_stops_before_next_file(govaios_home, fake):
     assert len(Deliveries(govaios_home / "deliveries.json")._load()) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_audit_has_no_content(govaios_home, fake):
     fake([(202, {"id": 1})])
     job(govaios_home, "a.json", job_title="ZQXMARKER", company="ZQXMARKER", url="https://ZQXMARKER.example/x",
@@ -313,12 +324,14 @@ def test_audit_has_no_content(govaios_home, fake):
     assert "ZQXMARKER" not in (govaios_home / "audit.jsonl").read_text()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_truncated_response_is_retry(govaios_home, fake):
     fake([(200, "short")])
     job(govaios_home, "a.json")
     assert batch(govaios_home)["retry"] == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_fifo_not_opened_blocking(govaios_home, fake):
     f = fake([(202, {"id": 1})])
     job(govaios_home, "a.json")
@@ -326,12 +339,14 @@ def test_fifo_not_opened_blocking(govaios_home, fake):
     assert batch(govaios_home)["delivered"] == 1 and len(f.bodies) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_truncated_error_body_is_retry(govaios_home, fake):
     fake([(503, "short")])
     job(govaios_home, "a.json")
     assert batch(govaios_home)["retry"] == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_sigterm_during_post_audited_as_stopped_and_resent(govaios_home, fake):
     import signal
 
@@ -449,6 +464,7 @@ def _requests(home):
 
 
 @pytest.mark.parametrize("answer", [(True, "biometric"), (False, "cancelled"), (False, "busy")])
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_first_contact_asks_once(govaios_home, setup, fake, monkeypatch, capsys, answer):
     from govaios import auth
     f = fake([(202, {"id": 1})])
@@ -471,6 +487,7 @@ def test_first_contact_asks_once(govaios_home, setup, fake, monkeypatch, capsys,
     assert delivery.run_delivery(p, govaios_home, AuditLog(govaios_home)) == 0 and asked == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_summary_and_exit_code(govaios_home, setup, capsys):
     p = setup()
     job(govaios_home, "a.json", description="short", job_title="ZQXMARKER")
@@ -483,6 +500,7 @@ def test_summary_and_exit_code(govaios_home, setup, capsys):
     assert "failed 1" in out.out and "ZQXMARKER" not in out.out + out.err
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: delivery not supported this cycle (os.O_NOFOLLOW)")
 def test_unreachable_message(govaios_home, setup, monkeypatch, capsys):
     monkeypatch.setitem(delivery.TARGETS["joblens"], "url", "http://127.0.0.1:1/x")
     p = setup()

@@ -1,6 +1,7 @@
 import http.client
 import os
 import re
+import sys
 from http.cookies import SimpleCookie
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -8,6 +9,22 @@ from urllib.parse import urlencode
 import pytest
 
 from govaios import sandbox
+
+_WIN_SKIPPED_MODULES = [
+    "test_auth.py", "test_macos.py", "test_identity.py", "test_packaging.py", "test_shim.py",
+    "test_sandbox.py", "test_panel_helper.py", "test_panel_launch.py", "test_home.py",
+]
+collect_ignore = _WIN_SKIPPED_MODULES if sys.platform == "win32" else []
+
+
+def pytest_configure(config):
+    if sys.platform == "win32" and not sys.flags.utf8_mode:
+        pytest.exit("set PYTHONUTF8=1 to run tests on Windows", returncode=2)
+
+
+def pytest_report_header(config):
+    if sys.platform == "win32":
+        return "Windows: Mac-only test modules not collected: " + ", ".join(collect_ignore)
 
 
 @pytest.fixture(autouse=True)

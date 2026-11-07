@@ -1,3 +1,4 @@
+import sys
 import base64
 import http.client
 import json
@@ -17,6 +18,8 @@ from govaios.engine import REPO, approval_question
 from govaios.panel.apps import list_apps
 from govaios.panel.session import Session
 from govaios.panel.totp import SecretStore, code_at
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 
 CHAIN = {"seq", "ts", "prev", "hash", "sig"}   # chain metadata, not entry content
 CSP = "default-src 'none'; style-src 'unsafe-inline'"

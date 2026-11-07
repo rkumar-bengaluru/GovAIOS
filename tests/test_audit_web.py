@@ -1,3 +1,4 @@
+import sys
 import http.client
 from urllib.parse import urlencode
 import os
@@ -8,6 +9,8 @@ import pytest
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.audit.web import make_server
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 
 
 class Clock:

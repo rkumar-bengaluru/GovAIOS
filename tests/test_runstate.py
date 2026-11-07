@@ -33,6 +33,7 @@ def entries(home):
     return [json.loads(l) for l in (home / "audit.jsonl").read_text().splitlines()]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: /sbin/launchd via libproc")
 def test_is_govaios_reads_real_exe_path():
     assert runstate._exe_path(1) == "/sbin/launchd"   # read-only lookup, no signal
     assert runstate._exe_path(os.getpid()).startswith("/")
@@ -40,6 +41,7 @@ def test_is_govaios_reads_real_exe_path():
     assert runstate._exe_path(99999999) is None   # above pid_max: never alive
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: SIGKILL")
 def test_stop_terms_then_kills(home, exe):
     exe.update({A: APP, B: APP})
     for p in (A, B):
@@ -136,6 +138,7 @@ sys.exit(guard.main(Path(sys.argv[1])))
 """
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 6")
 def test_guard_exits_on_sigterm_and_removes_pid(home):
     """Row 53: SIGTERM must reach Python while the guard sits in the NSApplication run loop."""
     with subprocess.Popen([sys.executable, "-c", CHILD, str(home)], stderr=subprocess.PIPE, text=True) as p:
@@ -166,6 +169,7 @@ def test_register_run_keeps_entry_created_during_scan(home, monkeypatch):
     assert sorted(os.listdir(home / "runs")) == sorted([str(B), str(os.getpid())])
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 6")
 def test_stop_never_signals_self_and_clears_handled_entries(home, exe):
     me = os.getpid()
     exe.update({A: APP, B: APP, me: APP})

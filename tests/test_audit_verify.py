@@ -1,9 +1,13 @@
+import sys
+import pytest
 import hashlib
 import json
 import os
 
 from govaios.audit.log import AuditLog, _canon
 from govaios.audit.verify import main, verify
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="macOS: audit log UF_APPEND flag (os.chflags)")
 
 
 def _mk(home, n=3):

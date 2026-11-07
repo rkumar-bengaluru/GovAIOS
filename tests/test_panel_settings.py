@@ -1,3 +1,4 @@
+import sys
 import json
 import os
 import stat
@@ -5,6 +6,8 @@ import stat
 import pytest
 
 from govaios.panel import settings
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel/audit-ui not supported this cycle (os.O_NOFOLLOW)")
 
 
 def test_default_name():

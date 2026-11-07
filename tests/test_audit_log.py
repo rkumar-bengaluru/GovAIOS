@@ -1,3 +1,4 @@
+import sys
 import json
 import multiprocessing
 import os
@@ -24,6 +25,7 @@ def _lines(home):
     return [json.loads(x) for x in (home / "audit.jsonl").read_text().splitlines()]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: audit key file mode 0600")
 def test_first_entry_links_to_zero(home):
     e = AuditLog(home).append("flow_start", flow="f")
     assert e["seq"] == 1 and e["prev"] == "0" * 64
@@ -86,6 +88,7 @@ def test_concurrent_appends_stay_chained(home):
     assert all(ents[i]["prev"] == ents[i - 1]["hash"] for i in range(1, 100))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: UF_APPEND flag")
 def test_file_is_append_only_flag(home):
     AuditLog(home).append("flow_start", flow="f")
     assert os.stat(home / "audit.jsonl").st_flags & stat.UF_APPEND
@@ -109,6 +112,7 @@ def test_corrupt_key_raises_audit_error(home):
         AuditLog(home).append("action", flow="f")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: UF_APPEND flag (os.chflags)")
 def test_append_only_flag_rearmed(home):
     log = AuditLog(home)
     log.append("flow_start", flow="f")

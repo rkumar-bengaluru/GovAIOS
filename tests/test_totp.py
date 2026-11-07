@@ -1,3 +1,4 @@
+import sys
 import os
 import stat
 
@@ -5,6 +6,8 @@ import pytest
 
 from govaios.audit.log import AuditLog
 from govaios.panel.totp import SecretStore, Verifier, code_at, new_secret, otpauth_uri, qr_svg
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel TOTP not supported this cycle (os.O_NOFOLLOW)")
 
 S = b"12345678901234567890"
 

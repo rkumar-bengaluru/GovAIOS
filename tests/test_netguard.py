@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -25,12 +26,14 @@ def test_urllib_blocked():
     assert "network blocked" in r.stderr
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: AF_UNIX sockets")
 def test_unix_socket_allowed():
     r = run_py(PRELUDE + "import socket\ns = socket.socket(socket.AF_UNIX)\ns.close()\nprint('ok')\n")
     assert r.returncode == 0
     assert "ok" in r.stdout
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: osascript")
 def test_osascript_dialog_unaffected():
     code = PRELUDE + "import subprocess, sys\nsys.exit(subprocess.run(['osascript', '-e', 'return 1'], capture_output=True).returncode)\n"
     assert run_py(code).returncode == 0

@@ -1,3 +1,4 @@
+import sys
 import json
 import os
 import signal
@@ -224,6 +225,7 @@ def test_page_edit_after_construction_cannot_diverge(tmp_path):
     assert r.digest != flow_hash(r.flow_path, r.pages_dir)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: POSIX file mode 0600")
 def test_report_goes_to_file_not_stdout(tmp_path, capsys):
     r, e, err = run(tmp_path, [True] * 10)
     assert err is None
@@ -383,6 +385,7 @@ class TermOnClick(FakeDesktop):
         os.kill(os.getpid(), signal.SIGTERM)   # the guard's emergency stop, aimed at this run
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 7 (os.kill SIGTERM would kill pytest)")
 def test_sigterm_stops_run(tmp_path):
     before = signal.getsignal(signal.SIGTERM)
     r, e, err = run(tmp_path, [True] * 10, TermOnClick)
@@ -392,6 +395,7 @@ def test_sigterm_stops_run(tmp_path):
     assert verify(r.audit.path, r.audit.pub_path).ok
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 7")
 def test_sigterm_during_touch_id_records_emergency_stop(tmp_path, monkeypatch):
     """The real auth path: SIGTERM lands while Touch ID waits; the run's last entry is the emergency stop."""
     monkeypatch.undo()   # drop fake_auth: the real prove() and LAContext wait run
@@ -523,6 +527,7 @@ def _no_prompts(monkeypatch):
     monkeypatch.setattr(engine.auth, "approve", boom)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 8 (tickets os.O_NOFOLLOW)")
 def test_ticket_run_skips_touch_id(tmp_path, monkeypatch):
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no Touch ID")))
     r, e, err = run(tmp_path, [True] * 10, preapprove=True, mint=True)
@@ -547,6 +552,7 @@ def test_ticket_for_unapproved_flow_stops(tmp_path, monkeypatch):
     assert isinstance(err, Stop) and str(err) == "run ticket not valid"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: covered by Task 8 (tickets os.O_NOFOLLOW)")
 def test_ticket_for_unapproved_flow_is_spent(tmp_path, monkeypatch):
     _no_prompts(monkeypatch)
     r, e, err = run(tmp_path, [], mint=True)

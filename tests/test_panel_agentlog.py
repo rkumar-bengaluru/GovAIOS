@@ -1,3 +1,5 @@
+import sys
+import pytest
 import json
 import os
 import stat
@@ -5,6 +7,7 @@ import stat
 from govaios.panel import agentlog
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: POSIX file mode 0600")
 def test_log_rotates_at_cap(tmp_path):
     (tmp_path / "panel.log").write_text("x" * 50)
     f = agentlog.open_log(tmp_path, cap=10)
@@ -49,6 +52,7 @@ def test_once_does_not_rotate_live_log(tmp_path):
     assert (tmp_path / "panel.log").read_text() == "x" * 50 + "err\nmore\n"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: POSIX file mode 0600")
 def test_permissions_tightened(tmp_path):
     for n in ("panel.log", "panel.log.last"):
         (tmp_path / n).write_text("")
@@ -59,6 +63,7 @@ def test_permissions_tightened(tmp_path):
         assert stat.S_IMODE(os.stat(tmp_path / n).st_mode) == 0o600
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS: POSIX file mode 0600")
 def test_rotated_file_is_0600(tmp_path):
     (tmp_path / "panel.log").write_text("x" * 50)
     os.chmod(tmp_path / "panel.log", 0o644)
@@ -73,6 +78,7 @@ def test_append_at_cap_is_dropped(tmp_path):
     assert agentlog.once(tmp_path, "more", cap=21)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows: panel not supported this cycle (os.O_NOFOLLOW)")
 def test_handle_error_one_line_no_traceback(tmp_path):
     from govaios.audit.web import make_server
     srv = make_server(tmp_path, tick_s=None)

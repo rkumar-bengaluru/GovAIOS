@@ -1,3 +1,4 @@
+import sys
 import os
 from types import SimpleNamespace
 
@@ -9,6 +10,8 @@ from govaios import executor
 from govaios.executor import (ALLOW_COMMANDS, DESTINATIONS, build_request, category, default_policy,
                               load, protected_paths)
 from govaios.policy import decide_tool
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="macOS: Claude Code executor uses pwd")
 
 
 @pytest.fixture
