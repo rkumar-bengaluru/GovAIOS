@@ -5,6 +5,7 @@ Exit 2 with one stderr line blocks the call whatever stdout says.
 """
 import json
 import os
+import re
 from pathlib import Path
 
 from . import executor, runstate
@@ -17,6 +18,7 @@ MANAGED_SETTINGS = Path("/Library/Application Support/ClaudeCode/managed-setting
 HOOK_COMMAND = "/Applications/gov-aios.app/Contents/MacOS/gov-aios hook"
 DENY_RULE_IDX = (0, 1, 2, 3, 6)   # realpathed data home, GOV-AIOS, ClaudeCode, app, LaunchAgents; ~/.claude is the hook's (row 16)
 ID = "claude_code"
+_SID = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
 class Block(Exception):
@@ -67,6 +69,7 @@ def _decide(payload, home: Path, managed: Path):
     if executor.category(tool) is None:
         raise Block(f"unknown tool: {tool[:80]!r}")
     pol, digest, approvals = _check(home, managed)
+    sid, cwd = payload.get("session_id"), payload.get("cwd")   # Claude Code's own session id and folder: audit grouping only
     req = executor.build_request(tool, inp, home, payload.get("cwd") or "")
     raw_cmd = req["command"] if isinstance(req.get("command"), str) else None
     cmd = redact_command(raw_cmd) if raw_cmd is not None else None
@@ -93,7 +96,9 @@ def _decide(payload, home: Path, managed: Path):
     asked = how is not None
     AuditLog(home).append("request", flow=ID, flow_hash=digest, executor=ID, action=tool, target=target,
                           command=cmd, decision=verdict, approver="admin" if asked else "policy",
-                          channel="touch_id" if asked else None, auth=how, reason=reason)
+                          channel="touch_id" if asked else None, auth=how, reason=reason,
+                          session=sid if isinstance(sid, str) and _SID.fullmatch(sid) else None,
+                          folder=os.path.realpath(cwd) if isinstance(cwd, str) and cwd.startswith("/") else None)
     if remember:   # only once the approval is on record
         approvals.approve_destination(ID, remember)
     return verdict, reason

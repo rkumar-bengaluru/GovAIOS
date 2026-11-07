@@ -11,8 +11,6 @@ Updated 2026-11-06 after control panel v2 (PR #10).
   (API key in Keychain or Claude Code no-tools mode); other LLMs as writers.
 - **My apps and Marketplace** panel areas. Each app drives its own setup; upgrades carry apps over.
   Mockup: `docs/superpowers/mockups/2026-11-06-apps-journey.html`.
-- **Start Claude Code from the panel:** "start Claude Code in ~/Documents/2026/x" opens Terminal in that
-  folder and runs `claude` (admin, 2026-11-07). Today the panel sets up governance only.
 - **Claude Code refusals made by its own managed deny rules are not in the audit log** (seen live
   2026-11-07: reading the data home and writing /tmp were refused before the hook ran). Only calls that
   reach the hook are logged.

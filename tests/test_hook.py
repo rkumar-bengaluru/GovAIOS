@@ -299,3 +299,13 @@ def test_managed_settings_deny_nested_config(env):
     r = os.path.realpath(env["root"])
     for rule in (f"Edit(/{r}/**/.claude/**)", f"Edit(/{r}/**/.mcp.json)", f"Edit(/{r}/.claude)"):
         assert rule in deny and rule.startswith("Edit(//")
+
+
+@pytest.mark.parametrize("sid,want", [("0a1b-2c", "0a1b-2c"), ("../x", None), ("a" * 65, None), (7, None)])
+def test_session_and_folder_logged_for_grouping(env, sid, want):
+    p = tool(env, "Read", file_path=str(env["root"] / "a.py"))
+    p["session_id"] = sid
+    call(env, p)
+    (e,) = entries(env)
+    assert e["session"] == want and e["folder"] == os.path.realpath(env["root"])
+    assert e["reason"] == "allowed by GOV-AIOS policy"

@@ -96,3 +96,56 @@ def governed(home: Path, managed: Path) -> tuple[bool, list]:
         same = False
     ok = Approvals(Path(home) / "approvals.json").flow_ok(ID, digest) and root_owned(managed) and same
     return ok, pol.get("project_roots", [])
+
+
+def tilde(p: str) -> str:
+    uh = str(user_home())
+    return "~" + p[len(uh):] if p == uh or p.startswith(uh + "/") else p
+
+
+def suggest(roots, limit=60) -> list[str]:
+    """Folders to offer for a new session: each approved folder and the folders directly inside it."""
+    out = []
+    for r in roots:
+        out.append(r)
+        try:
+            out += sorted(e.path for e in os.scandir(r) if e.is_dir(follow_symlinks=False) and not e.name.startswith("."))
+        except OSError:
+            pass
+    return list(dict.fromkeys(out))[:limit]
+
+
+def inside(folder: str, roots) -> str | None:
+    """The real folder if it is an existing folder in or under an approved one, else None."""
+    real = os.path.realpath(folder)
+    ok = os.path.isdir(real) and any(real == r or real.startswith(r.rstrip("/") + "/") for r in roots)
+    return real if ok else None
+
+
+def pick(text: str, roots) -> tuple[str | None, list[str]]:
+    """What the admin typed -> (folder, []), or (None, candidates). `~/` is the user's home; a bare name matches
+    the suggested folders by name (case ignored)."""
+    if not text.strip():
+        return None, suggest(roots)
+    t = text.strip().rstrip("/*").rstrip("/") or text.strip()
+    if t.startswith("~/") or t == "~":
+        t = str(user_home()) + t[1:]
+    if t.startswith("/"):
+        hit = inside(t, roots)
+        return (hit, []) if hit else (None, [])
+    names = [s for s in suggest(roots) if os.path.basename(s).lower() == t.lower()]
+    return (names[0], []) if len(names) == 1 else (None, names)
+
+
+def launch_file(home: Path, folder: str, claude: str) -> Path:
+    """A one-use Terminal .command that opens `folder` and runs Claude Code there (no Apple Events needed)."""
+    import secrets
+    import shlex
+    d = Path(home) / "executors" / "launch"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    p = d / f"claude-{secrets.token_hex(8)}.command"
+    body = f'#!/bin/sh\nrm -f -- "$0"\ncd -- {shlex.quote(folder)} || exit 1\nexec {shlex.quote(claude)}\n'
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o700)
+    with os.fdopen(fd, "w") as f:
+        f.write(body)
+    return p

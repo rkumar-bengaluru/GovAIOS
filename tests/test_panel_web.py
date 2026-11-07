@@ -87,12 +87,14 @@ def panel(tmp_path, monkeypatch, ui):
     made = []
     launcher = type("L", (FakeLaunch,), {"made": made})
     admin_calls, admin_answer = [], [_fake_admin(home, tmp_path / "ClaudeCode")]
+    started = []
     spoken = []
     mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
     srv = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
                             now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None,
                             chrome_state=tmp_path / "Local State", managed=tmp_path / "ClaudeCode" / "managed-settings.json",
-                            admin=lambda a, d: (admin_calls.append((a, d)), admin_answer[0](a, d))[1])
+                            admin=lambda a, d: (admin_calls.append((a, d)), admin_answer[0](a, d))[1],
+                            starter=lambda f: (started.append(f), 0)[1])
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
 
@@ -111,7 +113,7 @@ def panel(tmp_path, monkeypatch, ui):
     P = type("P", (), {})()
     P.home, P.flows, P.srv, P.made, P.answers, P.asked, P.req, P.sid = home, flows, srv, made, answers, asked, req, sid
     P.spoken, P.mono, P.wall, P.launcher, P.ui = spoken, mono, wall, launcher, ui
-    P.admin_calls, P.admin_answer, P.tmp = admin_calls, admin_answer, tmp_path
+    P.admin_calls, P.admin_answer, P.tmp, P.started = admin_calls, admin_answer, tmp_path, started
     P.get = lambda path: req(path, cookie=sid)
     P.csrf = lambda: re.search(r"name=csrf value='([^']+)'", P.get("/")[1])[1]
     P.post = lambda path, headers=None, **f: req(path, "POST", cookie=sid, headers=headers,
@@ -1116,7 +1118,60 @@ def test_claude_code_in_talk_and_audit(cc):
     idx = cc.get("/audit")[1]
     assert "Coding agents" in idx and "href='/audit/app/claude_code'" in idx
     assert re.search(r"<td>Governed</td><td>3</td><td>1</td>", idx)
-    page = cc.get("/audit/app/claude_code")[1]
-    assert page.index("make &lt;b&gt;") < page.index("git status") and "<b>" not in page.split("</h1>", 1)[1]
+    assert "href='/audit/claude/earlier'>Earlier" in cc.get("/audit/app/claude_code")[1]   # no session recorded
+    page = cc.get("/audit/claude/earlier")[1]
+    assert page.index("git status") < page.index("make &lt;b&gt;") and "<b>" not in page.split("</h1>", 1)[1]
     assert "<td>GOV-AIOS policy</td>" in page and "<td>You, Touch ID</td>" in page
     assert "<td>You declined (Touch ID)</td><td>not allowed</td>" in page
+
+
+def test_claude_code_sessions_grouped(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    log = AuditLog(cc.home)
+    for sid, cmd in (("aaa-1", "git status"), ("bbb-2", "ls"), ("aaa-1", "git log")):
+        log.append("request", flow="claude_code", executor="claude_code", action="Bash", command=cmd,
+                   decision="allow", approver="policy", session=sid, folder=str(cc.proj))
+    page = cc.get("/audit/app/claude_code")[1]
+    assert page.index("Session 2") < page.index("Session 1")   # newest first
+    assert re.search(r"/audit/claude/aaa-1'>Session 1</a></td><td>[^<]*</td><td>[^<]*proj</td><td>2</td>", page)
+    one = cc.get("/audit/claude/aaa-1")[1]
+    assert "git status" in one and "git log" in one and "<td>ls</td>" not in one
+    assert cc.get("/audit/claude/nope")[0] == 404
+
+
+def _cc_ready(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    for n in ("alpha", "Beta", ".hidden"):
+        (cc.proj / n).mkdir()
+    _open(cc)
+
+
+def test_claude_start_form_suggests_approved_folders(cc):
+    assert "action=/claude/start" not in cc.get("/")[1]   # not governed yet
+    _cc_ready(cc)
+    page = cc.get("/")[1]
+    real = str(cc.proj.resolve())
+    assert "<datalist id=ccdirs>" in page and f"<option value='{real}/alpha'>" in page
+    assert ".hidden" not in page and f"<option value='{real}/Beta'>" in page
+    cc.post("/claude/start", folder=f"{real}/alpha")
+    assert cc.started == [f"{real}/alpha"] and "Starting Claude Code" in _tells(cc)[-1]
+    assert f"id=ccf name=folder list=ccdirs value='{real}/alpha'" in cc.get("/")[1]   # the last folder is prefilled
+    e = _log(cc.home, "claude_start")[-1]
+    assert (e["target"], e["outcome"]) == (f"{real}/alpha", "0")
+
+
+@pytest.mark.parametrize("text,ok", [("run claude beta", "Beta"), ("start claude code in alpha", "alpha"),
+                                     ("run claude", None), ("run claude /etc", None), ("open claude nope", None)])
+def test_claude_start_typed(cc, text, ok):
+    _cc_ready(cc)
+    cc.say(text)
+    real = str(cc.proj.resolve())
+    assert cc.started == ([f"{real}/{ok}"] if ok else [])
+    if not ok:
+        assert "Which folder" in _tells(cc)[-1] or "not inside the approved" in _tells(cc)[-1]
+
+
+def test_claude_start_needs_code_session(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    cc.post("/claude/start", folder=str(cc.proj))
+    assert cc.started == [] and "authenticator" in _tells(cc)[-1]

@@ -152,7 +152,7 @@ def _seq(e):
     return s if type(s) is int else None
 
 
-PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting")
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start")
 
 
 def _runs(entries):
@@ -257,7 +257,7 @@ NOTES = {"busy": "Another sign-in is waiting for Touch ID.", "no": "Touch ID did
 
 def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launcher=None, speak=None,
                 name=None, session=None, tick_s=1.0, helper=None, chrome_state=None, templates=None, managed=None,
-                admin=None):
+                admin=None, starter=None):
     """Returns the server; server.panel holds the run session, current run and conversation.
     Browsers sign in on the page with Touch ID (POST /signin); the server never shuts itself down. tick_s=None starts no ticker (tests call server.panel.tick()).
     helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed.
@@ -265,6 +265,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     launcher = launcher or (helper.run if helper else RunLaunch)
     speak = speak or (helper.say if helper else _say)
     admin = admin or getattr(helper, "claude", None)
+    starter = starter or getattr(helper, "claude_start", None)
     from govaios.hook import MANAGED_SETTINGS
     managed = Path(managed or MANAGED_SETTINGS)
     home = Path(home)
@@ -426,17 +427,86 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         """Claude Code's hook decisions (one `request` per tool call it saw)."""
         return [e for e, _ in _entries(log) if e and e.get("kind") == "request" and e.get("executor") == claudecode.ID]
 
+    def cc_sessions():
+        """Claude Code sessions in the order they began: [(key, checks)]; key "earlier" holds checks logged before
+        sessions were recorded."""
+        by = {}
+        for e in cc_checks():
+            by.setdefault(e.get("session") or "earlier", []).append(e)
+        return list(by.items())
+
     def cc_page():
+        rows = "".join(
+            f"<tr><td><a href='/audit/claude/{escape(k)}'>{'Earlier' if k == 'earlier' else f'Session {i}'}</a></td>"
+            f"{_td(es[0].get('ts'))}{_td(claudecode.tilde(es[0].get('folder') or '') or chr(8212))}{_td(len(es))}"
+            f"{_td(sum(1 for e in es if e.get('decision') != 'allow'))}"
+            f"{_td(sum(1 for e in es if e.get('approver') == 'admin'))}{_td(es[-1].get('ts'))}</tr>"
+            for i, (k, es) in reversed(list(enumerate(cc_sessions(), 1))))
+        table = ("<table><tr><th>session</th><th>started</th><th>folder</th><th>checks</th><th>refused</th>"
+                 f"<th>asked you</th><th>last check</th></tr>{rows}</table>" if rows
+                 else "<p>No sessions yet. Start Claude Code from Talk or in a new Terminal session.</p>")
+        return _page(f"<h1>Claude Code</h1>{banner()}<p class=m>Sessions newest first. Calls Claude Code's own managed "
+                     f"rules refuse first never reach GOV-AIOS and are not listed.</p>{table}"
+                     f"<p><a href='/audit'>Apps</a> | <a href='/audit/log'>Full log</a></p>", here="/audit")
+
+    def cc_session_page(key):
+        es = dict(cc_sessions()).get(key)
+        if es is None:
+            return None
         cols = ("ts", "action", "command", "target", "decision")
         rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in cols) + _td(_decided_by(e)) + _td(e.get("reason"))
-                       + "</tr>" for e in reversed(cc_checks()))
+                       + "</tr>" for e in es)
         heads = ("time", "tool", "command", "target", "decision", "decided by", "why")
-        table = (f"<table><tr>{''.join(f'<th>{c}</th>' for c in heads)}</tr>{rows}</table>" if rows
-                 else "<p>No checks yet. Start Claude Code in a new Terminal session.</p>")
-        return _page(f"<h1>Claude Code</h1>{banner()}<p class=m>Every tool call Claude Code sent to GOV-AIOS, newest "
-                     f"first. Calls Claude Code's own managed rules refuse first never reach GOV-AIOS and are not "
-                     f"listed.</p>{table}<p><a href='/audit'>Apps</a> | <a href='/audit/log'>Full log</a></p>",
+        title = "Earlier checks" if key == "earlier" else "Claude Code session"
+        where = claudecode.tilde(es[0].get("folder") or "")
+        return _page(f"<h1>{title}</h1>{banner()}<p class=m>{escape(where)}</p>"
+                     f"<table><tr>{''.join(f'<th>{c}</th>' for c in heads)}</tr>{rows}</table>"
+                     f"<p><a href='/audit/app/claude_code'>Claude Code sessions</a> | <a href='/audit/log'>Full log</a></p>",
                      here="/audit")
+
+    def cc_roots():
+        ok, roots = claudecode.governed(home, managed)
+        return roots if ok else None
+
+    def claude_start(text):
+        """Open Terminal in the folder and run Claude Code there (governed only, inside the approved folders)."""
+        roots = cc_roots()
+        if roots is None:
+            tell("Claude Code is not governed yet. Set it up in Marketplace first.")
+            return
+        if starter is None:
+            tell("Starting Claude Code needs the installed panel.")
+            return
+        folder, cands = claudecode.pick(text, roots)
+        if folder is None:
+            tell(f"Which folder: {', '.join(claudecode.tilde(c) for c in cands[:8])}?" if cands else
+                 f"That folder is not inside the approved ones: {', '.join(claudecode.tilde(r) for r in roots)}.")
+            return
+        log.append("claude_start", flow=claudecode.ID, executor=claudecode.ID, target=folder, approver="admin")   # first
+        code = starter(folder)
+        log.append("claude_start", flow=claudecode.ID, executor=claudecode.ID, target=folder, outcome=str(code))
+        tell(f"Starting Claude Code in {claudecode.tilde(folder)}. It opens in Terminal." if code == 0
+             else "Claude Code did not start.")
+
+    def claude_start_post(f):
+        if not panel.session.active():
+            tell(NO_SESSION)
+        else:
+            claude_start(f.get("folder", ""))
+        return "/"
+
+    def cc_form(csrf):
+        roots = cc_roots()
+        if roots is None:
+            return ""
+        sugg = [claudecode.tilde(x) for x in claudecode.suggest(roots)]
+        last = next((e.get("target") for e, _ in reversed(_entries(log))
+                     if e and e.get("kind") == "claude_start" and e.get("outcome") == "0"), None)
+        value = claudecode.tilde(last) if last else (sugg[1] if len(sugg) > 1 else sugg[0] if sugg else "")
+        opts = "".join(f"<option value='{escape(x)}'>" for x in sugg)
+        return (f"<form class=cmd method=post action=/claude/start>{hidden(csrf)}<label for=ccf>Start Claude Code in"
+                f"</label><input id=ccf name=folder list=ccdirs value='{escape(value)}' autocomplete=off required>"
+                f"<datalist id=ccdirs>{opts}</datalist><button class=go>Start</button></form>")
 
     def app_page(app_id):
         if app_id == claudecode.ID:
@@ -540,7 +610,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"</label><input id=cmd name=text autocomplete=off{'' if otp else ' autofocus'} placeholder='Type: run joblens'>"
                      f"<button class=go>Send</button></form>",
                      '<meta http-equiv="refresh" content="2">' if live() else "",
-                     f"<h2>Approved</h2><ul>{ok}{cc_li}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
+                     f"<h2>Approved</h2><ul>{ok}{cc_li}</ul>{cc_form(csrf)}<h2>Drafts</h2><ul>{drafts}</ul>", "/")
 
     def setup(csrf, bad):
         if store.load() is not None:
@@ -596,6 +666,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 panel.session.end("error")   # an unrecorded session must not stay open
                 raise
             tell("Session open for 30 minutes.")
+            return "/"
+        cm = re.fullmatch(r"(?:run|start|open) claude(?: code)?(?: in)?(?: (.+))?", text, re.I)
+        if cm:
+            claude_start(cm[1] or "")
             return "/"
         kind, hit = match(text, al := apps())
         if kind == "run" and live():
@@ -841,7 +915,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     POSTS = {"/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/claude/setup": claude_setup,
-             "/claude/off": claude_off}
+             "/claude/off": claude_off, "/claude/start": claude_start_post}
 
     # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
     SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
@@ -1009,12 +1083,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
                 a = re.fullmatch(r"/audit/app/([^/]{1,200})", u.path)
                 mk = re.fullmatch(r"/market/setup/([a-z0-9_]{1,64})", u.path)
+                cs = re.fullmatch(r"/audit/claude/([A-Za-z0-9-]{1,64})", u.path)
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
                         else market_page() if u.path == "/market" else claude_page(sess[1]) if u.path == "/claude"
                         else market_setup_page(sess[1], mk[1]) if mk
-                        else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
+                        else cc_session_page(cs[1]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed
                 return self._send(500, "internal error")
             self._send(200, page) if page else self._send(404)

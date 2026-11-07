@@ -21,10 +21,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 KINDS = {"flow_start", "flow_approval", "request", "action", "verify", "stop", "flow_end",
          "emergency_stop", "revoke", "ui_login", "powers_review", "resume", "delivery",
-         "totp_setup", "totp_reset", "session_open", "session_end", "setting"}
+         "totp_setup", "totp_reset", "session_open", "session_end", "setting", "claude_start"}
 FIELDS = {"flow", "flow_version", "flow_hash", "executor", "step", "action", "risk", "target",
           "destination", "decision", "approver", "channel", "outcome", "reason", "auth", "command",
-          "file_hash", "response_code", "listing_id", "session", "field", "shown"}
+          "file_hash", "response_code", "listing_id", "session", "field", "shown", "folder"}
 ZERO = "0" * 64
 
 

@@ -200,3 +200,28 @@ def test_claude_remove_and_cancel(adm):
 @pytest.mark.parametrize("action,digest", [("install", "x"), ("install", ""), ("wipe", "ab" * 32), (None, "")])
 def test_claude_bad_requests_refused(adm, action, digest):
     assert adm.claude(action, digest) == 70 and not (adm.tmp / "prompt").exists()
+
+
+def test_claude_start_opens_terminal_only_in_approved_folders(tmp_path, monkeypatch):
+    from govaios import claudecode
+    from govaios.executor import POLICY_PATH, default_policy
+    proj, out = tmp_path / "proj", tmp_path / "opened"
+    (proj / "sub").mkdir(parents=True)
+    rec = tmp_path / "open"
+    rec.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$OPENED"\ncat "$3" >> "$OPENED"\n')
+    rec.chmod(0o755)
+    monkeypatch.setenv("OPENED", str(out))
+    monkeypatch.setattr(claudecode, "found", lambda: "/opt/x/claude")
+    flows, home = tmp_path / "flows", tmp_path / "home"
+    flows.mkdir()
+    (home / "executors").mkdir(parents=True)
+    (home / POLICY_PATH).write_text(default_policy(os.path.realpath(proj)))
+    h = start_helper(flows, home, open_cmd=str(rec))
+    try:
+        assert h.claude_start(str(tmp_path)) == 70 and not out.exists()   # above the approved folder
+        assert h.claude_start(str(proj / "sub")) == 0
+        lines = out.read_text().splitlines()
+        assert lines[:2] == ["-a", "Terminal"] and lines[2].endswith(".command")
+        assert f"cd -- {os.path.realpath(proj / 'sub')} || exit 1" in lines and "exec /opt/x/claude" in lines
+    finally:
+        h.close()

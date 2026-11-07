@@ -1,6 +1,6 @@
 """Launch helper: forked before the sandbox (a sandboxed process cannot `open -a` the app or `say`).
 The child is the only unsandboxed part of the panel: no socket, no PyObjC, and it runs nothing but RunLaunch's
-fixed argv, `say --` and ROOT_SCRIPT under macOS's administrator dialog, for requests it validates itself."""
+fixed argv, `say --`, ROOT_SCRIPT under macOS's administrator dialog and `open -a Terminal` on a Claude Code launch file, for requests it validates itself."""
 import json
 import os
 import re
@@ -108,6 +108,21 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
 
     busy = threading.Lock()   # one administrator dialog at a time
 
+    def claude_start(n, folder):
+        """Terminal opens `folder` and runs Claude Code: only an existing folder inside the approved policy's."""
+        from govaios import claudecode, executor
+        try:
+            real = claudecode.inside(folder, executor.load(home)[0].get("project_roots", []))
+            claude = claudecode.found()
+            if real is None or claude is None:
+                code = 70
+            else:
+                f = claudecode.launch_file(home, real, claude)
+                code = subprocess.run([open_cmd, "-a", "Terminal", str(f)], timeout=30).returncode
+        except Exception:
+            code = 1
+        send({"id": n, "done": True, "code": code})
+
     try:
         for raw in os.fdopen(cmd_r, "r"):   # trusted channel (both ends ours): lines are not capped
             try:
@@ -131,6 +146,8 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
                 cur.update(id=n, run=run)
                 run.start()
                 threading.Thread(target=watch, args=(n, run), daemon=True).start()
+            elif op == "claude_start" and isinstance(m.get("folder"), str):
+                threading.Thread(target=claude_start, args=(n, m["folder"]), daemon=True).start()
             elif op == "claude":
                 act, digest = m.get("action"), m.get("digest", "")
                 ok = act == "remove" or (act == "install" and isinstance(digest, str) and _HEX64.fullmatch(digest))
@@ -188,17 +205,24 @@ class Helper:
     def say(self, text):
         self._send({"op": "say", "text": text})
 
-    def claude(self, action, digest="", wait_s=660):
-        """Install or remove Claude Code's managed settings through the administrator dialog; blocks until done.
-        0 done, 2 cancelled, else failed or refused."""
+    def claude_start(self, folder, wait_s=40):
+        """Open Terminal in `folder` running Claude Code. 0 started, 70 refused, else failed."""
+        return self._call({"op": "claude_start", "folder": folder}, wait_s)
+
+    def _call(self, msg, wait_s):
         with self._lock:
             self._n += 1
             r = self._runs[self._n] = HelperRun(self, self._n, "", "")
-        self._send({"op": "claude", "id": r._n, "action": action, "digest": digest})
+        self._send({**msg, "id": r._n})
         end = time.time() + wait_s
         while not r.done and time.time() < end:
             time.sleep(0.05)
         return r.code if r.done else 1
+
+    def claude(self, action, digest="", wait_s=660):
+        """Install or remove Claude Code's managed settings through the administrator dialog; blocks until done.
+        0 done, 2 cancelled, else failed or refused."""
+        return self._call({"op": "claude", "action": action, "digest": digest}, wait_s)
 
     def close(self, wait_s=15):
         """Closing the pipe ends the child (it stops a live run first); waits for it, bounded."""
