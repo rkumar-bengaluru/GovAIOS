@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 class RunLaunch:
-    def __init__(self, flow_path, ticket, app="/Applications/gov-aios.app", open_cmd="open", inputs=None):
+    def __init__(self, flow_path, ticket, inputs=None, app="/Applications/gov-aios.app", open_cmd="open"):
         self.flow, self.ticket, self.app, self.open_cmd = str(Path(flow_path).resolve()), ticket, app, open_cmd
         self.inputs = inputs
         self.done = False
