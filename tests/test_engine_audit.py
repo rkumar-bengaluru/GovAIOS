@@ -108,7 +108,7 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, d
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
     f = src / "flows" / "himalayas_job_vetting.yaml"
-    t = f.read_text().replace("count: 5", "count: 1")
+    t = f.read_text().replace("count: 10", "count: 1")
     t = t.replace("rupak.kumar.ambasta02@gmail.com", ACCT)
     t = t.replace("  deliver: { to: joblens, from: jd_selected, source: Himalayas }\n", "")   # start without deliver
     if directory:
