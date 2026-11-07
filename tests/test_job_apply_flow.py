@@ -94,11 +94,19 @@ def test_submit_guard_covers_himalayas_and_forms():
 
 def job_page(logged_in=True):
     kind = "button" if logged_in else "link"   # Save / Apply now are links when logged out
+    apply = lambda: [N("heading", "Apply now"), N("button", "Job expired?"), N(kind, "Apply now")]  # noqa: E731
+    # as the live page: the Apply block appears twice inside main
     return N("document", "Acme Test hiring Staff Engineer | Himalayas", children=[
         N("banner", children=[] if logged_in else [N("link", "Log in")]),
         N("main", children=[N("heading", "Staff Engineer"), N("link", "Acme Test"), N(kind, "Save"),
-                            N("article", children=[N("text", "A job.")])]),
-        N("heading", "Apply now"), N(kind, "Apply now"), N("button", "Job expired?")])
+                            N("article", children=[N("text", "A job.")]), *apply(),
+                            N("navigation", "Breadcrumbs"), *apply()])])
+
+
+def test_apply_button_is_the_first_of_the_repeated_blocks():
+    root, page = job_page(), _page("himalayas_job_apply")
+    first = next(n for n in root.walk() if n.role == "button" and n.name == "Apply now")
+    assert [id(n) for n in engine.find_all(root, page["elements"]["apply_button"], page)] == [id(first)]
 
 
 @pytest.mark.parametrize("logged_in,want", [(True, "himalayas_job_apply"), (False, "himalayas_job_logged_out")])
