@@ -1,4 +1,4 @@
-# Apply to a JobLens application on Greenhouse, from Talk: design
+# Apply to a JobLens application on Greenhouse or Lever, from Talk: design
 
 Status: draft for admin review (2026-11-07). Nothing built.
 
@@ -21,7 +21,7 @@ company's application system (Greenhouse in the admin's example), where the form
 ## Non-goals (v1)
 
 - Batch runs over several applications (admin: later).
-- Application systems other than Greenhouse (Lever, Ashby, Workday: later).
+- Application systems other than Greenhouse and Lever (Workable, Ashby, Workday: later).
 - AI-drafted answers, auto-submit, marking the application submitted in JobLens.
 
 ## Anti-goals (a failure even if it works)
@@ -37,6 +37,7 @@ company's application system (Greenhouse in the admin's example), where the form
 - Answers come from a bank the admin prepares. Most questions are standard; the few that differ come back to
   the admin.
 - One at a time from Talk first; batch later.
+- v1 covers Greenhouse and Lever (2026-11-07, after the capture). Workable and others come later.
 
 ## How it works (designer's calls unless marked)
 
@@ -146,3 +147,80 @@ Unfilled fields and the end state are logged too ("stopped before Submit").
 - Whether Greenhouse shows a CAPTCHA, and the real AX roles of its fields: from the first capture.
 - CV attach through the macOS open panel is the most fragile step; the fallback is above.
 - Some companies host Greenhouse on their own domain (an embedded form). v1 stops on any other host.
+
+## Capture findings (form 1 of 3, 2026-11-07)
+
+Read-only `gov-aios dump` of one Greenhouse form, untouched, Touch ID; summary of roles and labels only.
+
+- 19 of 19 fields have a label and a DOM id: 6 text fields, 13 dropdowns exposed as `combo_box`. Custom
+  questions use ids like `#question_<10 digits>`; standard ones `#first_name`, `#email`, `#resume`.
+  `fill_field` anchors on id plus label, not label alone.
+- CV: `#resume` has Attach, Dropbox, Google Drive and **Enter manually** (paste text). Pasting avoids the macOS
+  open panel; the cost is that the employer gets plain text, not the PDF. Designer's call: v1 offers both,
+  and the admin picks once in the bank.
+- `Submit application` and `Autofill my application` (MyGreenhouse) are named buttons; both are rated
+  `submit` and never pressed.
+- No CAPTCHA node before submit.
+- A dropdown's options aren't in the tree while it's closed, and it closes when focus leaves Chrome, so a
+  manual open-then-dump shows nothing. So: fill a dropdown by typing the bank answer into it, pressing Enter,
+  and reading the value back. If the value read back isn't exactly the bank answer, clear it and send the
+  field to the admin.
+- Greenhouse's public job-board API (`boards-api.greenhouse.io/v1/boards/<board>/jobs/<id>?questions=true`)
+  returns the same questions, with matching field names and their options. Options are company-specific (CTC
+  bands, notice-period ranges, regions), so a bank answer only fills a dropdown when one option matches it
+  exactly; otherwise the field goes to the admin. The runtime doesn't call this API: that would add a network
+  path outside Chrome. It's used only as an oracle when testing.
+
+## Other systems seen (2026-11-07)
+
+Of the four applications the admin tried, Apply landed on Greenhouse once, Workable once and Lever twice. So
+v1 can't be Greenhouse-only in practice.
+
+- **Lever** (`jobs.lever.co`): terms checked. Lever's Terms of Service (last updated 2023-08-25) cover its
+  customers only and say nothing about bots or automated access. Its job-seeker page says the employer "uses
+  our software to manage their job postings and applications", and its GDPR help says customers give
+  candidates their own notice. Same position as Greenhouse: silence, the employer's notice governs, and the
+  admin submits. One employer's form says the employer may use AI to screen; nothing about applicants.
+  The form (public page, read via fetch, not yet through AX) is one page:
+  - Resume/CV is a required file upload with no paste option, so the macOS open panel can't be avoided;
+  - free-text salary and skills fields;
+  - an availability choice, likely radio buttons, which hit the `tab` role mapping in `roles.yaml`;
+  - a location search;
+  - a "LinkedIn import" button, never pressed;
+  - "Submit application".
+- **Workable** (`apply.workable.com`): not checked; it may have its own candidate terms.
+
+## Capture findings, Lever form 1 (2026-11-07)
+
+Read-only AX dump of one `jobs.lever.co/…/apply` form, untouched.
+
+- 10 standard text fields (name, email, phone, location, company, five links) have accessible names. The three
+  employer questions (skills, current and expected salary) are **unnamed** text fields: their question text is
+  in a static-text node in the same question group, just before the field. `read_form` therefore needs one
+  structural rule: a field without a name takes the text of its question group's label node. It's deterministic
+  and only applies inside the form region. If the rule finds no text, or more than one candidate, the field
+  goes to the admin.
+- Single-choice answers ("When will you be available": Immediate, 30, 60 days, serving notice) are radio
+  buttons and come through as `tab` (the `roles.yaml` mapping: Chrome maps both to AXRadioButton). The engine
+  needs a `radio` role told apart from `tab` by its subrole or parent. That's its own small task.
+- Pronoun checkboxes are voluntary personal data: they always go to the admin, like the demographic questions.
+- Only 3 of 13 fields have DOM ids (`#resume-upload-input`, `#btn-submit`, and one other). Lever anchors on
+  label plus structure, not ids.
+- The resume is required and file-only (`#resume-upload-input`), so the macOS open panel is in scope for Lever.
+- **hCaptcha is present** (`#h-captcha`, next to Submit). The admin presses Submit, so a challenge there is
+  the admin's to solve. If it ever appears before the fill, the CAPTCHA rule applies (card, admin solves it).
+- `Apply with LinkedIn` is never pressed; `SUBMIT APPLICATION` (`#btn-submit`) is `submit`.
+
+## Capture findings, Lever form 2 (2026-11-07)
+
+A second company's Lever form:
+
+- **The Lever template is consistent:** the same `#resume-upload-input`, `#btn-submit` and `#h-captcha`, and
+  the same standard fields with names.
+- **This form has about 15 employer questions,** most of them self-assessment radio groups with long,
+  company-written options ("5–7 years — Solid professional experience…"). So "only a handful differ" holds for
+  some employers, not all. On a form like this, early runs fill the standard fields and send most of the rest
+  to the admin. The fill rate per form is the number to report.
+- **3 native `<select>` dropdowns, unnamed** (same rule: the question text from the group's label node). Unlike
+  Greenhouse's dropdowns, their options are readable as menu items while closed.
+- **The admin card must support single-choice questions with long option text.**
