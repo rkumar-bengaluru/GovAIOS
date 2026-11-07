@@ -108,3 +108,108 @@ def test_add_answer_refuses_what_load_would_reject(tmp_path):
         ff.add_answer(p, "one more", "a")
     assert p.read_text() == before
     assert len(ff.load_bank(p, tmp_path).entries) == 300
+
+
+# ---- reading a form (Task 3) ----
+from govaios.desktop import Node
+
+
+def N(role, name="", *children, value="", dom_id=""):
+    return Node(role=role, name=name, value=value, dom_id=dom_id, children=list(children))
+
+
+def test_greenhouse_shape():
+    r = N("group", "",
+          N("group", "", N("text", "First Name *"), dom_id="first_name-label"),
+          N("text_field", "First Name *", dom_id="first_name"),
+          N("combo_box", "What is your official notice period?", dom_id="question_1"),
+          N("button", "Submit application"))
+    fs = ff.read_form(r)
+    assert [(f.kind, f.label, f.key) for f in fs] == [
+        ("text", "First Name", "#first_name"),
+        ("combo", "What is your official notice period?", "#question_1")]
+
+
+def test_lever_unnamed_question_takes_group_text():
+    r = N("group", "", N("group", "", N("group", "", N("text", "What is your current salary?"), N("text", "✱"))),
+          N("group", "", N("text_field")))
+    fs = ff.read_form(r)
+    assert len(fs) == 1 and fs[0].label == "What is your current salary?"
+    assert fs[0].key == "label:what is your current salary:0"
+
+
+def test_radio_group_one_field():
+    radios = [N("group", "", N("radio", n), N("text", n)) for n in ("Immediate", "15 Days", "30 Days", "60 Days")]
+    r = N("group", "", N("group", "", N("text", "Notice period")), N("group", "", *radios))
+    fs = ff.read_form(r)
+    assert len(fs) == 1 and fs[0].kind == "radio" and fs[0].label == "Notice period"
+    assert fs[0].options == ("Immediate", "15 Days", "30 Days", "60 Days") and not fs[0].filled
+    assert ff.locate(r, fs[0]) is r.children[1]
+
+
+def test_pronoun_checkboxes_are_multi_and_restricted():
+    r = N("group", "", N("group", "", N("text", "Pronouns")),
+          N("group", "", *[N("checkbox", n) for n in ("He/him", "She/her", "They/them")]),
+          )
+    fs = ff.read_form(r)
+    assert [f.kind for f in fs] == ["multi"] and fs[0].label == "Pronouns"
+    assert [f.kind for f in ff.read_form(N("group", "", N("checkbox", "I agree")))] == ["checkbox"]
+    assert ff.restricted(fs[0]) == "demographic"
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("Password", "sensitive"), ("Gender", "demographic"),
+    ("I certify that the above is true", "consent"), ("Veteran status", "demographic"),
+    ("Notice period", None)])
+def test_restricted_patterns(label, expected):
+    assert ff.restricted(ff.Field("k", label, "text", (), False)) == expected
+    assert ff.restricted(ff.Field("k", "x", "other", (), False)) == "secure"
+
+
+def _bank(*pairs):
+    return ff.Bank(tuple(ff.Entry(k, tuple(ls), a) for k, ls, a in pairs))
+
+
+def _f(label, kind="text", options=(), filled=False):
+    return ff.Field("#" + label, label, kind, options, filled)
+
+
+def test_answer_for_exact_and_ambiguous():
+    f = _f("Notice period")
+    assert ff.answer_for(f, _bank(("notice", ["notice period?"], "30 days")), [f]) == ("30 days", "bank:notice")
+    assert ff.answer_for(f, _bank(("a", ["Notice period"], "1"), ("b", ["notice period"], "2")), [f]) is None
+    g = ff.Field("#2", "notice period", "text", (), False)
+    b = _bank(("a", ["Notice period"], "1"))
+    assert ff.answer_for(f, b, [f, g]) is None and ff.answer_for(g, b, [f, g]) is None
+    assert ff.answer_for(_f("Other"), b, [_f("Other")]) is None
+
+
+def test_answer_for_choice_must_match_option():
+    f = _f("Notice period", "radio", ("Immediate", "30 Days"))
+    assert ff.answer_for(f, _bank(("notice", ["Notice period"], "30 days")), [f]) == ("30 Days", "bank:notice")
+    assert ff.answer_for(f, _bank(("notice", ["Notice period"], "60 days")), [f]) is None
+
+
+def test_filled_field_never_answered():
+    f = _f("Notice period", filled=True)
+    assert ff.answer_for(f, _bank(("n", ["Notice period"], "x")), [f]) is None
+    r = N("group", "", N("text_field", "A", value="v", dom_id="a"), N("popup_button", "S", N("native:AXMenuItem", "-"),
+          N("native:AXMenuItem", "x"), value="x", dom_id="s"), N("native:AXSecureTextField", "Pw", dom_id="pw"))
+    fs = ff.read_form(r)
+    assert [(f.kind, f.filled) for f in fs] == [("text", True), ("select", True), ("other", False)]
+    assert fs[1].options == ("-", "x")
+
+
+def test_newline_answer_only_for_textarea():
+    b = _bank(("n", ["About"], "a\nb"))
+    assert ff.answer_for(_f("About", "textarea"), b, [_f("About", "textarea")]) == ("a\nb", "bank:n")
+    assert ff.answer_for(_f("About"), b, [_f("About")]) is None
+
+
+def test_locate_finds_by_key_in_new_tree():
+    def tree():
+        return N("group", "", N("text_field", "A", dom_id="a"), N("text_field", "", dom_id="b"))
+    f = ff.read_form(tree())[1]
+    t2 = tree()
+    assert ff.locate(t2, f) is t2.children[1]
+    assert ff.locate(t2, ff.Field("#zz", "", "text", (), False)) is None

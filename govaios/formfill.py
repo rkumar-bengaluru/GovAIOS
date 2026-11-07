@@ -135,3 +135,117 @@ def add_answer(path: Path, label: str, answer: str) -> str:
         yaml.safe_dump(doc, f, allow_unicode=True)
     os.replace(tmp, path)
     return key
+
+
+FIELD_ROLES = {"text_field", "text_area", "combo_box", "popup_button", "radio", "checkbox"}
+_KINDS = {"text_field": "text", "text_area": "textarea", "combo_box": "combo", "popup_button": "select",
+          "native:AXSecureTextField": "other"}
+_ASKABLE = {"text", "textarea", "combo", "select", "radio"}
+
+
+@dataclass(frozen=True)
+class Field:
+    key: str
+    label: str
+    kind: str
+    options: tuple[str, ...]
+    filled: bool
+
+
+def _is_field(n) -> bool:
+    return n.role in FIELD_ROLES or n.role == "native:AXSecureTextField"
+
+
+def _question(start, parents) -> str:
+    """Text of the nearest previous sibling (no fields inside) of `start` or up to 3 ancestors."""
+    n = start
+    for _ in range(4):
+        p = parents.get(id(n))
+        if p is None:
+            return ""
+        for sib in reversed(p.children[:p.children.index(n)]):
+            kids = list(sib.walk())
+            if any(k.role == "text" for k in kids) and not any(_is_field(k) for k in kids):
+                return sib.text().rstrip("*✱ \t\r\n")
+        n = p
+    return ""
+
+
+def _read(region):
+    parents = {id(c): n for n in region.walk() for c in n.children}
+    out, seen, counts, done = [], set(), {}, set()
+
+    def add(node, label, kind, options, filled, use_id=True):
+        nl = normalize(label)
+        if use_id and node.dom_id:
+            key = "#" + node.dom_id
+        else:
+            key = f"label:{nl}:{counts.get(nl, 0)}"
+        counts[nl] = counts.get(nl, 0) + 1
+        out.append((Field(key, label, kind, options, filled), node))
+
+    def group_of(node):
+        a = parents.get(id(node))
+        while a is not None:
+            if sum(1 for d in a.walk() if d.role == node.role) >= 2:
+                return a
+            a = parents.get(id(a))
+        return None
+
+    for n in region.walk():
+        if id(n) in done or not _is_field(n):
+            continue
+        label = n.name.rstrip("*✱ \t\r\n")
+        if n.role in ("radio", "checkbox"):
+            g = group_of(n)
+            if g is not None:
+                members = [d for d in g.walk() if d.role == n.role]
+                done.update(id(m) for m in members)
+                label = _question(g, parents)
+                add(g, label, "radio" if n.role == "radio" else "multi", tuple(m.name for m in members),
+                    any(m.value == "1" for m in members), use_id=False)
+                continue
+        label = label or _question(n, parents)
+        kind = _KINDS.get(n.role, n.role)  # lone radio/checkbox keep their role as kind
+        opts = tuple(d.name for d in n.walk() if d.role == "native:AXMenuItem") if kind == "select" else ()
+        if kind in ("radio", "checkbox"):
+            filled = n.value == "1"
+        elif kind == "select":
+            filled = bool(n.value) and n.value != (opts[0] if opts else None)
+        else:
+            filled = bool(n.value)
+        add(n, label, kind, opts, filled)
+    return out
+
+
+def read_form(region) -> list[Field]:
+    return [f for f, _ in _read(region)]
+
+
+def locate(region, f: Field):
+    return next((n for g, n in _read(region) if g.key == f.key), None)
+
+
+def restricted(f: Field) -> str | None:
+    if f.kind == "other":
+        return "secure"
+    if f.kind == "multi":
+        return "demographic"
+    s = normalize(f.label)
+    return next((name for name, pat in RESTRICTED.items() if re.search(pat, s)), None)
+
+
+def answer_for(f: Field, bank: Bank, fields: list[Field]) -> tuple[str, str] | None:
+    nl = normalize(f.label)
+    if not nl or restricted(f) or f.filled or f.kind not in _ASKABLE:
+        return None
+    if sum(1 for g in fields if normalize(g.label) == nl) != 1:
+        return None
+    hits = [e for e in bank.entries if nl in {normalize(x) for x in e.labels}]
+    if len(hits) != 1 or not ok_value(hits[0].answer, f.kind):
+        return None
+    e = hits[0]
+    if f.kind in ("select", "radio"):
+        m = [o for o in f.options if normalize(o) == normalize(e.answer)]
+        return (m[0], f"bank:{e.key}") if len(m) == 1 else None
+    return e.answer, f"bank:{e.key}"
