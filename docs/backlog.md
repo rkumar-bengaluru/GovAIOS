@@ -14,6 +14,8 @@ Updated 2026-11-06 after control panel v2 (PR #10).
 - **Claude Code refusals made by its own managed deny rules are not in the audit log** (seen live
   2026-11-07: reading the data home and writing /tmp were refused before the hook ran). Only calls that
   reach the hook are logged.
+- **Panel UI design pass** (admin, 2026-11-07): the Talk cards, Claude Code pages and Marketplace need a
+  proper design before more UI is added.
 - **Chat in Talk:** plain messages (not commands) answered by Claude in the panel (admin, 2026-11-07).
   Needs the Studio decision on how the panel reaches Claude. Apps with run-time inputs show them on
   their `/app` card.
