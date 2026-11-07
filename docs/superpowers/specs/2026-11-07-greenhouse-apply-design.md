@@ -188,3 +188,24 @@ v1 can't be Greenhouse-only in practice.
   - a "LinkedIn import" button, never pressed;
   - "Submit application".
 - **Workable** (`apply.workable.com`): not checked; it may have its own candidate terms.
+
+## Capture findings, Lever form 1 (2026-11-07)
+
+Read-only AX dump of one `jobs.lever.co/…/apply` form, untouched.
+
+- 10 standard text fields (name, email, phone, location, company, five links) have accessible names. The three
+  employer questions (skills, current and expected salary) are **unnamed** text fields: their question text is
+  in a static-text node in the same question group, just before the field. `read_form` therefore needs one
+  structural rule: a field without a name takes the text of its question group's label node. It's deterministic
+  and only applies inside the form region. If the rule finds no text, or more than one candidate, the field
+  goes to the admin.
+- Single-choice answers ("When will you be available": Immediate, 30, 60 days, serving notice) are radio
+  buttons and come through as `tab` (the `roles.yaml` mapping: Chrome maps both to AXRadioButton). The engine
+  needs a `radio` role told apart from `tab` by its subrole or parent. That's its own small task.
+- Pronoun checkboxes are voluntary personal data: they always go to the admin, like the demographic questions.
+- Only 3 of 13 fields have DOM ids (`#resume-upload-input`, `#btn-submit`, and one other). Lever anchors on
+  label plus structure, not ids.
+- The resume is required and file-only (`#resume-upload-input`), so the macOS open panel is in scope for Lever.
+- **hCaptcha is present** (`#h-captcha`, next to Submit). The admin presses Submit, so a challenge there is
+  the admin's to solve. If it ever appears before the fill, the CAPTCHA rule applies (card, admin solves it).
+- `Apply with LinkedIn` is never pressed; `SUBMIT APPLICATION` (`#btn-submit`) is `submit`.
