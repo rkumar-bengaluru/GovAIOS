@@ -140,7 +140,7 @@ def add_answer(path: Path, label: str, answer: str) -> str:
 FIELD_ROLES = {"text_field", "text_area", "combo_box", "popup_button", "radio", "checkbox"}
 _KINDS = {"text_field": "text", "text_area": "textarea", "combo_box": "combo", "popup_button": "select",
           "native:AXSecureTextField": "other"}
-_ASKABLE = {"text", "textarea", "combo", "select", "radio"}
+ASKABLE = {"text", "textarea", "combo", "select", "radio"}
 
 
 @dataclass(frozen=True)
@@ -240,7 +240,7 @@ def restricted(f: Field) -> str | None:
 
 def answer_for(f: Field, bank: Bank, fields: list[Field]) -> tuple[str, str] | None:
     nl = normalize(f.label)
-    if not nl or restricted(f) or f.filled or f.kind not in _ASKABLE:
+    if not nl or restricted(f) or f.filled or f.kind not in ASKABLE:
         return None
     if sum(1 for g in fields if normalize(g.label) == nl) != 1:
         return None

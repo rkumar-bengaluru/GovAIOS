@@ -67,6 +67,9 @@ class FormDesk(FakeDesktop):
         self.calls.append(("click", node.dom_id or node.name))
         self.values.setdefault("clicked", []).append(node.name)
 
+    def focused_is(self, node):   # a handle from an older snapshot is not the focused element
+        return node.handle == self.gen
+
     def menu_open(self):
         return self.menu
 
@@ -183,9 +186,9 @@ def test_mismatch_clears_and_goes_to_yourself(tmp_path):
     assert result(tmp_path)["yourself"] == ["Notice period"] and result(tmp_path)["filled"] == 0
 
 
-def combo_form(n_options):
+def combo_form(n_options, registers=True, portal=False):
     def build(d):
-        picked = "Bengaluru" in d.values.get("clicked", [])
+        picked = registers and "Bengaluru" in d.values.get("clicked", [])
         group = [N("text", "Location"), N("combo_box", "Location", value=d.values.get("loc", "") if not picked else "",
                                          dom_id="loc")]
         if picked:
@@ -194,7 +197,11 @@ def combo_form(n_options):
             group.append(N("list", children=[N("group", "Bengaluru", children=[N("text", "Bengaluru")]) for _ in range(n_options)]
                            + [N("group", "Bengaluru North")]))
         nav = N("list", children=[N("text", "Bengaluru")])   # was there before typing: never a candidate
-        return N("document", "Job Application for Engineer", children=[nav, N("form", children=[N("group", children=group)])])
+        top = [N("form", children=[N("group", children=group)])]
+        if portal:   # a page-level node appears on typing, shifting the nav list's path so it looks new
+            return N("document", "Job Application for Engineer",
+                     children=top + [N("group")] * bool(d.values.get("loc")) + [nav])
+        return N("document", "Job Application for Engineer", children=[nav] + top)
     return build
 
 
@@ -213,6 +220,22 @@ def test_combo_no_or_many_options_escape(tmp_path, n):
     assert err is None
     assert "escape" in d.calls and "enter" not in d.calls and ("click", "Bengaluru") not in d.calls
     assert fills(e)[0]["outcome"] == "mismatch" and result(tmp_path)["yourself"] == ["Location"]
+    assert d.calls[-2:] == ["select_all", "delete_back"]   # field re-found after escape (new handles), then cleared
+
+
+def test_combo_option_click_not_registered_is_mismatch(tmp_path):
+    d = FormDesk(combo_form(1, registers=False))   # the list stays open and the input still holds the typed text
+    _, e, err = run(tmp_path, d, ({"key": "loc", "labels": ["Location"], "answer": "Bengaluru"},))
+    assert err is None and ("click", "Bengaluru") in d.calls and "enter" not in d.calls
+    assert fills(e)[0]["outcome"] == "mismatch" and result(tmp_path)["yourself"] == ["Location"]
+    assert d.calls[-2:] == ["select_all", "delete_back"]
+
+
+def test_combo_list_outside_form_never_a_candidate(tmp_path):
+    d = FormDesk(combo_form(0, portal=True))
+    _, e, err = run(tmp_path, d, ({"key": "loc", "labels": ["Location"], "answer": "Bengaluru"},))
+    assert err is None and ("click", "Bengaluru") not in d.calls and "escape" in d.calls
+    assert fills(e)[0]["outcome"] == "mismatch"
 
 
 def select_form(d):
@@ -231,6 +254,23 @@ def test_select_without_menu_escapes(tmp_path, menu):
     else:
         assert "escape" in d.calls and "enter" not in d.calls and fills(e)[0]["outcome"] == "mismatch"
         assert result(tmp_path)["yourself"] == ["Authorised to work"]
+
+
+def test_select_menu_closed_before_enter_escapes(tmp_path):
+    d = FormDesk(select_form)
+    states = iter([True, False])   # open on click, closed by the time Enter would go
+    d.menu_open = lambda: next(states)
+    _, e, err = run(tmp_path, d, ({"key": "auth", "labels": ["Authorised to work"], "answer": "yes"},))
+    assert err is None and "enter" not in d.calls and "escape" in d.calls
+    assert fills(e)[0]["outcome"] == "mismatch"
+
+
+def test_fill_refuses_control_characters(tmp_path):
+    d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period")))
+    r, _, err = run(tmp_path, d, rows=())
+    [f] = engine.read_form(r._form()[1])
+    assert err is None and r.fill(f, "a\nb", "admin") is False
+    assert not [c for c in d.calls if c[0] in ("type_into", "click")] and "notice" not in d.values
 
 
 def test_radio_clicks_named_option(tmp_path):
