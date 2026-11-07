@@ -153,7 +153,7 @@ class Runner:
         return ok, how
 
     # governance gate for every side effect
-    def gate(self, action, risk, target=None, destination=NO_DEST):
+    def gate(self, action, risk, target=None, destination=NO_DEST, question=None):
         if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
             raise Stop("emergency stop")
         if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked since approve_flow
@@ -170,7 +170,7 @@ class Runner:
         if asked:
             q = f"Flow '{self.flow['id']}' wants to {action}"
             q += f" and reach {origin(destination)} for the first time." if destination else "."
-            ok, how = self.ask(q + " Approve?", f"{self.flow['id']}: {action} {origin(destination) if destination else ''}".strip())
+            ok, how = self.ask(question or q + " Approve?", f"{self.flow['id']}: {action} {origin(destination) if destination else ''}".strip())
             verdict, remember = ("allow", bool(destination)) if ok else ("deny", False)
         self._audit("request", action=action, risk=risk, target=target, destination=dest, decision=verdict,
                     approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how,
@@ -365,8 +365,12 @@ class Runner:
                 return (it if fs.get("self") else find_all(it, fs, self.pages[page_id])[0]), fs
         raise Stop("selected item no longer on the page")   # identity check
 
+    def ref(self, target):
+        """Audit ref for a target; `current_page.<el>` names the page the run classified."""
+        return f"{self.ctx['page']}.{target.split('.', 1)[1]}" if target.startswith("current_page.") else target
+
     def do_click(self, s):
-        tgt = s["target"]
+        tgt = self.ref(s["target"])
         if tgt.startswith("current_item."):
             node, spec = self._current_item_node(tgt.split(".", 1)[1])
         else:

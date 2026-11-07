@@ -16,6 +16,8 @@ def decide(request, flow, approvals):
     perms = flow["permissions"]
     if request["action"] not in perms["allow"]:
         return "deny"                                     # Rule 9: unlisted = denied
+    if request["action"] == "attach_file":
+        return "ask"                                      # every time; gate remembers only destinations
     if request["action"] == "click" and \
             RISK_ORDER.index(request["risk"]) > RISK_ORDER.index(perms["max_element_risk"]):
         return "deny"                                     # README §7: element risk ceiling

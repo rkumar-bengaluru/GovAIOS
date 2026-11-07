@@ -553,3 +553,15 @@ def test_run_input_valid_navigates(tmp_path):
     r = input_runner(tmp_path, {"job_url": JOB})
     r.run()
     assert r.d.typed == JOB
+
+
+def test_gate_custom_question(tmp_path, monkeypatch):
+    qs = []
+    monkeypatch.setattr(engine.auth, "approve", lambda q, *a, **k: (qs.append(q), (True, "biometric"))[1])
+    r = Runner(REPO / "flows" / "himalayas_job_vetting.yaml", FakeDesktop([]), tmp_path)
+    r.approvals.approve_flow(r.flow["id"], r.digest)
+    r.flow["permissions"]["allow"].append("attach_file")
+    r.gate("attach_file", "modify", question="Attach your CV?")
+    r.gate("attach_file", "modify")
+    assert qs[0] == "Attach your CV?" and qs[1].startswith("Flow 'himalayas_job_vetting' wants to attach_file")
+    assert r.approvals.destination_ok(r.flow["id"], "https://x") is False   # nothing remembered
