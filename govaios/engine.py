@@ -141,7 +141,8 @@ class Runner:
     def ask(self, question, reason):
         """Authenticated admin prompt; afterwards (any answer) the flow's app is brought back before any further input."""
         ok, how = auth.approve(question, reason, self.home)
-        self.shown = auth.shown_digest(question, reason)   # audited with the answer: what exactly was approved
+        # audited with the answer: what exactly was shown ("none": the Touch ID prompt never appeared)
+        self.shown = auth.shown_digest(question, None if how == "none" else reason)
         if self.launched:
             self._act("activate", self.d.activate, self.app)
         return ok, how

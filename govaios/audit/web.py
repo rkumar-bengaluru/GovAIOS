@@ -730,7 +730,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 if not ok and how in ("busy", "none"):
                     return self._redirect("/?m=busy")   # no sheet was shown: nothing refused, no pause
                 if not ok:
-                    refused()
+                    with sign_lock:   # the same lock /signin/code counts under
+                        refused()
                     log.append("ui_login", decision="deny", approver="admin", channel="touch_id", auth=how,
                                shown=shown_digest(None, reason))
             finally:
@@ -759,17 +760,19 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if at is None or now() - at >= PRE_S:
                 return self._redirect("/", clear)
             reason = f"sign in to the GOV-AIOS panel, code {word}"
-            ok = hmac.compare_digest(f.get("word", "").strip().upper().encode(), word.encode())
+            ok = hmac.compare_digest("".join(f.get("word", "").split()).upper().encode(), word.encode())
             with sign_lock:
                 if not ok:
                     refused()
                 else:
                     state["n"] = 0
-            log.append("ui_login", decision="allow" if ok else "deny", approver="admin", channel="touch_id",
-                       auth=how if ok else "wrong_code", shown=shown_digest(None, reason))   # audit first, then the cookie
+            locked = ok and auth.screen_locked()   # locked since the sheet: that lock signs this browser out too
+            log.append("ui_login", decision="allow" if ok and not locked else "deny", approver="admin",
+                       channel="touch_id", auth="screen_lock" if locked else how if ok else "wrong_code",
+                       shown=shown_digest(None, reason))   # audit first, then the cookie
             if not ok:
                 return self._redirect("/?m=code", clear)
-            if auth.screen_locked():   # locked since the sheet: that lock signs this browser out too
+            if locked:
                 return self._redirect("/", clear)
             sid = secrets.token_urlsafe(32)
             with sign_lock:

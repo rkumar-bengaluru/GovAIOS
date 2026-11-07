@@ -153,7 +153,8 @@ def _gate(question, reason: str, home: Path, channel: str) -> tuple[bool, str]:
 
 
 def shown_digest(question, reason: str) -> str:
-    """sha256 of exactly what the admin was shown: the dialog's question (None: no dialog) and the Touch ID reason."""
+    """sha256 of exactly what the admin was shown: the dialog's question and the Touch ID reason (None: not shown).
+    A fingerprint for matching, not a secret: a short reason (e.g. a 4-letter sign-in word) can be guessed from it."""
     return hashlib.sha256(json.dumps([question, reason]).encode()).hexdigest()
 
 

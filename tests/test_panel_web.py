@@ -576,7 +576,7 @@ def test_signin_needs_the_code_typed_from_the_prompt(panel):
     s, body, _ = P.ui.raw(port, "GET", "/", f"t={t}")
     assert s == 200 and "Type the 4-letter code" in body and "name=word" in body and word not in body
     assert len(_log(P.home, "ui_login")) == n   # audited once, at the typed code
-    s, _, r = P.ui.code_post(port, t, f" {word.lower()} ")   # case and spaces do not matter
+    s, _, r = P.ui.code_post(port, t, f" {word[:2].lower()} {word[2:]} ")   # case and spaces do not matter
     assert s == 303 and r.getheader("Location") == "/"
     sid = P.ui.s(r)
     assert "HttpOnly" in r.getheader("Set-Cookie") and "SameSite=Strict" in r.getheader("Set-Cookie")
