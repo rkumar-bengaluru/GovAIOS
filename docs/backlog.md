@@ -9,6 +9,15 @@ Updated 2026-11-08 after Claude Code and Codex governance (PRs #16, #17).
   the draft, test-run it, approve it. Spec: `docs/superpowers/specs/2026-11-06-studio-capture-handover-design.md`.
   Decided: typing into search boxes only, with run-time inputs. Open until build: the Claude channel
   (API key in Keychain or Claude Code no-tools mode); other LLMs as writers.
+- **`gov-aios capture <page>`: Studio capture as a CLI step first** (admin, 2026-11-07). It replaces running
+  `gov-aios dump` by hand, which prints names and values unmasked to the terminal. Touch ID as dump does,
+  masks per spec §5.3, writes `studio/<draft>/capture/<page>.json` (0600), never stdout. The panel's
+  "Capture this page" comes later on top of it. Then decide roles and intent (§5.4).
+  Evidence (2026-11-07, Greenhouse + 2 Lever captures): 101/101 form fields keep a label if values are
+  masked and only the text node just before each field is kept (6 Lever fields have their question only
+  in that text). **Spec §5.3 needs amending for forms:** its 60-character cap and controls-only kept list
+  would mask long Greenhouse question labels and those Lever questions; combo_box, popup_button and radio
+  are not in its kept roles. Not yet checked against Gmail/JobLens/Himalayas captures.
 - **My apps and Marketplace** panel areas. Each app drives its own setup; upgrades carry apps over.
   Mockup: `docs/superpowers/mockups/2026-11-06-apps-journey.html`.
 - **Claude Code refusals made by its own managed deny rules are not in the audit log** (seen live
