@@ -1,9 +1,10 @@
 """Launch helper: forked before the sandbox (a sandboxed process cannot `open -a` the app or `say`).
 The child is the only unsandboxed part of the panel: no socket, no PyObjC, and it runs nothing but RunLaunch's
-fixed argv and `say --`, for requests it validates itself."""
+fixed argv, `say --`, ROOT_SCRIPT under macOS's administrator dialog and `open -a Terminal` on a Claude Code launch file, for requests it validates itself."""
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -13,10 +14,31 @@ from govaios.panel.launch import RunLaunch
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 SAY_MAX = 300
+MS_DIR = "/Library/Application Support/ClaudeCode"
+STAGED = "executors/managed-settings.json"   # = claudecode.STAGED (the helper imports nothing it need not)
+# Run as root by the macOS administrator dialog: fixed text, arguments only from the helper itself. The copy is
+# checked against the digest the admin approved in the panel, so a file swapped after approval is never installed.
+ROOT_SCRIPT = r"""set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+act=$1 src=$2 want=$3 dir=$4 own=$5
+dst="$dir/managed-settings.json"
+if [ "$act" = remove ]; then rm -f "$dst"; exit 0; fi
+mkdir -p "$dir"
+tmp=$(mktemp "$dir/.managed-settings.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+cat < "$src" > "$tmp"
+[ "$(shasum -a 256 "$tmp" | cut -d' ' -f1)" = "$want" ] || exit 3
+chown "$own" "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$dst"
+trap - EXIT
+"""
+PROMPT = "GOV-AIOS wants to {} the Claude Code managed settings."
 
 
-def start_helper(flows_dir, home, open_cmd="open", say_cmd="/usr/bin/say"):
-    """Fork now: before the sandbox and before any thread. open_cmd/say_cmd are test overrides."""
+def start_helper(flows_dir, home, open_cmd="open", say_cmd="/usr/bin/say", elevate=None, ms_dir=MS_DIR,
+                 owner="root:wheel"):
+    """Fork now: before the sandbox and before any thread. open_cmd/say_cmd/elevate/ms_dir/owner are test overrides."""
     cmd_r, cmd_w = os.pipe()
     evt_r, evt_w = os.pipe()
     pid = os.fork()
@@ -24,7 +46,8 @@ def start_helper(flows_dir, home, open_cmd="open", say_cmd="/usr/bin/say"):
         code = 0
         try:
             os.close(cmd_w), os.close(evt_r)
-            _child(cmd_r, evt_w, os.path.realpath(flows_dir), str(home), open_cmd, say_cmd)
+            _child(cmd_r, evt_w, os.path.realpath(flows_dir), str(home), open_cmd, say_cmd,
+                   (elevate or _osascript, ms_dir, owner))
         except BaseException:
             code = 70
         finally:
@@ -33,7 +56,7 @@ def start_helper(flows_dir, home, open_cmd="open", say_cmd="/usr/bin/say"):
     return Helper(pid, cmd_w, evt_r)
 
 
-def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd):
+def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
     # Ctrl-C reaches the group; the pipe is our only way to end. A no-op handler, not SIG_IGN: exec resets a
     # handler to default, but SIG_IGN would be inherited by `open` and what it runs.
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -74,6 +97,32 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd):
     def live():
         return "run" in cur and not cur["run"].done
 
+    def claude(n, act, digest):
+        elevate, ms_dir, owner = admin
+        argv = ["/bin/sh", "-c", ROOT_SCRIPT, "sh", act, os.path.join(home, STAGED), digest, ms_dir, owner]
+        try:
+            code = elevate(argv, PROMPT.format(act))
+        except Exception:
+            code = 1
+        send({"id": n, "done": True, "code": code})
+
+    busy = threading.Lock()   # one administrator dialog at a time
+
+    def claude_start(n, folder):
+        """Terminal opens `folder` and runs Claude Code: only an existing folder inside the approved policy's."""
+        from govaios import claudecode, executor
+        try:
+            real = claudecode.inside(folder, executor.load(home)[0].get("project_roots", []))
+            claude = claudecode.found()
+            if real is None or claude is None:
+                code = 70
+            else:
+                f = claudecode.launch_file(home, real, claude)
+                code = subprocess.run([open_cmd, "-a", "Terminal", str(f)], timeout=30).returncode
+        except Exception:
+            code = 1
+        send({"id": n, "done": True, "code": code})
+
     try:
         for raw in os.fdopen(cmd_r, "r"):   # trusted channel (both ends ours): lines are not capped
             try:
@@ -97,6 +146,20 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd):
                 cur.update(id=n, run=run)
                 run.start()
                 threading.Thread(target=watch, args=(n, run), daemon=True).start()
+            elif op == "claude_start" and isinstance(m.get("folder"), str):
+                threading.Thread(target=claude_start, args=(n, m["folder"]), daemon=True).start()
+            elif op == "claude":
+                act, digest = m.get("action"), m.get("digest", "")
+                ok = act == "remove" or (act == "install" and isinstance(digest, str) and _HEX64.fullmatch(digest))
+                if not ok or not busy.acquire(blocking=False):
+                    send({"id": n, "done": True, "code": 70, "error": "refused"})
+                    continue
+                def go(n=n, act=act, digest=digest):
+                    try:
+                        claude(n, act, digest if act == "install" else "")
+                    finally:
+                        busy.release()
+                threading.Thread(target=go, daemon=True).start()
             elif op == "stop" and isinstance(m.get("reason"), str) and cur.get("id") == n and live():
                 threading.Thread(target=cur["run"].stop, args=(m["reason"],), daemon=True).start()
     finally:
@@ -106,6 +169,18 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd):
             end = time.time() + 10
             while not run.done and time.time() < end:
                 time.sleep(0.05)
+
+
+def _osascript(argv, prompt):
+    """macOS's own administrator dialog runs argv as root. 0 done, 2 cancelled by the admin, else failed."""
+    cmd = " ".join(shlex.quote(a) for a in argv)
+    script = ["-e", "on run a", "-e", "do shell script (item 1 of a) with prompt (item 2 of a) with administrator privileges",
+              "-e", "end run"]
+    try:
+        r = subprocess.run(["/usr/bin/osascript", *script, cmd, prompt], capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return 1
+    return 0 if r.returncode == 0 else 2 if "-128" in r.stderr else 1
 
 
 def _quiet_run(args):
@@ -129,6 +204,25 @@ class Helper:
 
     def say(self, text):
         self._send({"op": "say", "text": text})
+
+    def claude_start(self, folder, wait_s=40):
+        """Open Terminal in `folder` running Claude Code. 0 started, 70 refused, else failed."""
+        return self._call({"op": "claude_start", "folder": folder}, wait_s)
+
+    def _call(self, msg, wait_s):
+        with self._lock:
+            self._n += 1
+            r = self._runs[self._n] = HelperRun(self, self._n, "", "")
+        self._send({**msg, "id": r._n})
+        end = time.time() + wait_s
+        while not r.done and time.time() < end:
+            time.sleep(0.05)
+        return r.code if r.done else 1
+
+    def claude(self, action, digest="", wait_s=660):
+        """Install or remove Claude Code's managed settings through the administrator dialog; blocks until done.
+        0 done, 2 cancelled, else failed or refused."""
+        return self._call({"op": "claude", "action": action, "digest": digest}, wait_s)
 
     def close(self, wait_s=15):
         """Closing the pipe ends the child (it stops a live run first); waits for it, bounded."""

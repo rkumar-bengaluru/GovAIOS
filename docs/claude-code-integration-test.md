@@ -21,7 +21,17 @@ The file is installed root-owned in `/Library/Application Support/ClaudeCode/`, 
 **Run it from a new Terminal window and a new Claude Code session.** Installed from a running
 session, the settings govern that session too.
 
-## Steps (admin)
+## From the panel (2026-11-07)
+
+Marketplace → **Claude Code, governed** → **Set up**. Pick the folders (one per line), press
+**Approve and install…**, approve the policy with Touch ID, then type your Mac password in the macOS
+dialog. The panel says "Claude Code is governed" and the card shows **Governed**. **Turn off…** on the
+same page removes the settings (Touch ID, then Mac password). Then continue from step 3 below.
+
+The policy is written only once approved. The root step copies the staged settings only if their
+sha256 matches what the panel staged after your approval (`ROOT_SCRIPT` in `govaios/panel/helper.py`).
+
+## Steps (admin, CLI)
 
 From the repo root (`cd ~/Documents/2026/rkumar-bengaluru/GovAIOS`):
 

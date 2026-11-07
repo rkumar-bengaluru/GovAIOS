@@ -52,7 +52,10 @@ def default_policy(*roots):
 
 
 def load(home):
-    raw = (Path(home) / POLICY_PATH).read_bytes()
+    return parse((Path(home) / POLICY_PATH).read_bytes())
+
+
+def parse(raw: bytes):
     pol = yaml.safe_load(raw)
     if not isinstance(pol, dict):
         raise ValueError("executor policy is not a mapping")

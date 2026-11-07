@@ -45,6 +45,23 @@ class FakeLaunch:
         self.stopped = self.stopped_reason = reason
 
 
+def _fake_admin(home, ms):
+    """The Mac-password step without root: what ROOT_SCRIPT does, as this user."""
+    def run(action, digest):
+        import hashlib
+        dst = ms / "managed-settings.json"
+        if action == "remove":
+            dst.unlink(missing_ok=True)
+            return 0
+        data = (home / "executors" / "managed-settings.json").read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            return 3
+        ms.mkdir(exist_ok=True)
+        dst.write_bytes(data)
+        return 0
+    return run
+
+
 @pytest.fixture
 def panel(tmp_path, monkeypatch, ui):
     from govaios import auth
@@ -69,11 +86,15 @@ def panel(tmp_path, monkeypatch, ui):
     settings.set_name(home, "Rupak")
     made = []
     launcher = type("L", (FakeLaunch,), {"made": made})
+    admin_calls, admin_answer = [], [_fake_admin(home, tmp_path / "ClaudeCode")]
+    started = []
     spoken = []
     mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
     srv = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
                             now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None,
-                            chrome_state=tmp_path / "Local State")
+                            chrome_state=tmp_path / "Local State", managed=tmp_path / "ClaudeCode" / "managed-settings.json",
+                            admin=lambda a, d: (admin_calls.append((a, d)), admin_answer[0](a, d))[1],
+                            starter=lambda f: (started.append(f), 0)[1])
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
 
@@ -92,6 +113,7 @@ def panel(tmp_path, monkeypatch, ui):
     P = type("P", (), {})()
     P.home, P.flows, P.srv, P.made, P.answers, P.asked, P.req, P.sid = home, flows, srv, made, answers, asked, req, sid
     P.spoken, P.mono, P.wall, P.launcher, P.ui = spoken, mono, wall, launcher, ui
+    P.admin_calls, P.admin_answer, P.tmp, P.started = admin_calls, admin_answer, tmp_path, started
     P.get = lambda path: req(path, cookie=sid)
     P.csrf = lambda: re.search(r"name=csrf value='([^']+)'", P.get("/")[1])[1]
     P.post = lambda path, headers=None, **f: req(path, "POST", cookie=sid, headers=headers,
@@ -995,3 +1017,187 @@ def test_marketplace_signed_out_goes_to_locked_page(panel):
         s, _, r = P.ui.raw(P.srv.server_address[1], "GET", path)
         assert (s, r.getheader("Location"), r.getheader("Set-Cookie")) == (303, "/", None)
 
+
+
+@pytest.fixture
+def cc(panel, monkeypatch):
+    from govaios import claudecode
+    monkeypatch.setattr(claudecode, "root_owned", lambda p: p.exists())   # the fake step cannot chown to root
+    proj = panel.tmp / "proj"
+    proj.mkdir()
+    panel.proj = proj
+    return panel
+
+
+def _tells(P):
+    return [l for l in P.srv.panel.convo if l.startswith("GOV-AIOS -> ")]
+
+
+def test_claude_code_card_and_page(cc):
+    body = cc.get("/market")[1]
+    assert "Claude Code, governed" in body and "href='/claude'" in body
+    page = cc.get("/claude")[1]
+    assert "<textarea id=folders name=folders" in page and "~/Documents/2026" in page and "<script" not in page
+
+
+def test_claude_code_setup_approves_then_installs(cc):
+    from govaios.executor import POLICY_PATH
+    st, _, r = cc.post("/claude/setup", folders=str(cc.proj))
+    assert st == 303 and r.getheader("Location") == "/"
+    pol_text = (cc.home / POLICY_PATH).read_text()
+    assert str(cc.proj.resolve()) in pol_text and any(pol_text in q for q in cc.asked)
+    (act, digest), = cc.admin_calls
+    assert act == "install" and len(digest) == 64
+    assert "Claude Code is governed" in _tells(cc)[-1]
+    assert "<p class=state>Governed</p>" in cc.get("/market")[1] and "Turn off" in cc.get("/claude")[1]
+    fa = _log(cc.home, "flow_approval")[-1]
+    assert fa["flow"] == "claude_code" and fa["decision"] == "allow" and len(fa["shown"]) == 64
+    s = _log(cc.home, "setting")[-1]
+    assert (s["field"], s["action"], s["outcome"]) == ("claude_code", "install", "0")
+
+
+def test_claude_code_not_approved_writes_nothing(cc):
+    from govaios.executor import POLICY_PATH
+    cc.answers["approve"] = False
+    cc.post("/claude/setup", folders=str(cc.proj))
+    assert not (cc.home / POLICY_PATH).exists() and cc.admin_calls == []
+    assert "not approved" in _tells(cc)[-1]
+
+
+def test_claude_code_password_cancelled_then_retried(cc):
+    cc.admin_answer[0], real = (lambda a, d: 2), cc.admin_answer[0]
+    cc.post("/claude/setup", folders=str(cc.proj))
+    assert "Mac password was cancelled" in _tells(cc)[-1] and "Set up" in cc.get("/market")[1]
+    cc.admin_answer[0] = real
+    page = cc.get("/claude")[1]
+    assert "existing policy" in page and "<textarea" not in page   # the approved folders are kept
+    cc.post("/claude/setup")
+    assert "Claude Code is governed" in _tells(cc)[-1]
+
+
+@pytest.mark.parametrize("folders", ["", "relative/dir", "/no/such/folder", "~/no-such-folder-xyz"])
+def test_claude_code_bad_folders_never_ask(cc, folders):
+    n = len(cc.asked)
+    cc.post("/claude/setup", folders=folders)
+    assert len(cc.asked) == n and cc.admin_calls == [] and "was not set up" in _tells(cc)[-1]
+
+
+def test_claude_code_protected_folder_refused(cc):
+    n = len(cc.asked)
+    cc.post("/claude/setup", folders=str(cc.home))
+    assert len(cc.asked) == n and cc.admin_calls == [] and "protected path" in _tells(cc)[-1]
+
+
+def test_claude_code_turn_off_needs_touch_id(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    cc.answers["prove"] = False
+    cc.post("/claude/off")
+    assert [a for a, _ in cc.admin_calls] == ["install"]
+    cc.answers["prove"] = True
+    cc.post("/claude/off")
+    assert [a for a, _ in cc.admin_calls] == ["install", "remove"]
+    assert "governance is off" in _tells(cc)[-1] and "Set up" in cc.get("/market")[1]
+
+
+def test_claude_code_setup_forged_without_csrf(cc):
+    st = cc.req("/claude/setup", "POST", cookie=cc.sid, body={"folders": str(cc.proj)})[0]
+    assert st == 403 and cc.admin_calls == []
+
+
+def test_claude_code_in_talk_and_audit(cc):
+    assert "Claude Code<span" not in cc.get("/")[1] and "Coding agents" not in cc.get("/audit")[1]
+    cc.post("/claude/setup", folders=str(cc.proj))
+    log = AuditLog(cc.home)
+    log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="git status",
+               decision="allow", approver="policy")
+    log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="make <b>",
+               decision="deny", reason="not allowed", approver="admin", auth="biometric")
+    log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="make --version",
+               decision="allow", approver="admin", auth="biometric")
+    assert "Claude Code<span class=m>Governed: type /claude" in cc.get("/")[1]
+    idx = cc.get("/audit")[1]
+    assert "Coding agents" in idx and "href='/audit/app/claude_code'" in idx
+    assert re.search(r"<td>Governed</td><td>3</td><td>1</td>", idx)
+    assert "href='/audit/claude/earlier'>Earlier" in cc.get("/audit/app/claude_code")[1]   # no session recorded
+    page = cc.get("/audit/claude/earlier")[1]
+    assert page.index("git status") < page.index("make &lt;b&gt;") and "<b>" not in page.split("</h1>", 1)[1]
+    assert "<td>GOV-AIOS policy</td>" in page and "<td>You, Touch ID</td>" in page
+    assert "<td>You declined (Touch ID)</td><td>not allowed</td>" in page
+
+
+def test_claude_code_sessions_grouped(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    log = AuditLog(cc.home)
+    for sid, cmd in (("aaa-1", "git status"), ("bbb-2", "ls"), ("aaa-1", "git log")):
+        log.append("request", flow="claude_code", executor="claude_code", action="Bash", command=cmd,
+                   decision="allow", approver="policy", session=sid, folder=str(cc.proj))
+    page = cc.get("/audit/app/claude_code")[1]
+    assert page.index("Session 2") < page.index("Session 1")   # newest first
+    assert re.search(r"/audit/claude/aaa-1'>Session 1</a></td><td>[^<]*</td><td>[^<]*proj</td><td>2</td>", page)
+    one = cc.get("/audit/claude/aaa-1")[1]
+    assert "git status" in one and "git log" in one and "<td>ls</td>" not in one
+    assert cc.get("/audit/claude/nope")[0] == 404
+
+
+def _cc_ready(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    for n in ("alpha", "Beta", ".hidden"):
+        (cc.proj / n).mkdir()
+    _open(cc)
+
+
+def test_claude_start_form_suggests_approved_folders(cc):
+    assert "action=/claude/start" not in cc.get("/")[1]   # not governed yet
+    _cc_ready(cc)
+    assert "action=/claude/start" not in cc.get("/")[1]   # the side list stays as it was
+    cc.say("/claude")
+    page = cc.get("/")[1]
+    real = str(cc.proj.resolve())
+    assert "<datalist id=ccdirs>" in page and f"<option value='{real}/alpha'>" in page
+    assert ".hidden" not in page and f"<option value='{real}/Beta'>" in page
+    cc.post("/claude/start", folder=f"{real}/alpha")
+    assert cc.started == [f"{real}/alpha"] and "Starting Claude Code" in _tells(cc)[-1]
+    assert "action=/claude/start" not in cc.get("/")[1]   # started: the card closes
+    cc.say("/claude")
+    assert f"id=ccf name=folder list=ccdirs value='{real}/alpha'" in cc.get("/")[1]   # the last folder is prefilled
+    e = _log(cc.home, "claude_start")[-1]
+    assert (e["target"], e["outcome"]) == (f"{real}/alpha", "0")
+
+
+@pytest.mark.parametrize("text,ok", [("run claude beta", "Beta"), ("start claude code in alpha", "alpha"),
+                                     ("/claude alpha", "alpha"),
+                                     ("run claude", None), ("run claude /etc", None), ("open claude nope", None)])
+def test_claude_start_typed(cc, text, ok):
+    _cc_ready(cc)
+    cc.say(text)
+    real = str(cc.proj.resolve())
+    assert cc.started == ([f"{real}/{ok}"] if ok else [])
+    if not ok:
+        assert "Which folder" in _tells(cc)[-1] or "not inside the approved" in _tells(cc)[-1]
+
+
+def test_claude_start_needs_code_session(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    cc.post("/claude/start", folder=str(cc.proj))
+    assert cc.started == [] and "authenticator" in _tells(cc)[-1]
+
+
+def test_slash_commands_listed_and_app_card(cc):
+    page = cc.get("/")[1]
+    assert "<datalist id=cmds><option value='/joblens'><option value='/help'></datalist>" in page   # approved apps only
+    cc.say("/joblens")
+    page = cc.get("/")[1]
+    assert "<h2>JobLens</h2>" in page and "name=text value='run JobLens'" in page and "account " in page
+    cc.say("/inbox-briefing")
+    assert "Draft: approve it first." in cc.get("/")[1]
+    cc.say("/nope")
+    assert "No command /nope" in _tells(cc)[-1] and cc.made == []
+    cc.say("/")
+    assert _tells(cc)[-1].startswith("GOV-AIOS -> Commands: /joblens, /help")
+
+
+def test_slash_app_with_session_runs_and_closes_card(cc):
+    _open(cc)
+    cc.say("/joblens")
+    cc.say("run JobLens")
+    assert len(cc.made) == 1 and "value='run JobLens'" not in cc.get("/")[1]

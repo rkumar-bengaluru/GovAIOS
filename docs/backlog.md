@@ -11,6 +11,13 @@ Updated 2026-11-06 after control panel v2 (PR #10).
   (API key in Keychain or Claude Code no-tools mode); other LLMs as writers.
 - **My apps and Marketplace** panel areas. Each app drives its own setup; upgrades carry apps over.
   Mockup: `docs/superpowers/mockups/2026-11-06-apps-journey.html`.
+- **Claude Code refusals made by its own managed deny rules are not in the audit log** (seen live
+  2026-11-07: reading the data home and writing /tmp were refused before the hook ran). Only calls that
+  reach the hook are logged.
+- **Chat in Talk:** plain messages (not commands) answered by Claude in the panel (admin, 2026-11-07).
+  Needs the Studio decision on how the panel reaches Claude. Apps with run-time inputs show them on
+  their `/app` card.
+- **Change Claude Code folders from the panel:** setup keeps an existing policy's folders.
 - **Govern OpenAI Codex** like Claude Code: Codex 0.162 has `PreToolUse` hooks and a managed `/etc/codex/requirements.toml`. Needs one live test (does a hook crash or timeout fail closed?). Spike: `docs/superpowers/spikes/2026-11-06-codex-governance.md`.
 - **Inbox brief short app name** (`app:` in `flows/morning_inbox_briefing.yaml`) so the panel
   accepts "run inbox brief".

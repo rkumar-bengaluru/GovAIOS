@@ -146,3 +146,82 @@ def test_helper_child_ignores_sigterm(slow, h):
     assert os.waitpid(h.pid, os.WNOHANG) == (0, 0) and not r.done   # still alive, run still live
     h.close()
     assert h.exited and "term" in calls(h)   # the pipe still ends it, stopping the app
+
+
+@pytest.fixture
+def adm(tmp_path, monkeypatch):
+    """A helper whose administrator dialog is faked: argv runs as this user, into a temp ClaudeCode folder."""
+    import subprocess
+    flows, home, ms = tmp_path / "flows", tmp_path / "home", tmp_path / "ClaudeCode"
+    flows.mkdir()
+    (home / "executors").mkdir(parents=True)
+    answer = tmp_path / "answer"   # "cancel": the admin cancels the dialog
+
+    def elevate(argv, prompt):
+        (tmp_path / "prompt").write_text(prompt)
+        return 2 if answer.exists() else subprocess.run(argv).returncode
+    helper = start_helper(flows, home, elevate=elevate, ms_dir=str(ms), owner=f"{os.getuid()}:{os.getgid()}")
+    helper.home, helper.ms, helper.tmp, helper.answer = home, ms, tmp_path, answer
+    yield helper
+    helper.close()
+    assert helper.exited
+
+
+def _stage(h, data=b'{"hooks": {}}\n'):
+    import hashlib
+    (h.home / "executors" / "managed-settings.json").write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_claude_install_copies_only_the_approved_bytes(adm):
+    d = _stage(adm)
+    assert adm.claude("install", d) == 0
+    dst = adm.ms / "managed-settings.json"
+    assert dst.read_bytes() == b'{"hooks": {}}\n' and oct(dst.stat().st_mode & 0o777) == "0o644"
+    assert "install the Claude Code managed settings" in (adm.tmp / "prompt").read_text()
+    assert [p.name for p in adm.ms.iterdir()] == ["managed-settings.json"]   # no temp file left
+
+
+def test_claude_install_refuses_swapped_file(adm):
+    d = _stage(adm)
+    _stage(adm, b'{"hooks": {}, "evil": 1}\n')   # changed after approval
+    assert adm.claude("install", d) == 3
+    assert not (adm.ms / "managed-settings.json").exists() and list(adm.ms.iterdir()) == []
+
+
+def test_claude_remove_and_cancel(adm):
+    assert adm.claude("install", _stage(adm)) == 0
+    adm.answer.write_text("cancel")
+    assert adm.claude("remove") == 2 and (adm.ms / "managed-settings.json").exists()
+    adm.answer.unlink()
+    assert adm.claude("remove") == 0 and not (adm.ms / "managed-settings.json").exists()
+
+
+@pytest.mark.parametrize("action,digest", [("install", "x"), ("install", ""), ("wipe", "ab" * 32), (None, "")])
+def test_claude_bad_requests_refused(adm, action, digest):
+    assert adm.claude(action, digest) == 70 and not (adm.tmp / "prompt").exists()
+
+
+def test_claude_start_opens_terminal_only_in_approved_folders(tmp_path, monkeypatch):
+    from govaios import claudecode
+    from govaios.executor import POLICY_PATH, default_policy
+    proj, out = tmp_path / "proj", tmp_path / "opened"
+    (proj / "sub").mkdir(parents=True)
+    rec = tmp_path / "open"
+    rec.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$OPENED"\ncat "$3" >> "$OPENED"\n')
+    rec.chmod(0o755)
+    monkeypatch.setenv("OPENED", str(out))
+    monkeypatch.setattr(claudecode, "found", lambda: "/opt/x/claude")
+    flows, home = tmp_path / "flows", tmp_path / "home"
+    flows.mkdir()
+    (home / "executors").mkdir(parents=True)
+    (home / POLICY_PATH).write_text(default_policy(os.path.realpath(proj)))
+    h = start_helper(flows, home, open_cmd=str(rec))
+    try:
+        assert h.claude_start(str(tmp_path)) == 70 and not out.exists()   # above the approved folder
+        assert h.claude_start(str(proj / "sub")) == 0
+        lines = out.read_text().splitlines()
+        assert lines[:2] == ["-a", "Terminal"] and lines[2].endswith(".command")
+        assert f"cd -- {os.path.realpath(proj / 'sub')} || exit 1" in lines and "exec /opt/x/claude" in lines
+    finally:
+        h.close()
