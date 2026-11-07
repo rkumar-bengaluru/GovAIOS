@@ -1,6 +1,7 @@
 """Localhost-only control panel: cookie session after a Touch ID login; Talk page (TOTP session, typed commands),
 the signed audit log under /audit, approvals with revocation and the authenticator."""
 import base64
+import hashlib
 import hmac
 import json
 import math
@@ -20,7 +21,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import yaml
 
-from govaios import agents, auth, runstate
+from govaios import agents, applyfiles, auth, runstate
+from govaios.formfill import BankError, add_answer, ok_value
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
@@ -159,7 +161,7 @@ def _seq(e):
     return s if type(s) is int else None
 
 
-PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start")
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "bank_updated")
 
 
 def _runs(entries):
@@ -287,7 +289,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
                             speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
-                            told=None, voice=None, card=None)
+                            told=None, voice=None, card=None, run_id=None)
 
     def tell(line):
         panel.convo.append(f"GOV-AIOS -> {line}")
@@ -328,6 +330,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if r is None or not r.done or panel.told is r:
                 return
             panel.told, app = r, panel.app.name
+            applyfiles.remove(home, applyfiles.ASK, applyfiles.REPLY)   # a killed run leaves its hand-off behind
             if r.code == 0 and r.stopped_reason is None:
                 tell(f"{app} finished: {(r.summary or 'done').split(': ', 1)[-1]}")
                 text = f"{panel.name}, the {app} flow is complete, thank you."
@@ -689,7 +692,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                f"autocomplete=one-time-code required autofocus><button class=go>Open session</button></form>"
                if not s.active() and store.load() is not None else "")
         cmds = "".join(f"<option value='{escape(x)}'>" for x in slashes())
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{otp}"
+        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{answer_card(csrf)}{result_card()}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
                      f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp else ' autofocus'} "
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
@@ -712,6 +715,81 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"<input class=otp id=code name=code inputmode=numeric pattern='[0-9]{{6}}' maxlength=6 "
                      f"autocomplete=one-time-code required> <button class=go>Confirm</button>"
                      f"</form></section>")
+
+    def asked():
+        """The live run's question as (digest, fields), fields capped; None when there is none for this run.
+        Labels and options come from the employer's page: untrusted, escaped wherever they are shown."""
+        a = applyfiles.read_json(home, applyfiles.ASK)
+        if not live() or not a or a.get("run") != panel.run_id or not isinstance(a.get("fields"), list):
+            return None
+        fs = [f for f in a["fields"][:50] if isinstance(f, dict) and isinstance(f.get("key"), str)
+              and isinstance(f.get("label"), str) and isinstance(f.get("kind"), str)
+              and isinstance(f.get("options"), list) and all(isinstance(o, str) for o in f["options"])]
+        return hashlib.sha256(json.dumps(a, sort_keys=True).encode()).hexdigest()[:16], fs
+
+    def answer_card(csrf):
+        q = asked()
+        if q is None or applyfiles.read_json(home, applyfiles.REPLY) is not None:
+            return ""
+        rows = []
+        for f in q[1]:
+            n, lab = escape("a:" + f["key"]), escape(f["label"][:300])
+            if f["kind"] in ("select", "radio"):
+                ctl = "".join(f"<label><input type=radio name='{n}' value='{escape(o)}'> {escape(o[:200])}</label>"
+                              for o in f["options"][:50])
+            elif f["kind"] == "textarea":
+                ctl = f"<textarea name='{n}' maxlength=2000 aria-label='{lab}'></textarea>"
+            else:
+                ctl = f"<input name='{n}' maxlength=2000 autocomplete=off aria-label='{lab}'>"
+            rows.append(f"<fieldset><legend>{lab}</legend>{ctl}"
+                        f"<label><input type=checkbox name='{escape('save:' + f['key'])}' value=1> Save to my bank</label>"
+                        f"</fieldset>")
+        return (f"<section class=appcard><h2>Job Apply needs your answers</h2>"
+                f"<p class=m>Leave one empty to fill it in Chrome yourself.</p>"
+                f"<form method=post action=/apply/answer>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
+                f"{''.join(rows)}<button class=go>Send answers</button></form></section>")
+
+    def result_card():
+        r = applyfiles.read_json(home, applyfiles.RESULT)
+        if live() or panel.run is None or not r or r.get("run") != panel.run_id:
+            return ""
+        labels = lambda k: "<ul>" + "".join(f"<li>{escape(str(x)[:300])}</li>" for x in (r.get(k) or [])[:50]) + "</ul>" \
+            if isinstance(r.get(k), list) and r.get(k) else ""
+        you, chk = labels("yourself"), labels("check")
+        num = lambda k: r.get(k) if type(r.get(k)) is int else 0   # a garbled count must not break the Talk page
+        return (f"<section class=appcard><h2>Job Apply</h2><p>Filled {num('filled')} of {num('total')} "
+                f"fields. Review the form in Chrome and press Submit yourself.</p>"
+                + (f"<p>Fill in Chrome yourself:</p>{you}" if you else "")
+                + (f"<p>Check:</p>{chk}" if chk else "") + "</section>")
+
+    def apply_answer(f):
+        """Check every answer, then write reply.json once for this ask. Values are never logged or echoed."""
+        with panel.lock:
+            q = asked() if panel.session.active() else None
+            if q is None or f.get("ask") != q[0] or applyfiles.read_json(home, applyfiles.REPLY) is not None:
+                tell("That question is no longer waiting for an answer.")
+                return "/"
+            answers = {}
+            for fd in q[1]:
+                v = f.get("a:" + fd["key"], "")
+                if len(v) > 2000 or not ok_value(v, fd["kind"]) or (
+                        v and fd["kind"] in ("select", "radio") and v not in fd["options"]):
+                    tell(f"That answer can't be used: {fd['label'][:300]}.")
+                    return "/"
+                answers[fd["key"]] = v
+            for fd in q[1]:
+                if answers[fd["key"]] and f.get("save:" + fd["key"]):
+                    try:
+                        key = add_answer(home / applyfiles.BANK, fd["label"], answers[fd["key"]])
+                    except BankError:
+                        tell("That answer couldn't be saved to your bank.")
+                        continue
+                    log.append("bank_updated", field=key)
+            n = sum(1 for v in answers.values() if v)
+            audited("apply_answer", {"outcome": str(n)},
+                    lambda: applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "answers": answers}))
+            tell(f"Sent {n} answer{'' if n == 1 else 's'} to Job Apply.")
+        return "/"
 
     def say(f):
         later = []   # an expired session's run stop, run once the lock is released
@@ -791,9 +869,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         elif kind == "run" and (bad := invalid_input(hit, vals)):
             tell(f"That isn't a valid {bad}.")
         elif kind == "run":
-            r = launcher(hit.path, tickets.create(home, hit.id, hit.digest, panel.session.id, vals or None), vals or None)
+            t = tickets.create(home, hit.id, hit.digest, panel.session.id, vals or None)
+            r = launcher(hit.path, t, vals or None)
             r.start()
-            panel.run, panel.app, panel.card = r, hit, None
+            panel.run, panel.app, panel.card, panel.run_id = r, hit, None, tickets.run_id(t)
             tell(f"Starting {hit.name}.")
         elif kind == "draft":
             tell(f"{hit.name} is a draft. Get it approved first.")
@@ -1032,7 +1111,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         audited("revoke", fields, apply)
         return "/approvals"
 
-    POSTS = {"/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+    POSTS = {"/apply/answer": apply_answer, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),

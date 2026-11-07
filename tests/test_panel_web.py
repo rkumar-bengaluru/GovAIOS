@@ -1318,3 +1318,99 @@ def test_agent_slash_ignores_in_fields(cc):
     cc.post("/say", text="/claude", **{"in:x": "y"})
     assert cc.made == [] and "run claude None" not in "".join(cc.srv.panel.convo)
     assert "is not governed yet" in _tells(cc)[-1]
+
+
+def _asking(P, fields):
+    """A live Job Apply run whose engine has written ask.json; returns its run id."""
+    from govaios import applyfiles
+    from govaios.panel.tickets import run_id
+    _approve_job_apply(P)
+    _open(P)
+    P.say(f"/job-apply {LINK}")
+    rid = run_id(P.made[-1].ticket)
+    applyfiles.write_json(P.home, applyfiles.ASK, {"run": rid, "fields": fields})
+    return rid
+
+
+ASKED = [{"key": "#why", "label": "Why us? <b>", "kind": "textarea", "options": []},
+         {"key": "label:visa:0", "label": "Need a visa?", "kind": "radio", "options": ["Yes", "No"]}]
+
+
+def _ask_digest(P):
+    return re.search(r"name=ask value='([0-9a-f]+)'", P.get("/")[1])[1]
+
+
+def test_answer_card_round_trip(cc):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    page = cc.get("/")[1]
+    assert "Why us? &lt;b&gt;" in page and "<b>" not in page.split("Why us?")[1][:20]
+    assert "type=radio name='a:label:visa:0' value='Yes'" in page and "Save to my bank" in page
+    cc.post("/apply/answer", ask=_ask_digest(cc), **{"a:#why": "Great team SECRETVAL", "save:#why": "1",
+                                                     "a:label:visa:0": "No"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {
+        "run": rid, "answers": {"#why": "Great team SECRETVAL", "label:visa:0": "No"}}
+    b = _log(cc.home, "bank_updated")
+    assert len(b) == 1 and b[0]["field"] == "why_us_b"
+    assert _log(cc.home, "apply_answer")[0]["outcome"] == "2"
+    assert "SECRETVAL" not in AuditLog(cc.home).path.read_text() and "SECRETVAL" not in "".join(cc.srv.panel.convo)
+    bank = yaml.safe_load((cc.home / applyfiles.BANK).read_text())
+    assert bank["answers"] == [{"key": "why_us_b", "labels": ["Why us? <b>"], "answer": "Great team SECRETVAL"}]
+    d = _ask_digest(cc) if "name=ask" in cc.get("/")[1] else "x"
+    cc.post("/apply/answer", ask=d, **{"a:#why": "again"})   # a second reply to the same ask is refused
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["answers"]["#why"] == "Great team SECRETVAL"
+    assert len(_log(cc.home, "apply_answer")) == 1
+
+
+@pytest.mark.parametrize("bad", [{"a:label:visa:0": "Maybe"}, {"a:#why": "a\x00b"}, {"a:#why": "x" * 2001}])
+def test_answer_rejects_option_not_offered_and_control_chars(cc, bad):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    cc.post("/apply/answer", ask=_ask_digest(cc), **bad)
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None and not _log(cc.home, "apply_answer")
+    assert "Maybe" not in "".join(cc.srv.panel.convo)
+
+
+def test_answer_needs_session(cc):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    d = _ask_digest(cc)
+    cc.req("/apply/answer", "POST", body={"ask": d, "a:#why": "x"})   # no browser cookie
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+    csrf = cc.csrf()
+    cc.srv.panel.session.end("ended")   # code session over: no answering either
+    cc.req("/apply/answer", "POST", cookie=cc.sid, body={"csrf": csrf, "ask": d, "a:#why": "x"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+
+
+def test_answer_card_ignores_other_run(cc):
+    from govaios import applyfiles
+    _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": "0" * 16, "fields": ASKED})
+    assert "Save to my bank" not in cc.get("/")[1]
+    cc.post("/apply/answer", ask="0", **{"a:#why": "x"})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+
+
+def test_result_card_lists_labels_only(cc):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.RESULT, {"run": rid, "filled": 5, "total": 8,
+                                                       "yourself": ["Resume/CV", "<i>Gender</i>"], "check": ["Phone"]})
+    cc.made[-1].done, cc.made[-1].code = True, 0
+    page = cc.get("/")[1]
+    assert "Filled 5 of 8 fields. Review the form in Chrome and press Submit yourself." in page
+    assert "Fill in Chrome yourself:" in page and "&lt;i&gt;Gender&lt;/i&gt;" in page and "<i>" not in page
+    assert "Check:" in page and "Phone" in page
+    applyfiles.write_json(cc.home, applyfiles.RESULT, {"run": "0" * 16, "filled": 1, "total": 1,
+                                                       "yourself": [], "check": []})
+    assert "Filled 1 of 1" not in cc.get("/")[1]
+
+
+def test_done_run_cleans_ask_and_reply(cc):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.REPLY, {"run": rid, "answers": {}})
+    cc.made[-1].done, cc.made[-1].stopped_reason = True, "killed"
+    cc.srv.panel.tick()
+    assert not (cc.home / applyfiles.ASK).exists() and not (cc.home / applyfiles.REPLY).exists()
