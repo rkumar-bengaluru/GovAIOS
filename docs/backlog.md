@@ -1,7 +1,16 @@
 # GOV-AIOS backlog
 
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
-Updated 2026-11-08 after Claude Code and Codex governance (PRs #16, #17).
+Updated 2026-11-07 with Job Apply (branch `feat/job-apply`); before that 2026-11-08 Claude Code and Codex governance (PRs #16, #17).
+
+## Job Apply (branch `feat/job-apply`)
+
+- **List JobLens applications in `/job-apply`.** Needs a panel sandbox decision (the panel has no outbound network).
+- **Greenhouse paste-CV mode.** The CV is attached as a file only today.
+- **Workable**, after a terms check. It stops with "unexpected page" for now.
+- **CAPTCHA detection.** Today an earlier challenge only shows up as a failed read-back.
+- **Batch runs** of several links.
+- Live test plan and known gaps: `docs/job-apply-integration-test.md`.
 
 ## Apps platform (branch `feat/apps-platform`)
 
