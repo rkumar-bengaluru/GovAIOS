@@ -1,4 +1,4 @@
-# Apply to a JobLens application on Greenhouse, from Talk: design
+# Apply to a JobLens application on Greenhouse or Lever, from Talk: design
 
 Status: draft for admin review (2026-11-07). Nothing built.
 
@@ -21,7 +21,7 @@ company's application system (Greenhouse in the admin's example), where the form
 ## Non-goals (v1)
 
 - Batch runs over several applications (admin: later).
-- Application systems other than Greenhouse (Lever, Ashby, Workday: later).
+- Application systems other than Greenhouse and Lever (Workable, Ashby, Workday: later).
 - AI-drafted answers, auto-submit, marking the application submitted in JobLens.
 
 ## Anti-goals (a failure even if it works)
@@ -37,6 +37,7 @@ company's application system (Greenhouse in the admin's example), where the form
 - Answers come from a bank the admin prepares. Most questions are standard; the few that differ come back to
   the admin.
 - One at a time from Talk first; batch later.
+- v1 covers Greenhouse and Lever (2026-11-07, after the capture). Workable and others come later.
 
 ## How it works (designer's calls unless marked)
 
