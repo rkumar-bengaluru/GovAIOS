@@ -1,0 +1,11 @@
+# The popup Himalayas shows after Apply now (seen live 2026-11-07), over the job page.
+# Roles not captured yet: elements match by name only; index 0 takes the control, not its text child.
+page:
+  id: himalayas_apply_prompt
+  identification:
+    title_matches: ' hiring .* \| Himalayas$'
+    anchors: [ready]
+  elements:
+    ready:           { name_matches: "^I.m ready to apply$", index: 0, risk: navigate }
+    ai_cover_letter: { name: "Generate cover letter with AI", risk: submit }
+    ai_resume:       { name: "Generate resume with AI", risk: submit }
