@@ -112,8 +112,17 @@ Unfilled fields and the end state are logged too ("stopped before Submit").
 - **CV path.** The bank holds the path, and it's treated like any answer: never logged or reported. At run
   time it must be a regular file under the user's home, not a symlink. If it's missing, attach is skipped and
   the final card says "attach your CV yourself".
-- **Fields never auto-filled**, whatever the bank says: secure text fields, and labels that normalise to
-  password, SSN or national ID, bank or card. They always go to the admin.
+- **Fields never auto-filled**, whatever the bank says: secure text fields; labels that normalise to
+  password, SSN or national ID, bank or card; and consent or attestation checkboxes ("I certify…",
+  "I agree…"). They always go to the admin.
+- **Site terms** (checked 2026-11-07). Greenhouse publishes no candidate or job-board terms of use. Its legal
+  index lists customer documents (master subscription agreement, data processing addendum) and privacy
+  notices only. Its privacy policy says it "does not apply to the Personal Information collected and used by
+  Greenhouse customers … such as when you apply to a job via a Greenhouse-hosted job board". So each
+  employer's own notice governs. No clause was found that forbids a candidate filling in their own form with
+  help. That is silence, not permission like Himalayas cl. 30A. The flow records it as
+  `site_terms: { reviewed: 2026-11-07, basis: "no candidate terms; employer's notice governs; admin submits" }`.
+  Greenhouse is reported to use bot protection; the admin pressing Submit keeps that check with a human.
 - **Conditional fields.** After the fills, run `read_form` again. New fields go through matching, at most
   3 passes, then whatever's left goes to the admin.
 - **Unsupported field types** (multi-select, date, other file fields, anything not text, choice or checkbox):
