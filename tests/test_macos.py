@@ -436,3 +436,22 @@ def test_menu_open(form):
 def test_raise_pinned(form):
     form.d.raise_pinned()
     assert ("win1", "AXRaise") in form.performed and form.app.activated >= 2
+
+
+def test_choose_file_refuses_when_app_leaves_front_mid_path(form):
+    form.fx.focused = "sfield"
+    def leave(ev):
+        if len(form.posted) >= 6:   # go_to_folder (2 events) + 2 chars
+            form.ax.focus_pid = OTHER
+    form.fx.on_post = leave
+    with pytest.raises(macos.InputRefused, match="not frontmost"):
+        form.d.choose_file("/abcdef")
+    n = len(form.posted)
+    assert n == 6
+
+
+def test_raise_pinned_without_pinned_window_refused(form):
+    form.d._window = None
+    with pytest.raises(macos.InputRefused, match="no pinned window"):
+        form.d.raise_pinned()
+    assert form.performed == []

@@ -323,6 +323,8 @@ class MacDesktop:
         return sheet is not None and _within(_attr(sheet, "AXParent"), self._window)
 
     def raise_pinned(self):
+        if self._window is None:
+            raise InputRefused("input refused: no pinned window")
         AXUIElementPerformAction(self._window, "AXRaise")
         pid = self._target_pid()
         self._app(self._target).activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
@@ -346,6 +348,8 @@ class MacDesktop:
         def guard():
             if auth.screen_locked():
                 raise Stop("screen_locked")
+            if self._focused()[0] != pid:
+                raise InputRefused("input refused: target app is not frontmost")
             if not self._in_pinned_sheet():
                 raise InputRefused("input refused: file dialog is not focused")
         guard()
