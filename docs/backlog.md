@@ -18,8 +18,8 @@ Updated 2026-11-06 after control panel v2 (PR #10).
   Needs the Studio decision on how the panel reaches Claude. Apps with run-time inputs show them on
   their `/app` card.
 - **Change Claude Code folders from the panel:** setup keeps an existing policy's folders.
-- ~~Govern OpenAI Codex like Claude Code~~ built 2026-11-07 (branch `feat/codex-template`); live test
-  and live-tested (A–E passed) per `docs/codex-integration-test.md`. Still open: Codex network allow-list (`experimental_network`),
+- ~~Govern OpenAI Codex like Claude Code~~ built 2026-11-07 (branch `feat/codex-template`) and live-tested
+  (A–E passed) per `docs/codex-integration-test.md`. Still open: Codex network allow-list (`experimental_network`),
   Codex built-in tools beyond Bash/apply_patch/MCP.
 - **JobLens integration** (admin, 2026-11-07): next after Codex is verified.
 - **Inbox brief short app name** (`app:` in `flows/morning_inbox_briefing.yaml`) so the panel
