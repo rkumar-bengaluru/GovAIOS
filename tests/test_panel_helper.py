@@ -225,3 +225,16 @@ def test_claude_start_opens_terminal_only_in_approved_folders(tmp_path, monkeypa
         assert f"cd -- {os.path.realpath(proj / 'sub')} || exit 1" in lines and "exec /opt/x/claude" in lines
     finally:
         h.close()
+
+
+def test_helper_run_refuses_bad_inputs(h):
+    bad = [["a"], {f"k{i}": "v" for i in range(5)}, {"job_url": "x" * 501}, {"job_url": 5}]
+    for i in bad:
+        r = h.run(h.tmp / "flows" / "flow.yaml", TICKET, inputs=i)
+        r.start()
+        assert wait(lambda: r.done) and r.code == 70 and r.error == "refused", i
+    assert calls(h) == []
+    r = h.run(h.tmp / "flows" / "flow.yaml", TICKET, inputs={"job_url": "u"})
+    r.start()
+    assert wait(lambda: r.done) and r.code == 0
+    assert 'GOVAIOS_RUN_INPUT={"job_url": "u"}' in calls(h)[0]

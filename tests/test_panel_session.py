@@ -116,7 +116,7 @@ def test_ticket_non_regular(tmp_path, kind):
 @pytest.mark.parametrize("delta,ok", [(0, True), (60, True), (60.01, False), (-0.01, False)])
 def test_ticket_boundaries(tmp_path, delta, ok):
     t = tickets.create(tmp_path, "f", "d", "s1", now=lambda: 100.0)
-    (tmp_path / "tickets" / t).write_text(json.dumps({"flow": "f", "digest": "d", "session": "s1", "expires": 100.0 + delta}))
+    (tmp_path / "tickets" / t).write_text(json.dumps({"flow": "f", "digest": "d", "session": "s1", "inputs_digest": tickets.inputs_digest({}), "expires": 100.0 + delta}))
     assert (tickets.consume(tmp_path, t, "f", "d", now=lambda: 100.0) is not None) is ok
 
 
@@ -140,3 +140,14 @@ def test_ticket_bad_session_refused(tmp_path, sid):
         body["session"] = sid
     (tmp_path / "tickets" / t).write_text(json.dumps(body))
     assert tickets.consume(tmp_path, t, "f", "d", now=lambda: 101.0) is None
+
+
+def test_ticket_binds_inputs(tmp_path):
+    a, b = {"job_url": "u1"}, {"job_url": "u2"}
+    t = tickets.create(tmp_path, "f", "d", "s1", inputs=a, now=lambda: 100.0)
+    assert tickets.consume(tmp_path, t, "f", "d", inputs=b, now=lambda: 101.0) is None
+    t = tickets.create(tmp_path, "f", "d", "s1", inputs=a, now=lambda: 100.0)
+    assert tickets.consume(tmp_path, t, "f", "d", inputs=a, now=lambda: 101.0) == "s1"
+    t = tickets.create(tmp_path, "f", "d", "s1", now=lambda: 100.0)
+    assert tickets.consume(tmp_path, t, "f", "d", inputs=a, now=lambda: 101.0) is None
+    assert tickets.run_id("ab") == __import__("hashlib").sha256(b"ab").hexdigest()[:16]

@@ -92,9 +92,14 @@ def approval_question(f, deliver):
 # ---------- executor ----------
 
 class Runner:
-    def __init__(self, flow_path, desktop, home, executor="gov_runner_dev", ticket=None):
+    def __init__(self, flow_path, desktop, home, executor="gov_runner_dev", ticket=None, inputs=None):
         self.home = Path(home)
         self.ticket = ticket   # panel run: a one-use ticket stands in for the Touch ID start proof
+        self.inputs = inputs   # validated in _run, not here: the panel builds a Runner only to approve the flow
+        self.run_id = None
+        if ticket is not None:
+            from .panel import tickets
+            self.run_id = tickets.run_id(ticket)
         self.executor = executor   # "gov_runner" only when cli runs inside com.govaios.cli
         self.flow_path = Path(flow_path)
         self.pages_dir = self.flow_path.parent.parent / "pages"   # flows/ and pages/ are siblings
@@ -239,10 +244,14 @@ class Runner:
         self.step = None
         self._audit("flow_start", flow_hash=self.digest)
         try:
+            decl, given = self.flow.get("inputs") or {}, self.inputs or {}
+            if set(given) != set(decl) or not all(
+                    isinstance(v, str) and re.fullmatch(decl[k]["pattern"], v) for k, v in given.items()):
+                raise Stop("bad run input")
             approved = self.approvals.flow_ok(self.flow["id"], self.digest)
             if self.ticket is not None:   # panel run: never a prompt; the ticket is the start proof
                 from .panel import tickets
-                sid = tickets.consume(self.home, self.ticket, self.flow["id"], self.digest)   # always: a refused ticket is spent too
+                sid = tickets.consume(self.home, self.ticket, self.flow["id"], self.digest, self.inputs)   # always: a refused ticket is spent too
                 sid = approved and sid
                 if approved:
                     extra = {"session": sid} if sid else {}
@@ -290,9 +299,10 @@ class Runner:
         self.d.pin_window(window)   # refuses if focus left that window during the check
 
     def do_navigate(self, s):
-        self.gate("navigate", "navigate", destination=s["value"])
+        value = self.inputs[s["value_from"].removeprefix("input.")] if "value_from" in s else s["value"]
+        self.gate("navigate", "navigate", destination=value)
         self._act("press", self.d.press, "focus_address_bar")
-        self._act("type_text", self.d.type_text, s["value"])
+        self._act("type_text", self.d.type_text, value)
         self._act("press", self.d.press, "enter")
         time.sleep(2)
 

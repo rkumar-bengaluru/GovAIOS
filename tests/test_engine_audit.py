@@ -584,3 +584,47 @@ def test_approval_question_unchanged(tmp_path, monkeypatch):
             f"max element risk {f['permissions']['max_element_risk']}; destinations "
             f"{', '.join(f['destinations'])}; delivers to: joblens (local). Approve this flow?")
     assert qs[0] == want == engine.approval_question(f, r.deliver)
+
+
+JOB = "https://himalayas.app/companies/a/jobs/b"
+INPUT_FLOW = """workflow:
+  id: input_flow
+  app: X
+  name: x
+  version: 1
+  browser: { application: chrome }
+  permissions: { allow: [navigate], max_element_risk: navigate }
+  destinations: ["https://himalayas.app"]
+  inputs: { job_url: { label: "Job link", pattern: "https://himalayas\\\\.app/companies/[a-z0-9-]+/jobs/[a-z0-9-]+" } }
+  steps:
+    - { id: open_job, action: navigate, value_from: input.job_url }
+"""
+
+
+def input_runner(tmp_path, inputs=None):
+    (tmp_path / "src" / "flows").mkdir(parents=True)
+    (tmp_path / "src" / "pages").mkdir()
+    f = tmp_path / "src" / "flows" / "input_flow.yaml"
+    f.write_text(INPUT_FLOW)
+    r = Runner(f, FakeDesktop([]), tmp_path, inputs=inputs)
+    r.approvals.approve_flow(r.flow["id"], r.digest)
+    r.approvals.approve_destination(r.flow["id"], "https://himalayas.app")
+    return r
+
+
+def test_runner_init_without_inputs_ok_for_approval(tmp_path):
+    input_runner(tmp_path)   # no raise
+
+
+@pytest.mark.parametrize("bad", [None, {}, {"job_url": "https://evil.example/x"}, {"job_url": JOB, "extra": "1"}])
+def test_run_input_required_and_validated(tmp_path, bad):
+    r = input_runner(tmp_path, bad)
+    with pytest.raises(Stop, match="^bad run input$"):
+        r.run()
+    assert not r.d.calls
+
+
+def test_run_input_valid_navigates(tmp_path):
+    r = input_runner(tmp_path, {"job_url": JOB})
+    r.run()
+    assert r.d.typed == JOB

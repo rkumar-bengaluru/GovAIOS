@@ -137,7 +137,7 @@ def _fake_run(monkeypatch, exc, packaged=False):
     class R:
         deliver = None   # a flow without a deliver block
 
-        def __init__(self, path, d, home, executor, ticket=None):
+        def __init__(self, path, d, home, executor, ticket=None, inputs=None):
             seen["executor"] = executor
             seen["ticket"] = ticket
 
