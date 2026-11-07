@@ -1,6 +1,6 @@
 """Launch helper: forked before the sandbox (a sandboxed process cannot `open -a` the app or `say`).
 The child is the only unsandboxed part of the panel: no socket, no PyObjC, and it runs nothing but RunLaunch's
-fixed argv, `say --`, ROOT_SCRIPT under macOS's administrator dialog and `open -a Terminal` on a Claude Code launch file, for requests it validates itself."""
+fixed argv, `say --`, ROOT_SCRIPT under macOS's administrator dialog and `open -a Terminal` on a coding agent's launch file, for requests it validates itself."""
 import json
 import os
 import re
@@ -14,17 +14,19 @@ from govaios.panel.launch import RunLaunch
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 SAY_MAX = 300
-MS_DIR = "/Library/Application Support/ClaudeCode"
-STAGED = "executors/managed-settings.json"   # = claudecode.STAGED (the helper imports nothing it need not)
+# agent id -> (folder, file name, staged copy under the data home) = agents.AGENTS[id] .managed / .staged
+TARGETS = {"claude_code": ("/Library/Application Support/ClaudeCode", "managed-settings.json",
+                           "executors/managed-settings.json"),
+           "codex": ("/etc/codex", "requirements.toml", "executors/codex-requirements.toml")}
 # Run as root by the macOS administrator dialog: fixed text, arguments only from the helper itself. The copy is
 # checked against the digest the admin approved in the panel, so a file swapped after approval is never installed.
 ROOT_SCRIPT = r"""set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
-act=$1 src=$2 want=$3 dir=$4 own=$5
-dst="$dir/managed-settings.json"
+act=$1 src=$2 want=$3 dir=$4 own=$5 name=$6
+dst="$dir/$name"
 if [ "$act" = remove ]; then rm -f "$dst"; exit 0; fi
 mkdir -p "$dir"
-tmp=$(mktemp "$dir/.managed-settings.XXXXXX")
+tmp=$(mktemp "$dir/.gov-aios.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 cat < "$src" > "$tmp"
 [ "$(shasum -a 256 "$tmp" | cut -d' ' -f1)" = "$want" ] || exit 3
@@ -33,12 +35,14 @@ chmod 0644 "$tmp"
 mv -f "$tmp" "$dst"
 trap - EXIT
 """
-PROMPT = "GOV-AIOS wants to {} the Claude Code managed settings."
+PROMPT = "GOV-AIOS wants to {} the {} settings that put it under GOV-AIOS checks."
+TITLES = {"claude_code": "Claude Code", "codex": "OpenAI Codex"}
 
 
-def start_helper(flows_dir, home, open_cmd="open", say_cmd="/usr/bin/say", elevate=None, ms_dir=MS_DIR,
+def start_helper(flows_dir, home, open_cmd="open", say_cmd="/usr/bin/say", elevate=None, ms_dir=None,
                  owner="root:wheel"):
-    """Fork now: before the sandbox and before any thread. open_cmd/say_cmd/elevate/ms_dir/owner are test overrides."""
+    """Fork now: before the sandbox and before any thread. open_cmd/say_cmd/elevate/ms_dir/owner are test overrides
+    (ms_dir: one folder for every agent's file)."""
     cmd_r, cmd_w = os.pipe()
     evt_r, evt_w = os.pipe()
     pid = os.fork()
@@ -97,27 +101,30 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
     def live():
         return "run" in cur and not cur["run"].done
 
-    def claude(n, act, digest):
+    def claude(n, act, digest, agent):
         elevate, ms_dir, owner = admin
-        argv = ["/bin/sh", "-c", ROOT_SCRIPT, "sh", act, os.path.join(home, STAGED), digest, ms_dir, owner]
+        folder, name, staged = TARGETS[agent]
+        argv = ["/bin/sh", "-c", ROOT_SCRIPT, "sh", act, os.path.join(home, staged), digest, ms_dir or folder, owner,
+                name]
         try:
-            code = elevate(argv, PROMPT.format(act))
+            code = elevate(argv, PROMPT.format(act, TITLES[agent]))
         except Exception:
             code = 1
         send({"id": n, "done": True, "code": code})
 
     busy = threading.Lock()   # one administrator dialog at a time
 
-    def claude_start(n, folder):
-        """Terminal opens `folder` and runs Claude Code: only an existing folder inside the approved policy's."""
-        from govaios import claudecode, executor
+    def claude_start(n, folder, agent):
+        """Terminal opens `folder` and runs the agent: only an existing folder inside its approved policy's."""
+        from govaios import agents
         try:
-            real = claudecode.inside(folder, executor.load(home)[0].get("project_roots", []))
-            claude = claudecode.found()
-            if real is None or claude is None:
+            a = agents.AGENTS[agent]
+            real = agents.inside(folder, agents.load(home, a)[0].get("project_roots", []))
+            command = agents.found(a)
+            if real is None or command is None:
                 code = 70
             else:
-                f = claudecode.launch_file(home, real, claude)
+                f = agents.launch_file(home, real, command, a)
                 code = subprocess.run([open_cmd, "-a", "Terminal", str(f)], timeout=30).returncode
         except Exception:
             code = 1
@@ -146,17 +153,20 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
                 cur.update(id=n, run=run)
                 run.start()
                 threading.Thread(target=watch, args=(n, run), daemon=True).start()
+            elif op in ("claude_start", "claude") and m.get("agent", "claude_code") not in TARGETS:
+                send({"id": n, "done": True, "code": 70, "error": "refused"})
             elif op == "claude_start" and isinstance(m.get("folder"), str):
-                threading.Thread(target=claude_start, args=(n, m["folder"]), daemon=True).start()
+                threading.Thread(target=claude_start, args=(n, m["folder"], m.get("agent", "claude_code")),
+                                 daemon=True).start()
             elif op == "claude":
-                act, digest = m.get("action"), m.get("digest", "")
+                act, digest, agent = m.get("action"), m.get("digest", ""), m.get("agent", "claude_code")
                 ok = act == "remove" or (act == "install" and isinstance(digest, str) and _HEX64.fullmatch(digest))
                 if not ok or not busy.acquire(blocking=False):
                     send({"id": n, "done": True, "code": 70, "error": "refused"})
                     continue
-                def go(n=n, act=act, digest=digest):
+                def go(n=n, act=act, digest=digest, agent=agent):
                     try:
-                        claude(n, act, digest if act == "install" else "")
+                        claude(n, act, digest if act == "install" else "", agent)
                     finally:
                         busy.release()
                 threading.Thread(target=go, daemon=True).start()
@@ -205,9 +215,9 @@ class Helper:
     def say(self, text):
         self._send({"op": "say", "text": text})
 
-    def claude_start(self, folder, wait_s=40):
-        """Open Terminal in `folder` running Claude Code. 0 started, 70 refused, else failed."""
-        return self._call({"op": "claude_start", "folder": folder}, wait_s)
+    def claude_start(self, folder, agent="claude_code", wait_s=40):
+        """Open Terminal in `folder` running the agent. 0 started, 70 refused, else failed."""
+        return self._call({"op": "claude_start", "folder": folder, "agent": agent}, wait_s)
 
     def _call(self, msg, wait_s):
         with self._lock:
@@ -219,10 +229,10 @@ class Helper:
             time.sleep(0.05)
         return r.code if r.done else 1
 
-    def claude(self, action, digest="", wait_s=660):
-        """Install or remove Claude Code's managed settings through the administrator dialog; blocks until done.
+    def claude(self, action, digest="", agent="claude_code", wait_s=660):
+        """Install or remove an agent's root-owned settings through the administrator dialog; blocks until done.
         0 done, 2 cancelled, else failed or refused."""
-        return self._call({"op": "claude", "action": action, "digest": digest}, wait_s)
+        return self._call({"op": "claude", "action": action, "digest": digest, "agent": agent}, wait_s)
 
     def close(self, wait_s=15):
         """Closing the pipe ends the child (it stops a live run first); waits for it, bounded."""

@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import yaml
 
-from govaios import auth, claudecode, runstate
+from govaios import agents, auth, runstate
 from govaios.approvals import Approvals
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
@@ -177,7 +177,7 @@ def _runs(entries):
             cur.append(e)
             if e.get("kind") in ("flow_end", "stop"):
                 cur = None
-        elif (e.get("kind") in ("action", "request") and e.get("flow") not in (None, "claude_code")
+        elif (e.get("kind") in ("action", "request") and e.get("flow") not in (None, "claude_code", "codex")
               and not (e.get("kind") == "request" and e.get("action") == "deliver")):
             odd += 1   # a flow step outside a run; hook, stop, login, revoke, dump and deliver entries are normal here
     return runs, odd
@@ -242,7 +242,13 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/claude")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/claude|/codex")
+DOES = {"claude_code": "Every command Claude Code runs is checked by GOV-AIOS first and written to the audit log.",
+        "codex": "Shell commands, file edits and plugin calls are checked by GOV-AIOS first and written to the audit "
+                 "log. Plugins stay on; each new plugin tool asks you once."}
+RULES = {"claude_code": "Rules: every command is checked first and every action is logged (always on).",
+         "codex": "Rules: shell commands, file edits and plugin calls are checked first and logged; Codex's sandbox "
+                  "stays on and web search is off (always on)."}
 APP_ID = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -268,13 +274,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     """Returns the server; server.panel holds the run session, current run and conversation.
     Browsers sign in on the page with Touch ID (POST /signin); the server never shuts itself down. tick_s=None starts no ticker (tests call server.panel.tick()).
     helper: the launch helper forked before the sandbox; it runs and speaks unless launcher/speak are passed.
-    managed: Claude Code's managed settings file; admin(action, digest) -> int runs the Mac-password step (helper.claude)."""
+    managed: {agent id: the root-owned file it reads}; admin(action, digest, agent id) -> int runs the Mac-password
+    step (helper.claude); starter(folder, agent id) -> int opens Terminal there (helper.claude_start)."""
     launcher = launcher or (helper.run if helper else RunLaunch)
     speak = speak or (helper.say if helper else _say)
     admin = admin or getattr(helper, "claude", None)
     starter = starter or getattr(helper, "claude_start", None)
-    from govaios.hook import MANAGED_SETTINGS
-    managed = Path(managed or MANAGED_SETTINGS)
+    managed = {a.id: Path((managed or {}).get(a.id, a.managed)) for a in agents.AGENTS.values()}
     home = Path(home)
     log = AuditLog(home)
     approvals_path = home / "approvals.json"
@@ -415,121 +421,134 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 f"{_td(d['last_outcome'])}{_td(d['last_started_by'])}</tr>")
         head = "<tr><th>app</th><th>state</th><th>runs</th><th>last run</th><th>outcome</th><th>started by</th></tr>"
         table = lambda rs: f"<table>{head}{''.join(rs)}</table>"
-        checks = cc_checks()
         cc = ""
-        if checks or claudecode.governed(home, managed)[0]:
-            last = checks[-1] if checks else {}
-            refused = sum(1 for e in checks if e.get("decision") != "allow")
+        rows_a = []
+        for ag in agents.AGENTS.values():
+            checks, ok = cc_checks(ag), cc_roots(ag) is not None
+            if checks or ok:
+                rows_a.append(f"<tr><td><a href='/audit/app/{ag.id}'>{ag.title}</a></td>"
+                              f"{_td('Governed' if ok else 'Not governed')}{_td(len(checks))}"
+                              f"{_td(sum(1 for e in checks if e.get('decision') != 'allow'))}"
+                              f"{_td(checks[-1].get('ts') if checks else None)}</tr>")
+        if rows_a:
             cc = ("<h2>Coding agents</h2><table><tr><th>agent</th><th>state</th><th>checks</th><th>refused</th>"
-                  "<th>last check</th></tr><tr><td><a href='/audit/app/claude_code'>Claude Code</a></td>"
-                  f"{_td('Governed' if claudecode.governed(home, managed)[0] else 'Not governed')}{_td(len(checks))}"
-                  f"{_td(refused)}{_td(last.get('ts'))}</tr></table>")
+                  f"<th>last check</th></tr>{''.join(rows_a)}</table>")
         body = (f"<h1>Audit log</h1>{banner()}{note}<h2>Apps</h2>"
                 + (table(rows[""]) if rows[""] else "<p>No apps yet.</p>") + cc
                 + (f"<h2>Removed apps</h2>{table(rows['Removed'])}" if rows["Removed"] else "")
                 + "<p><a href='/audit/log'>Full log</a></p>")
         return _page(body, here="/audit")
 
-    def cc_checks():
-        """Claude Code's hook decisions (one `request` per tool call it saw)."""
-        return [e for e, _ in _entries(log) if e and e.get("kind") == "request" and e.get("executor") == claudecode.ID]
+    def cc_checks(ag):
+        """The agent's hook decisions (one `request` per tool call it saw)."""
+        return [e for e, _ in _entries(log) if e and e.get("kind") == "request" and e.get("executor") == ag.id]
 
-    def cc_sessions():
-        """Claude Code sessions in the order they began: [(key, checks)]; key "earlier" holds checks logged before
-        sessions were recorded."""
+    def cc_sessions(ag):
+        """Sessions in the order they began: [(key, checks)]; key "earlier" holds checks logged before sessions
+        were recorded."""
         by = {}
-        for e in cc_checks():
+        for e in cc_checks(ag):
             by.setdefault(e.get("session") or "earlier", []).append(e)
         return list(by.items())
 
-    def cc_page():
+    NOTE = {"claude_code": "Calls Claude Code's own managed rules refuse first never reach GOV-AIOS and are not listed.",
+            "codex": "Codex sends shell commands, file edits and plugin calls to GOV-AIOS; its other built-in tools "
+                     "are not checked."}
+
+    def cc_page(ag):
         rows = "".join(
-            f"<tr><td><a href='/audit/claude/{escape(k)}'>{'Earlier' if k == 'earlier' else f'Session {i}'}</a></td>"
-            f"{_td(es[0].get('ts'))}{_td(claudecode.tilde(es[0].get('folder') or '') or chr(8212))}{_td(len(es))}"
+            f"<tr><td><a href='/audit/{ag.slash}/{escape(k)}'>{'Earlier' if k == 'earlier' else f'Session {i}'}</a></td>"
+            f"{_td(es[0].get('ts'))}{_td(agents.tilde(es[0].get('folder') or '') or chr(8212))}{_td(len(es))}"
             f"{_td(sum(1 for e in es if e.get('decision') != 'allow'))}"
             f"{_td(sum(1 for e in es if e.get('approver') == 'admin'))}{_td(es[-1].get('ts'))}</tr>"
-            for i, (k, es) in reversed(list(enumerate(cc_sessions(), 1))))
+            for i, (k, es) in reversed(list(enumerate(cc_sessions(ag), 1))))
         table = ("<table><tr><th>session</th><th>started</th><th>folder</th><th>checks</th><th>refused</th>"
                  f"<th>asked you</th><th>last check</th></tr>{rows}</table>" if rows
-                 else "<p>No sessions yet. Start Claude Code from Talk or in a new Terminal session.</p>")
-        return _page(f"<h1>Claude Code</h1>{banner()}<p class=m>Sessions newest first. Calls Claude Code's own managed "
-                     f"rules refuse first never reach GOV-AIOS and are not listed.</p>{table}"
+                 else f"<p>No sessions yet. Type /{ag.slash} in Talk, or start it in a new Terminal session.</p>")
+        return _page(f"<h1>{ag.title}</h1>{banner()}<p class=m>Sessions newest first. {NOTE[ag.id]}</p>{table}"
                      f"<p><a href='/audit'>Apps</a> | <a href='/audit/log'>Full log</a></p>", here="/audit")
 
-    def cc_session_page(key):
-        es = dict(cc_sessions()).get(key)
+    def cc_session_page(ag, key):
+        es = dict(cc_sessions(ag)).get(key)
         if es is None:
             return None
         cols = ("ts", "action", "command", "target", "decision")
         rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in cols) + _td(_decided_by(e)) + _td(e.get("reason"))
                        + "</tr>" for e in es)
         heads = ("time", "tool", "command", "target", "decision", "decided by", "why")
-        title = "Earlier checks" if key == "earlier" else "Claude Code session"
-        where = claudecode.tilde(es[0].get("folder") or "")
+        title = "Earlier checks" if key == "earlier" else f"{ag.title} session"
+        where = agents.tilde(es[0].get("folder") or "")
         return _page(f"<h1>{title}</h1>{banner()}<p class=m>{escape(where)}</p>"
                      f"<table><tr>{''.join(f'<th>{c}</th>' for c in heads)}</tr>{rows}</table>"
-                     f"<p><a href='/audit/app/claude_code'>Claude Code sessions</a> | <a href='/audit/log'>Full log</a></p>",
+                     f"<p><a href='/audit/app/{ag.id}'>{ag.title} sessions</a> | <a href='/audit/log'>Full log</a></p>",
                      here="/audit")
 
-    def cc_roots():
-        ok, roots = claudecode.governed(home, managed)
+    def cc_roots(ag):
+        ok, roots = agents.governed(home, managed[ag.id], ag)
         return roots if ok else None
 
-    def claude_start(text):
-        """Open Terminal in the folder and run Claude Code there (governed only, inside the approved folders)."""
-        roots = cc_roots()
+    def claude_start(ag, text):
+        """Open Terminal in the folder and run the agent there (governed only, inside its approved folders)."""
+        roots = cc_roots(ag)
         if roots is None:
-            tell("Claude Code is not governed yet. Set it up in Marketplace first.")
+            tell(f"{ag.title} is not governed yet. Set it up in Marketplace first.")
             return
         if starter is None:
-            tell("Starting Claude Code needs the installed panel.")
+            tell(f"Starting {ag.title} needs the installed panel.")
             return
-        folder, cands = claudecode.pick(text, roots)
+        folder, cands = agents.pick(text, roots)
         if folder is None:
-            tell(f"Which folder: {', '.join(claudecode.tilde(c) for c in cands[:8])}?" if cands else
-                 f"That folder is not inside the approved ones: {', '.join(claudecode.tilde(r) for r in roots)}.")
+            tell(f"Which folder: {', '.join(agents.tilde(c) for c in cands[:8])}?" if cands else
+                 f"That folder is not inside the approved ones: {', '.join(agents.tilde(r) for r in roots)}.")
             return
-        log.append("claude_start", flow=claudecode.ID, executor=claudecode.ID, target=folder, approver="admin")   # first
-        code = starter(folder)
-        log.append("claude_start", flow=claudecode.ID, executor=claudecode.ID, target=folder, outcome=str(code))
+        log.append("claude_start", flow=ag.id, executor=ag.id, target=folder, approver="admin")   # first
+        code = starter(folder, ag.id)
+        log.append("claude_start", flow=ag.id, executor=ag.id, target=folder, outcome=str(code))
         if code == 0:
             panel.card = None
-        tell(f"Starting Claude Code in {claudecode.tilde(folder)}. It opens in Terminal." if code == 0
-             else "Claude Code did not start.")
+        tell(f"Starting {ag.title} in {agents.tilde(folder)}. It opens in Terminal." if code == 0
+             else f"{ag.title} did not start.")
 
-    def claude_start_post(f):
-        if not panel.session.active():
-            tell(NO_SESSION)
-        else:
-            claude_start(f.get("folder", ""))
-        return "/"
+    def start_post(ag):
+        def post(f):
+            if not panel.session.active():
+                tell(NO_SESSION)
+            else:
+                claude_start(ag, f.get("folder", ""))
+            return "/"
+        return post
 
     def slug(name):
         return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
     def slashes():
-        out = ["/claude"] if cc_roots() is not None else []
+        out = [f"/{ag.slash}" for ag in agents.AGENTS.values() if cc_roots(ag) is not None]
         return out + [f"/{slug(a.name)}" for a in apps() if a.approved] + ["/help"]
 
+    def by_slash(name):
+        return next((ag for ag in agents.AGENTS.values() if ag.slash == name), None)
+
     def show_card(name):
+        ag = by_slash(name)
         with panel.lock:
-            if name == "claude":
-                panel.card = ("claude", None) if cc_roots() is not None else None
-                if panel.card is None:
-                    tell("Claude Code is not governed yet. Set it up in Marketplace first.")
-                return
-            hit = next((a for a in apps() if slug(a.name) == name or a.id == name), None)
-            panel.card = ("app", hit.id) if hit else None
-        if hit is None:
+            if ag is not None:
+                panel.card = ("agent", ag.id) if cc_roots(ag) is not None else None
+            else:
+                hit = next((a for a in apps() if slug(a.name) == name or a.id == name), None)
+                panel.card = ("app", hit.id) if hit else None
+        if ag is not None and panel.card is None:
+            tell(f"{ag.title} is not governed yet. Set it up in Marketplace first.")
+        elif ag is None and hit is None:
             tell(f"No command /{name}. Commands: {', '.join(slashes())}.")
 
     def card(csrf):
         c = panel.card
         if c is None:
             return ""
-        if c[0] == "claude":
-            return (f"<section class=appcard><h2>Claude Code</h2><p class=m>Opens Terminal in the folder and runs Claude "
-                    f"Code there, governed. Suggestions show as you type.</p>{cc_form(csrf)}</section>")
+        if c[0] == "agent":
+            ag = agents.AGENTS[c[1]]
+            return (f"<section class=appcard><h2>{ag.title}</h2><p class=m>Opens Terminal in the folder and runs "
+                    f"{ag.title} there, governed. Suggestions show as you type.</p>{cc_form(csrf, ag)}</section>")
         a = next((a for a in apps() if a.id == c[1]), None)
         if a is None:
             return ""
@@ -544,22 +563,23 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                else "<p class=m>Draft: approve it first.</p>")
         return f"<section class=appcard><h2>{escape(a.name)}</h2>{uses}{act}</section>"
 
-    def cc_form(csrf):
-        roots = cc_roots()
+    def cc_form(csrf, ag):
+        roots = cc_roots(ag)
         if roots is None:
             return ""
-        sugg = [claudecode.tilde(x) for x in claudecode.suggest(roots)]
+        sugg = [agents.tilde(x) for x in agents.suggest(roots)]
         last = next((e.get("target") for e, _ in reversed(_entries(log))
-                     if e and e.get("kind") == "claude_start" and e.get("outcome") == "0"), None)
-        value = claudecode.tilde(last) if last else (sugg[1] if len(sugg) > 1 else sugg[0] if sugg else "")
+                     if e and e.get("kind") == "claude_start" and e.get("flow") == ag.id and e.get("outcome") == "0"),
+                    None)
+        value = agents.tilde(last) if last else (sugg[1] if len(sugg) > 1 else sugg[0] if sugg else "")
         opts = "".join(f"<option value='{escape(x)}'>" for x in sugg)
-        return (f"<form method=post action=/claude/start>{hidden(csrf)}<label class=vh for=ccf>Folder</label>"
+        return (f"<form method=post action=/{ag.slash}/start>{hidden(csrf)}<label class=vh for=ccf>Folder</label>"
                 f"<input id=ccf name=folder list=ccdirs value='{escape(value)}' autocomplete=off required>"
-                f"<datalist id=ccdirs>{opts}</datalist><button class=go>Start Claude Code</button></form>")
+                f"<datalist id=ccdirs>{opts}</datalist><button class=go>Start {ag.title}</button></form>")
 
     def app_page(app_id):
-        if app_id == claudecode.ID:
-            return cc_page()
+        if app_id in agents.AGENTS:
+            return cc_page(agents.AGENTS[app_id])
         runs = [r for r in _runs(_entries(log))[0] if r[0].get("flow") == app_id]
         known = {a.id: a.name for a in apps()}
         if not runs and app_id not in known:
@@ -625,8 +645,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"{form('all', label='Revoke all', cls=' class=stop')}{authn}", here="/approvals")
 
     def talk(csrf):
-        cc_li = ("<li class=ok>Claude Code<span class=m>Governed: type /claude</span></li>"
-                 if claudecode.governed(home, managed)[0] else "")
+        cc_li = "".join(f"<li class=ok>{ag.title}<span class=m>Governed: type /{ag.slash}</span></li>"
+                        for ag in agents.AGENTS.values() if cc_roots(ag) is not None)
         report()   # the page refresh stops once the run is done: show its result on that same load
         s, run, al = panel.session, panel.run, apps()
         with panel.lock:
@@ -704,7 +724,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if rest is None:
                 show_card(name)
                 return "/"
-            text = f"run claude {rest}" if name == "claude" else f"run {name.replace('-', ' ')}"   # apps take no words yet
+            text = f"run {name} {rest}" if by_slash(name) else f"run {name.replace('-', ' ')}"   # apps take no words yet
         if not panel.session.active():
             if panel.session.id:
                 end_session("expired", later)
@@ -728,9 +748,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 raise
             tell("Session open for 30 minutes.")
             return "/"
-        cm = re.fullmatch(r"(?:run|start|open) claude(?: code)?(?: in)?(?: (.+))?", text, re.I)
+        cm = re.fullmatch(r"(?:run|start|open) (claude(?: code)?|codex)(?: in)?(?: (.+))?", text, re.I)
         if cm:
-            claude_start(cm[1] or "")
+            claude_start(agents.CODEX if cm[1].lower() == "codex" else agents.CLAUDE, cm[2] or "")
             return "/"
         kind, hit = match(text, al := apps())
         if kind == "run" and live():
@@ -820,14 +840,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             needs = "".join(f"<span class=need>{escape(n)}</span>" for n in t.needs)
             cards.append(f"<section class=tpl><h2>{escape(t.title)}</h2><p>{escape(t.does)}</p>"
                          f"<p class=m>{escape(t.limits)}</p><div>{needs}</div>{act}</section>")
-        ok, _ = claudecode.governed(home, managed)
-        where = claudecode.found()
-        cc = ("<p class=state>Governed</p>" if ok else "<p><a class=go href='/claude'>Set up</a></p>")
-        cards.append("<section class=tpl><h2>Claude Code, governed</h2><p>Every command Claude Code runs is checked by "
-                     "GOV-AIOS first and written to the audit log.</p>"
-                     f"<p class=m>{'Found at ' + escape(where) if where else 'Not found in the usual places on this Mac.'}"
-                     "</p><div><span class=need>Claude Code</span><span class=need>Your Mac password</span>"
-                     f"<span class=need>Touch ID</span></div>{cc}</section>")
+        for ag in agents.AGENTS.values():
+            where = agents.found(ag)
+            act = ("<p class=state>Governed</p>" if cc_roots(ag) is not None
+                   else f"<p><a class=go href='/{ag.slash}'>Set up</a></p>")
+            cards.append(f"<section class=tpl><h2>{ag.title}, governed</h2><p>{DOES[ag.id]}</p>"
+                         f"<p class=m>{'Found at ' + escape(where) if where else 'Not found in the usual places on this Mac.'}"
+                         f"</p><div><span class=need>{ag.title}</span><span class=need>Your Mac password</span>"
+                         f"<span class=need>Touch ID</span></div>{act}</section>")
         nodir = "" if flows_dir else "<p class=note>No apps folder given, so nothing can be set up here.</p>"
         return _page(f"<h1>Marketplace</h1><p>Templates that ship with GOV-AIOS. Setting one up makes a draft app; "
                      f"it runs only after you approve it with Touch ID.</p>{nodir}{''.join(cards)}", here="/market")
@@ -875,90 +895,93 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         tell(f"{t.title} is set up as a draft. Approve it to let it run.")
         return "/"
 
-    def claude_page(csrf):
-        ok, roots = claudecode.governed(home, managed)
-        if ok:
-            body = (f"<p class=state>Governed. Claude Code may work in: {escape(', '.join(roots))}</p>"
-                    "<p>Turning it off removes the managed settings (Touch ID, then your Mac password). Claude Code "
-                    "then runs without GOV-AIOS checks from its next session.</p>"
-                    f"<form method=post action=/claude/off>{hidden(csrf)}<button>Turn off…</button></form>")
+    def agent_page(ag, csrf):
+        roots = cc_roots(ag)
+        if roots is not None:
+            body = (f"<p class=state>Governed. {ag.title} may work in: {escape(', '.join(roots))}</p>"
+                    f"<p>Turning it off removes the settings (Touch ID, then your Mac password). {ag.title} then runs "
+                    f"without GOV-AIOS checks from its next session.</p>"
+                    f"<form method=post action=/{ag.slash}/off>{hidden(csrf)}<button>Turn off…</button></form>")
         else:
             try:
-                pol = claudecode.executor.load(home)[0]
+                pol = agents.load(home, ag)[0]
             except Exception:
                 pol = None
-            ask = (f"<p>Claude Code may work in the folders of your existing policy: "
+            ask = (f"<p>{ag.title} may work in the folders of your existing policy: "
                    f"{escape(', '.join(pol.get('project_roots', [])))}</p>" if pol else
-                   "<label for=folders>Which folders may Claude Code work in? One per line. Anything outside is "
+                   f"<label for=folders>Which folders may {ag.title} work in? One per line. Anything outside is "
                    "refused and logged.</label><textarea id=folders name=folders rows=3 required>~/Documents/2026"
                    "</textarea>")
-            body = ("<ul><li>Rules: every command is checked first and every action is logged (always on).</li>"
-                    "<li>You approve the policy with Touch ID.</li><li>macOS asks for your Mac password to write the "
-                    "managed settings.</li></ul>"
-                    f"<form method=post action=/claude/setup>{hidden(csrf)}{ask}"
+            body = (f"<ul><li>{RULES[ag.id]}</li><li>You approve the policy with Touch ID.</li><li>macOS asks for your "
+                    f"Mac password to write the settings.</li></ul>"
+                    f"<form method=post action=/{ag.slash}/setup>{hidden(csrf)}{ask}"
                     "<p><button class=go>Approve and install…</button> <a href='/market'>Cancel</a></p></form>"
                     "<p class=m>Sessions already open stay ungoverned until they restart.</p>")
-        where = claudecode.found()
+        where = agents.found(ag)
         found = f"Found at {escape(where)}." if where else "Not found in the usual places on this Mac."
-        return _page(f"<section class=card><h1>Claude Code, governed</h1><p class=m>{found}</p>{body}</section>",
+        return _page(f"<section class=card><h1>{ag.title}, governed</h1><p class=m>{found}</p>{body}</section>",
                      here="/market")
 
     def _folders(text):
-        uh = claudecode.user_home()
+        uh = agents.user_home()
         out = [str(uh / l.strip()[2:]) if l.strip().startswith("~/") else l.strip() for l in text.splitlines() if l.strip()]
         if not 0 < len(out) <= 10 or not all(r.startswith("/") and Path(r).is_dir() for r in out):
             raise ValueError("each folder must be an existing folder, written in full or starting with ~/")
         return out
 
-    def claude_setup(f):
-        if admin is None:
-            tell("Claude Code setup needs the installed panel.")
+    def setup_post_for(ag):
+        def post(f):
+            if admin is None:
+                tell(f"{ag.title} setup needs the installed panel.")
+                return "/"
+            try:
+                roots = [] if (home / ag.policy).exists() else _folders(f.get("folders", ""))
+                path, raw, pol, digest = agents.draft(home, roots, ag)
+            except ValueError as e:   # our own messages
+                tell(f"{ag.title} was not set up: {e}.")
+                return "/"
+            q = agents.question(path, raw, ag)
+            ok, how = auth.approve(q, ag.reason, home)
+            log.append("flow_approval", flow=ag.id, flow_hash=digest, executor=ag.id,
+                       decision="allow" if ok else "deny", approver="admin", channel="touch_id", auth=how,
+                       shown=shown_digest(q, None if how == "none" else ag.reason))
+            if not ok:
+                tell(f"{ag.title} was not set up: the policy was not approved.")
+                return "/"
+            try:
+                agents.commit(home, path, raw, digest, ag)
+            except (OSError, ValueError):
+                tell(f"{ag.title} was not set up: the policy changed while it was being approved. Try again.")
+                return "/"
+            code = admin("install", agents.stage(home, pol, ag), ag.id)
+            log.append("setting", field=ag.id, action="install", outcome=str(code))
+            if code == 0 and cc_roots(ag) is not None:
+                tell(f"{ag.title} is governed. Sessions already open stay ungoverned until they restart.")
+            elif code == 2:
+                tell(f"{ag.title} was not set up: the Mac password was cancelled. The policy stays approved; "
+                     "press Approve and install again to finish.")
+            else:
+                tell(f"{ag.title} was not set up: writing the settings failed.")
             return "/"
-        try:
-            roots = [] if (home / claudecode.executor.POLICY_PATH).exists() else _folders(f.get("folders", ""))
-            path, raw, pol, digest = claudecode.draft(home, roots)
-        except ValueError as e:   # our own messages
-            tell(f"Claude Code was not set up: {e}.")
-            return "/"
-        q = claudecode.question(path, raw)
-        ok, how = auth.approve(q, claudecode.REASON, home)
-        log.append("flow_approval", flow=claudecode.ID, flow_hash=digest, executor=claudecode.ID,
-                   decision="allow" if ok else "deny", approver="admin", channel="touch_id", auth=how,
-                   shown=shown_digest(q, None if how == "none" else claudecode.REASON))
-        if not ok:
-            tell("Claude Code was not set up: the policy was not approved.")
-            return "/"
-        try:
-            claudecode.commit(home, path, raw, digest)
-        except (OSError, ValueError):
-            tell("Claude Code was not set up: the policy changed while it was being approved. Try again.")
-            return "/"
-        code = admin("install", claudecode.stage(home, pol))
-        log.append("setting", field="claude_code", action="install", outcome=str(code))
-        if code == 0 and claudecode.governed(home, managed)[0]:
-            tell("Claude Code is governed. Sessions already open stay ungoverned until they restart.")
-        elif code == 2:
-            tell("Claude Code was not set up: the Mac password was cancelled. The policy stays approved; "
-                 "press Approve and install again to finish.")
-        else:
-            tell("Claude Code was not set up: writing the managed settings failed.")
-        return "/"
+        return post
 
-    def claude_off(f):
-        if admin is None:
-            tell("Turning Claude Code off needs the installed panel.")
+    def off_post_for(ag):
+        def post(f):
+            if admin is None:
+                tell(f"Turning {ag.title} off needs the installed panel.")
+                return "/"
+            ok, how = auth.prove(f"turn off {ag.title} governance", home)
+            log.append("setting", field=ag.id, action="remove", decision="allow" if ok else "deny",
+                       approver="admin", channel="touch_id", auth=how)
+            if not ok:
+                return f"/{ag.slash}"
+            code = admin("remove", "", ag.id)
+            log.append("setting", field=ag.id, action="remove", outcome=str(code))
+            tell(f"{ag.title} governance is off. New sessions run without GOV-AIOS checks." if code == 0
+                 else f"{ag.title} governance is still on: the Mac password was cancelled." if code == 2
+                 else f"{ag.title} governance is still on: removing the settings failed.")
             return "/"
-        ok, how = auth.prove("turn off Claude Code governance", home)
-        log.append("setting", field="claude_code", action="remove", decision="allow" if ok else "deny",
-                   approver="admin", channel="touch_id", auth=how)
-        if not ok:
-            return "/claude"
-        code = admin("remove", "")
-        log.append("setting", field="claude_code", action="remove", outcome=str(code))
-        tell("Claude Code governance is off. New sessions run without GOV-AIOS checks." if code == 0
-             else "Claude Code governance is still on: the Mac password was cancelled." if code == 2
-             else "Claude Code governance is still on: removing the managed settings failed.")
-        return "/"
+        return post
 
     def revoke(f):
         kind, flow, dest = f.get("kind"), f.get("flow", ""), f.get("destination", "")
@@ -975,8 +998,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/approvals"
 
     POSTS = {"/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
-             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/claude/setup": claude_setup,
-             "/claude/off": claude_off, "/claude/start": claude_start_post}
+             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
+    for _ag in agents.AGENTS.values():
+        POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
+                      f"/{_ag.slash}/start": start_post(_ag)})
 
     # same-origin, not no-referrer: under no-referrer Chrome sends `Origin: null` on our own form POSTs (revoke 403)
     SEC = (("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"), ("X-Content-Type-Options", "nosniff"),
@@ -1144,13 +1169,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 m = re.fullmatch(r"/audit/run/([0-9]{1,9})", u.path)
                 a = re.fullmatch(r"/audit/app/([^/]{1,200})", u.path)
                 mk = re.fullmatch(r"/market/setup/([a-z0-9_]{1,64})", u.path)
-                cs = re.fullmatch(r"/audit/claude/([A-Za-z0-9-]{1,64})", u.path)
+                cs = re.fullmatch(r"/audit/(claude|codex)/([A-Za-z0-9-]{1,64})", u.path)
+                ap = by_slash(u.path[1:])
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
-                        else market_page() if u.path == "/market" else claude_page(sess[1]) if u.path == "/claude"
+                        else market_page() if u.path == "/market" else agent_page(ap, sess[1]) if ap
                         else market_setup_page(sess[1], mk[1]) if mk
-                        else cc_session_page(cs[1]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
+                        else cc_session_page(by_slash(cs[1]), cs[2]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed
                 return self._send(500, "internal error")
             self._send(200, page) if page else self._send(404)

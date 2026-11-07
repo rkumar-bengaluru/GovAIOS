@@ -45,15 +45,19 @@ class FakeLaunch:
         self.stopped = self.stopped_reason = reason
 
 
-def _fake_admin(home, ms):
+def _fake_admin(home, tmp):
     """The Mac-password step without root: what ROOT_SCRIPT does, as this user."""
-    def run(action, digest):
+    from govaios.panel.helper import TARGETS
+
+    def run(action, digest, agent="claude_code"):
         import hashlib
-        dst = ms / "managed-settings.json"
+        folder, name, staged = TARGETS[agent]
+        ms = tmp / ("ClaudeCode" if agent == "claude_code" else "codex")
+        dst = ms / name
         if action == "remove":
             dst.unlink(missing_ok=True)
             return 0
-        data = (home / "executors" / "managed-settings.json").read_bytes()
+        data = (home / staged).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
             return 3
         ms.mkdir(exist_ok=True)
@@ -86,15 +90,18 @@ def panel(tmp_path, monkeypatch, ui):
     settings.set_name(home, "Rupak")
     made = []
     launcher = type("L", (FakeLaunch,), {"made": made})
-    admin_calls, admin_answer = [], [_fake_admin(home, tmp_path / "ClaudeCode")]
+    admin_calls, admin_answer = [], [_fake_admin(home, tmp_path)]
     started = []
     spoken = []
     mono, wall = [0.0], [0.0]   # offsets added to the session's monotonic clock and the browser-session clock
     srv = make_server(home, flows_dir=flows, launcher=launcher, speak=spoken.append,
                             now=lambda: time.time() + wall[0], session=Session(lambda: time.monotonic() + mono[0]), tick_s=None,
-                            chrome_state=tmp_path / "Local State", managed=tmp_path / "ClaudeCode" / "managed-settings.json",
-                            admin=lambda a, d: (admin_calls.append((a, d)), admin_answer[0](a, d))[1],
-                            starter=lambda f: (started.append(f), 0)[1])
+                            chrome_state=tmp_path / "Local State",
+                            managed={"claude_code": tmp_path / "ClaudeCode" / "managed-settings.json",
+                                     "codex": tmp_path / "codex" / "requirements.toml"},
+                            admin=lambda a, d, ag="claude_code": (admin_calls.append((a, d) if ag == "claude_code" else (a, d, ag)),
+                                                                  admin_answer[0](a, d, ag))[1],
+                            starter=lambda f, ag="claude_code": (started.append(f if ag == "claude_code" else (f, ag)), 0)[1])
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     port = srv.server_address[1]
 
@@ -1021,8 +1028,8 @@ def test_marketplace_signed_out_goes_to_locked_page(panel):
 
 @pytest.fixture
 def cc(panel, monkeypatch):
-    from govaios import claudecode
-    monkeypatch.setattr(claudecode, "root_owned", lambda p: p.exists())   # the fake step cannot chown to root
+    from govaios import agents
+    monkeypatch.setattr(agents, "root_owned", lambda p: p.exists())   # the fake step cannot chown to root
     proj = panel.tmp / "proj"
     proj.mkdir()
     panel.proj = proj
@@ -1065,7 +1072,7 @@ def test_claude_code_not_approved_writes_nothing(cc):
 
 
 def test_claude_code_password_cancelled_then_retried(cc):
-    cc.admin_answer[0], real = (lambda a, d: 2), cc.admin_answer[0]
+    cc.admin_answer[0], real = (lambda a, d, ag: 2), cc.admin_answer[0]
     cc.post("/claude/setup", folders=str(cc.proj))
     assert "Mac password was cancelled" in _tells(cc)[-1] and "Set up" in cc.get("/market")[1]
     cc.admin_answer[0] = real
@@ -1201,3 +1208,41 @@ def test_slash_app_with_session_runs_and_closes_card(cc):
     cc.say("/joblens")
     cc.say("run JobLens")
     assert len(cc.made) == 1 and "value='run JobLens'" not in cc.get("/")[1]
+
+
+def test_codex_set_up_start_and_audit(cc):
+    from govaios.executor import load
+    body = cc.get("/market")[1]
+    assert "OpenAI Codex, governed" in body and "href='/codex'" in body
+    assert "<textarea id=folders" in cc.get("/codex")[1]
+    cc.post("/codex/setup", folders=str(cc.proj))
+    (act, digest, ag), = cc.admin_calls
+    assert (act, ag) == ("install", "codex") and len(digest) == 64
+    assert "OpenAI Codex is governed" in _tells(cc)[-1]
+    assert (cc.tmp / "codex" / "requirements.toml").read_text().startswith("# Written by GOV-AIOS")
+    assert any("OpenAI Codex executor policy" in q for q in cc.asked)
+    assert load(cc.home, "executors/codex.yaml")[0]["tools"] == ["Bash", "Write"]
+    assert "Claude Code, governed" in cc.get("/market")[1] and "<p class=state>Governed</p>" in cc.get("/market")[1]
+    talk = cc.get("/")[1]
+    assert "OpenAI Codex<span class=m>Governed: type /codex" in talk and "<option value='/codex'>" in talk
+    assert "<option value='/claude'>" not in talk   # Claude Code is not set up in this test
+    _open(cc)
+    cc.say("/codex")
+    assert "action=/codex/start" in cc.get("/")[1] and "Start OpenAI Codex" in cc.get("/")[1]
+    cc.say("run codex proj")
+    assert cc.started == [(str(cc.proj.resolve()), "codex")] and "Starting OpenAI Codex" in _tells(cc)[-1]
+    AuditLog(cc.home).append("request", flow="codex", executor="codex", action="apply_patch", target="/x/a.py",
+                             decision="allow", approver="policy", session="s-9", folder=str(cc.proj))
+    idx = cc.get("/audit")[1]
+    assert "href='/audit/app/codex'>OpenAI Codex" in idx and "href='/audit/app/claude_code'" not in idx
+    assert "/audit/codex/s-9'>Session 1" in cc.get("/audit/app/codex")[1]
+    assert "<td>apply_patch</td>" in cc.get("/audit/codex/s-9")[1]
+    cc.post("/codex/off")
+    assert cc.admin_calls[-1][::2] == ("remove", "codex") and "OpenAI Codex governance is off" in _tells(cc)[-1]
+
+
+def test_agents_are_independent(cc):
+    cc.post("/claude/setup", folders=str(cc.proj))
+    assert "Set up" in cc.get("/codex")[1] or "Approve and install" in cc.get("/codex")[1]
+    cc.say("/codex")
+    assert "OpenAI Codex is not governed yet" in _tells(cc)[-1]

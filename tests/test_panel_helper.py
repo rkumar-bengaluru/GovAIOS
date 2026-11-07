@@ -178,7 +178,7 @@ def test_claude_install_copies_only_the_approved_bytes(adm):
     assert adm.claude("install", d) == 0
     dst = adm.ms / "managed-settings.json"
     assert dst.read_bytes() == b'{"hooks": {}}\n' and oct(dst.stat().st_mode & 0o777) == "0o644"
-    assert "install the Claude Code managed settings" in (adm.tmp / "prompt").read_text()
+    assert "install the Claude Code settings" in (adm.tmp / "prompt").read_text()
     assert [p.name for p in adm.ms.iterdir()] == ["managed-settings.json"]   # no temp file left
 
 
@@ -203,7 +203,7 @@ def test_claude_bad_requests_refused(adm, action, digest):
 
 
 def test_claude_start_opens_terminal_only_in_approved_folders(tmp_path, monkeypatch):
-    from govaios import claudecode
+    from govaios import agents
     from govaios.executor import POLICY_PATH, default_policy
     proj, out = tmp_path / "proj", tmp_path / "opened"
     (proj / "sub").mkdir(parents=True)
@@ -211,7 +211,7 @@ def test_claude_start_opens_terminal_only_in_approved_folders(tmp_path, monkeypa
     rec.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$OPENED"\ncat "$3" >> "$OPENED"\n')
     rec.chmod(0o755)
     monkeypatch.setenv("OPENED", str(out))
-    monkeypatch.setattr(claudecode, "found", lambda: "/opt/x/claude")
+    monkeypatch.setattr(agents, "found", lambda a: "/opt/x/claude")
     flows, home = tmp_path / "flows", tmp_path / "home"
     flows.mkdir()
     (home / "executors").mkdir(parents=True)

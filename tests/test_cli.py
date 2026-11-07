@@ -304,7 +304,7 @@ def _subcommands():
     return re.search(r"\{([a-z,-]+)\}", buf.getvalue())[1].split(",")
 
 
-SUBCOMMANDS = ["doctor", "selftest", "run", "deliver", "verify-audit", "audit-ui", "panel", "dump", "guard", "resume", "hook",
+SUBCOMMANDS = ["doctor", "selftest", "run", "deliver", "verify-audit", "audit-ui", "panel", "dump", "guard", "resume", "hook", "codex-hook",
                "claude-settings", "review-powers"]
 ARGV = {"selftest": ["selftest", "lines", "1"], "run": ["run", "x.yaml"], "deliver": ["deliver", "x.yaml"],
         "claude-settings": ["claude-settings", "--root", "/x"],
