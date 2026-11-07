@@ -567,7 +567,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         ins = flow_inputs(a.path)
         if ins:   # one field per input; the server check is the authority, the pattern only helps the browser
             fields = "".join(f"<label>{escape(str(d.get('label', k)))} <input name='{escape('in:' + k)}' required "
-                             f"pattern='{escape(str(d['pattern']) + '/?([?#].*)?')}'></label>" for k, d in ins.items())
+                             f"pattern='{escape(re.sub(r"(?<!\\)-(?=\])", r"\\-", str(d['pattern'])) + '/?([?#].*)?')}'></label>" for k, d in ins.items())
             act = (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='/{escape(slug(a.name))}'>"
                    f"{fields}<button class=go>Run {escape(a.name)}</button></form>" if a.approved
                    else "<p class=m>Draft: approve it first.</p>")
@@ -747,14 +747,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if name in ("", "help"):
                 tell("Commands: " + ", ".join(slashes()) + ". Type one to see what it needs.")
                 return "/"
-            form = {k[3:]: " ".join(v.split()) for k, v in f.items() if k.startswith("in:")}
+            app = next((a for a in apps() if slug(a.name) == name or a.id == name), None)
+            ins = flow_inputs(app.path) if app and not by_slash(name) else {}
+            form = {k: " ".join(f["in:" + k].split()) for k in ins if "in:" + k in f}   # declared keys only
             if rest is None and not form:
                 show_card(name)
                 return "/"
-            app = next((a for a in apps() if slug(a.name) == name or a.id == name), None)
-            ins = flow_inputs(app.path) if app and not by_slash(name) else {}
             if ins:
-                vals = form or ({next(iter(ins)): rest} if len(ins) == 1 else {})
+                vals = form or ({next(iter(ins)): rest} if len(ins) == 1 and rest is not None else {})
                 text = f"run {name.replace('-', ' ')}"
             else:
                 text = f"run {name} {rest}" if by_slash(name) else f"run {name.replace('-', ' ')}"   # apps without inputs take no words yet

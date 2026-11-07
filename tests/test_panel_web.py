@@ -1262,7 +1262,7 @@ def test_job_apply_card_has_input(cc):
     cc.say("/job-apply")
     page = cc.get("/")[1]
     assert "Himalayas job link" in page and "name='in:job_url'" in page and "name=text value='/job-apply'" in page
-    assert "pattern='https://himalayas\\.app/companies/[a-z0-9-]+/jobs/[a-z0-9-]+/?([?#].*)?'" in page
+    assert "pattern='https://himalayas\\.app/companies/[a-z0-9\\-]+/jobs/[a-z0-9\\-]+/?([?#].*)?'" in page
 
 
 def test_job_apply_starts_with_link_from_card_and_from_words(cc):
@@ -1305,3 +1305,16 @@ def test_apps_without_inputs_unchanged(cc):
     assert "name='in:" not in cc.get("/")[1]
     cc.say("/joblens extra words")
     assert len(cc.made) == 1 and cc.made[0].inputs is None
+
+
+def test_job_apply_undeclared_inputs_dropped(cc):
+    _approve_job_apply(cc)
+    _open(cc)
+    cc.post("/say", text="/job-apply", **{"in:job_url": LINK, "in:evil": "x"})
+    assert [r.inputs for r in cc.made] == [{"job_url": LINK}]
+
+
+def test_agent_slash_ignores_in_fields(cc):
+    cc.post("/say", text="/claude", **{"in:x": "y"})
+    assert cc.made == [] and "run claude None" not in "".join(cc.srv.panel.convo)
+    assert "is not governed yet" in _tells(cc)[-1]
