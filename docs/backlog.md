@@ -20,6 +20,14 @@ Updated 2026-11-06 after control panel v2 (PR #10).
 ## Publication and open source (admin, 2026-11-06)
 
 Order: Studio phase 1 → attack-suite evaluation → paper and public repo released together.
+Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, paper due 26 Jan 2027).
+
+- **Hardening the research exposed** (roadmap Phases 0 and 2; W-numbers are from `docs/research/reports/`):
+  - typed code word in place of compared code (NIST 800-63B-4);
+  - the audit records a digest of what the approver saw;
+  - Secure Enclave–signed approvals over digests;
+  - signed and anchored audit heads;
+  - Codex hooks fail closed, and `~/.codex` and `AGENTS.md` are protected.
 
 - **Attack-suite evaluation.** Turn the existing tests into a measured attack suite. Cover:
   - injected page text steering a flow;
