@@ -10,20 +10,35 @@ The system name and its distinction from Rutgers' AIOS (arXiv 2403.16971) are an
 **Acknowledgements:** disclose that the system and paper were designed and built in collaboration with Claude (Anthropic) via Claude Code.
 
 ## 1. Introduction (1.25 pp)
+- **Motivation (the admin's own, 2026-11-08):** one person on one laptop handing their routine work to agents to get more
+  done, e.g. vetting job matches on Himalayas into JobLens, a Gmail briefing, making repo demo videos with Walker,
+  the routine parts of JobLens's web UI, and coding with Claude Code and Codex. Productivity is the goal; governance is
+  what makes delegating it safe enough to do.
 - **Problem:** agents now act through GUIs and shells on personal machines. Model-level defenses fall to adaptive attacks ("The Attacker Moves Second"; CAISI: 57% → 80% with retries).
 - **Prior work's gap:** deterministic defenses (CaMeL, Progent, FIDES, Conseca, ACE) govern API tool calls. GUI guardrails (WebGuard, ShieldAgent) are learned. Approval prompts are fatigued (Claude Code users accept 93%) and can be manipulated (Lies-in-the-Loop).
 - **The idea:** a governor outside the model that:
   1. lets agents act only on elements of page schemas captured from the real accessibility tree, each risk-rated, with default-deny and an allow-list of sites;
   2. binds each run to a human who is physically present, approving an exact artifact the governor wrote;
   3. governs browser flows and coding agents under one policy and one tamper-evident log;
-  4. lets an LLM write new automations safely, by treating its output as untrusted.
-- **Contributions:** N1–N8 from the report, worded "to our knowledge".
+  4. lets an LLM write new automations safely, by treating its output as untrusted;
+  5. keeps the governor itself off the network and keeps models out of the run-time loop: a browser flow is fixed
+     steps, so text injected into a page has no model to steer, and data leaves only to approved destinations.
+- **Contributions:** N1–N8 from the report plus N9 (network-less governor, no model at run time), worded "to our knowledge".
+- **The claim, worded carefully** (admin and Claude, 2026-11-08). Not "prompt injection is solved". Instead:
+  - *browser flows:* no model reads untrusted content while a flow runs, and the governor process has no network
+    (`sandbox_init`); only the real Chrome talks to the web, on approved origins, and output goes only to approved
+    destinations;
+  - *coding agents:* their models still read untrusted text (repo files, command output, packages, plugin results).
+    GOV-AIOS does not stop that text reaching the model; it confines what an injected agent can **do** (a non-LLM
+    check on every command, edit and plugin call; egress allow-listed; the sandbox locked on) and records it.
 - **Headline result:** the gap between proposed and executed attacks (S1–S3), with the overhead.
 
 ## 2. Background and threat model (1 pp)
 - macOS TCC, the accessibility tree, LocalAuthentication and the Secure Enclave.
 - Claude Code managed settings and hooks; Codex `requirements.toml` and hooks.
-- The threat model from `evaluation-plan.md`, with the residuals stated up front.
+- The threat model from `evaluation-plan.md`, with the residuals stated up front. Network-borne residuals to state:
+  injected text can still reach the admin in a report (e.g. the Gmail briefing); Studio's LLM sees masked page captures
+  at authoring time; coding agents' models read untrusted content (see the claim in §1).
 
 ## 3. Design (3.5 pp)
 - **3.1 Architecture:**
@@ -31,6 +46,14 @@ The system name and its distinction from Rutgers' AIOS (arXiv 2403.16971) are an
   - the launch helper forked before the sandbox;
   - the panel (127.0.0.1, no JavaScript);
   - the LaunchAgent.
+- **3.1b No network, no model at run time:**
+  - the governor and its runner apply `sandbox_init` before anything else: no network except local sockets; the panel
+    binds only to 127.0.0.1; delivery reaches only `localhost:8100` (JobLens);
+  - the launch helper is the one unsandboxed part and runs only fixed commands it validates itself;
+  - flows are fixed steps checked against page schemas: no LLM interprets page text while a flow runs, so
+    content injection changes nothing the flow does (compare CaMeL, where the planner never sees data but a model
+    still runs at execution time);
+  - what this does not cover: Chrome's own network, what the admin reads, coding agents' models.
 - **3.2 Presence-bound authorization:**
   - Touch ID with a typed code word (after Phase 0);
   - TOTP 30-minute sessions that end at lock;

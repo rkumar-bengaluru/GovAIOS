@@ -515,6 +515,7 @@ The paper's strongest framework claim is that **no framework surveyed requires c
 | N6 | A monotone **risk floor** on LLM-assigned risk labels | None found | Search not exhaustive |
 | N7 | Masking **by accessibility role** before the LLM call, once, at authoring time | PrivacyGuard, CAPED, PlanTwin (run-time, detector-based) | PrivWeb not located; leakage through control names |
 | N8 | First evaluation on the **macOS AX API**, and first injection study targeting **workflow synthesis** | Android, HTML and AT-SPI tree attacks | Absence of evidence only |
+| N9 | A **network-less governor with no model in the run-time loop**: flows are fixed steps, so injected page text has nothing to steer; egress only to approved destinations; coding agents confined by a non-LLM gate (added 2026-11-08) | CaMeL (planner isolated from data, but a model runs at execution); Dual LLM pattern; RPA (no model, but no governance) | Check RPA/UiPath governance, agentic-browser isolation work (e.g. remote browser isolation), and any "no-LLM-at-runtime" synthesis systems |
 
 **Numbers that still need checking against the PDFs before they go into the related-work table:**
 

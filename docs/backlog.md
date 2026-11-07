@@ -1,7 +1,7 @@
 # GOV-AIOS backlog
 
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
-Updated 2026-11-06 after control panel v2 (PR #10).
+Updated 2026-11-08 after Claude Code and Codex governance (PRs #16, #17).
 
 ## Apps platform (branch `feat/apps-platform`)
 
@@ -14,6 +14,11 @@ Updated 2026-11-06 after control panel v2 (PR #10).
 - **Claude Code refusals made by its own managed deny rules are not in the audit log** (seen live
   2026-11-07: reading the data home and writing /tmp were refused before the hook ran). Only calls that
   reach the hook are logged.
+- **Panel UI design pass** (admin, 2026-11-07): the Talk cards, coding-agent pages and Marketplace need a
+  proper design before more UI is added.
+- **Independent security review** of the coding-agent work before the attack-suite evaluation: the root
+  step (`ROOT_SCRIPT` under the macOS administrator dialog), the Terminal launch file, `codex-hook`
+  (patch parsing, plugin remembering). Not reviewed yet.
 - **Chat in Talk:** plain messages (not commands) answered by Claude in the panel (admin, 2026-11-07).
   Needs the Studio decision on how the panel reaches Claude. Apps with run-time inputs show them on
   their `/app` card.
