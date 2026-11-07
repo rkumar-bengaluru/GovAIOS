@@ -7,10 +7,10 @@ name = "govaios"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-  "pyobjc-framework-ApplicationServices",
-  "pyobjc-framework-Quartz",
-  "pyobjc-framework-Cocoa",
-  "pyobjc-framework-LocalAuthentication",
+  "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+  "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+  "pyobjc-framework-LocalAuthentication; sys_platform == 'darwin'",
   "pyyaml",
   "cryptography",
   "segno",

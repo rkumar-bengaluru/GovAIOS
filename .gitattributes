@@ -1,0 +1,6 @@
+flows/** text eol=lf
+pages/** text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+bin/* text eol=lf
