@@ -5,6 +5,7 @@ import pytest
 
 from govaios import engine
 from govaios.engine import Runner, Stop
+from govaios.desktop.macos import InputRefused
 from conftest import FakeDesktop, N
 
 URL = "https://job-boards.greenhouse.io/acme/jobs/1"
@@ -97,12 +98,12 @@ def write_bank(home, rows, cv=None):
 NOTICE = {"key": "notice", "labels": ["Notice period"], "answer": SECRET}
 
 
-def run(tmp_path, desk, rows=(NOTICE,), allow=", fill_field", run_id="r1", attach="", cv=None):
+def run(tmp_path, desk, rows=(NOTICE,), allow=", fill_field", run_id="r1", attach="", cv=None, page=PAGE):
     src = tmp_path / "src"
     (src / "flows").mkdir(parents=True)
     (src / "pages").mkdir()
     (src / "flows" / "test_apply.yaml").write_text(FLOW.format(extra=allow, attach=attach))
-    (src / "pages" / "gh_form.yaml").write_text(PAGE)
+    (src / "pages" / "gh_form.yaml").write_text(page)
     if rows is not None:
         write_bank(tmp_path, list(rows), cv)
     r = Runner(src / "flows" / "test_apply.yaml", desk, tmp_path)
@@ -432,30 +433,31 @@ CV = "Resume-Jane.pdf"
 
 
 class CvDesk(FormDesk):
-    def __init__(self, chooses=True, refuse=False):
-        super().__init__(lambda d: form(N("button", "Attach"), N(
+    def __init__(self, chooses=True, refuse=False, exc=None):
+        super().__init__(lambda d: form(text_field(d, "notice", "Notice period"), N("button", "Attach"), N(
             "text", d.values.get("cv", "No file chosen"), dom_id="cv")))
-        self.chooses, self.refuse = chooses, refuse
+        self.chooses, self.refuse, self.exc = chooses, refuse, exc
 
     def choose_file(self, path):
         super().choose_file(path)
         if self.refuse:
-            raise engine.Stop("input refused: no file sheet")
+            raise (self.exc or InputRefused("input refused: no file sheet"))
         if self.chooses:
             self.values["cv"] = CV
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def touch_id_ok(monkeypatch):
     monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (True, "biometric"))
 
 
-def attach(tmp_path, desk, cv="~/" + CV, make=True):
+def attach(tmp_path, desk, cv="~/" + CV, make=True, rows=(NOTICE,), page=PAGE):
     if make:
         (tmp_path / CV).write_bytes(b"%PDF")
-    return run(tmp_path, desk, rows=[], allow=ALLOW_ATTACH, attach=ATTACH, cv=cv)
+    return run(tmp_path, desk, rows=list(rows), allow=ALLOW_ATTACH, attach=ATTACH, cv=cv, page=page)
 
 
+@pytest.mark.usefixtures('touch_id_ok')
 def test_attach_skips_without_cv(tmp_path):
     desk = CvDesk()
     r, entries, err = attach(tmp_path, desk, cv=None)
@@ -463,6 +465,7 @@ def test_attach_skips_without_cv(tmp_path):
     assert result(tmp_path)["yourself"] == ["Resume/CV"]
 
 
+@pytest.mark.usefixtures('touch_id_ok')
 def test_attach_denied_goes_to_yourself(tmp_path, monkeypatch):
     monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (False, "cancel"))
     desk = CvDesk()
@@ -471,6 +474,7 @@ def test_attach_denied_goes_to_yourself(tmp_path, monkeypatch):
     assert result(tmp_path)["yourself"] == ["Resume/CV"]
 
 
+@pytest.mark.usefixtures('touch_id_ok')
 def test_attach_happy_path(tmp_path, monkeypatch):
     asked = []
     monkeypatch.setattr(engine.auth, "approve", lambda q, *a, **k: (asked.append(q), (True, "biometric"))[1])
@@ -482,17 +486,46 @@ def test_attach_happy_path(tmp_path, monkeypatch):
     assert CV not in (tmp_path / "audit.jsonl").read_text() and result(tmp_path)["yourself"] == []
 
 
+@pytest.mark.usefixtures('touch_id_ok')
 def test_attach_still_no_file_goes_to_yourself(tmp_path):
     r, entries, err = attach(tmp_path, CvDesk(chooses=False))
     assert err is None and result(tmp_path)["yourself"] == ["Resume/CV"]
 
 
+@pytest.mark.usefixtures('touch_id_ok')
 def test_attach_refused_dialog_escapes(tmp_path):
     desk = CvDesk(refuse=True)
     r, entries, err = attach(tmp_path, desk)
     assert err is None and "escape" in desk.calls and result(tmp_path)["yourself"] == ["Resume/CV"]
 
 
+@pytest.mark.usefixtures('touch_id_ok')
 def test_result_rewritten_after_attach(tmp_path):
-    attach(tmp_path, CvDesk(), cv=None)
-    assert result(tmp_path)["yourself"] == ["Resume/CV"]
+    r, entries, err = attach(tmp_path, CvDesk(chooses=False), rows=[NOTICE])
+    assert err is None and result(tmp_path) == {"run": "r1", "filled": 1, "total": 1,
+                                                "yourself": ["Resume/CV"], "check": []}
+
+
+@pytest.mark.usefixtures('touch_id_ok')
+@pytest.mark.parametrize("exc", [engine.Stop("emergency stop"), engine.Stop("screen_locked")])
+def test_attach_run_stop_during_dialog_propagates(tmp_path, exc):
+    desk = CvDesk(refuse=True, exc=exc)
+    r, entries, err = attach(tmp_path, desk)
+    assert err is exc and "escape" not in desk.calls
+    assert entries[-1].get("outcome") != "done" and entries[-1]["kind"] != "flow_end"
+
+
+@pytest.mark.usefixtures('touch_id_ok')
+def test_attach_submit_rated_target_never_clicked(tmp_path):
+    desk = CvDesk()
+    r, entries, err = attach(tmp_path, desk, page=PAGE.replace("name: Attach, risk: modify", "name: Attach, risk: submit"))
+    assert err is not None and "above the flow" in str(err)
+    assert ("choose_file",) not in desk.calls and "Attach" not in desk.values.get("clicked", [])
+
+
+@pytest.mark.usefixtures('touch_id_ok')
+def test_attach_missing_check_element_goes_to_yourself(tmp_path):
+    desk = CvDesk()
+    desk.build = lambda d: form(N("button", "Attach"))
+    r, entries, err = attach(tmp_path, desk, rows=[])
+    assert err is None and result(tmp_path)["yourself"] == ["Resume/CV"]

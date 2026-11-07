@@ -21,7 +21,7 @@ from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, loa
 from .audit.log import AuditLog, url_for_audit
 from .delivery import TARGETS, check_block
 from .approvals import Approvals, pages_used, read_bound
-from .policy import decide, origin
+from .policy import RISK_ORDER, decide, origin
 from .runstate import Stop
 
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
@@ -30,6 +30,10 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 NO_DEST = object()
 FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
+
+
+class Denied(Stop):
+    """The admin (or policy) refused an action; the run may carry on without it."""
 
 
 def _emergency_stop(signum, frame):
@@ -216,7 +220,7 @@ class Runner:
         if remember:   # only once the approval is on record
             self.approvals.approve_destination(self.flow["id"], origin(destination))
         if verdict != "allow":
-            raise Stop(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
+            raise Denied(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
 
     def approve_flow(self):
         digest = self.digest
@@ -594,27 +598,34 @@ class Runner:
 
     def do_attach_file(self, s):
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
-        a = self.ctx["apply"]
+        from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
+        a, ref = self.ctx["apply"], self.ref(s["target"])
         p = cv_path(a["bank"], user_home())
         if p is not None:
-            node, _ = self.page_element(self.ref(s["target"]))
+            _, spec = self.page_element(ref)
+            if RISK_ORDER.index(spec["risk"]) > RISK_ORDER.index(self.flow["permissions"]["max_element_risk"]):
+                raise Stop(f"{ref}: risk {spec['risk']} above the flow's ceiling")   # never click it
             try:
-                self.gate("attach_file", "modify", target=self.ref(s["target"]),
+                self.gate("attach_file", spec["risk"], target=ref,
                           question=f"Attach your CV ({p.name}) to this application?")
-            except Stop as e:
-                if not str(e).startswith("denied attach_file"):
-                    raise
+            except Denied:
                 p = None
         if p is not None:
-            self._act("click", self.d.click, node, target=self.ref(s["target"]))
+            node, _ = self.page_element(ref)   # re-located after the prompt, as do_click does
+            self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
+            node, _ = self.page_element(ref)
+            self._act("click", self.d.click, node, target=ref)
             try:
-                self._act("choose_file", self.d.choose_file, str(p), target=self.ref(s["target"]))
-            except Stop:   # InputRefused: fixed text, no path
-                self._act("press", self.d.press, "escape", target=self.ref(s["target"]))
+                self._act("choose_file", self.d.choose_file, str(p), target=ref)
+            except InputRefused:   # fixed text, no path; any other Stop ends the run
+                self._act("press", self.d.press, "escape", target=ref)
                 p = None
         if p is not None:
-            chk, _ = self.page_element(self.ref(s["check"]))
-            if "No file chosen" in chk.name:
+            try:
+                chk, _ = self.element(self.ref(s["check"]), self.wait_for_page([ref.split(".")[0]], 10)[1])
+                if "No file chosen" in chk.name:
+                    p = None
+            except Stop:   # the check element is missing or ambiguous
                 p = None
         if p is None:
             a["yourself"].append("Resume/CV")
