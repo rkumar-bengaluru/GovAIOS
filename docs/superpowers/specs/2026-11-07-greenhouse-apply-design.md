@@ -1,0 +1,139 @@
+# Apply to a JobLens application on Greenhouse, from Talk: design
+
+Status: draft for admin review (2026-11-07). Nothing built.
+
+## Why
+
+The admin's goal is to hand routine work to agents safely. In the job pipeline, Himalayas vetting and JobLens
+delivery are already governed. The step left by hand is the most tedious one: filling in each company's
+application form. A JobLens application's Apply link goes to its Himalayas page, whose Apply goes to the
+company's application system (Greenhouse in the admin's example), where the form is filled in and submitted.
+
+## Goals
+
+- From Talk, one application at a time: pick a JobLens application, and GOV-AIOS opens its form and fills
+  it from answers the admin wrote in advance.
+- Questions it can't answer come back to the admin as a Talk card. The admin may save an answer for next time.
+- It stops before Submit. The admin reviews the form and presses Submit themselves.
+- Everything is audited: the application, which fields were filled from the bank, which the admin answered.
+  Answer values are never logged.
+
+## Non-goals (v1)
+
+- Batch runs over several applications (admin: later).
+- Application systems other than Greenhouse (Lever, Ashby, Workday: later).
+- AI-drafted answers, auto-submit, marking the application submitted in JobLens.
+
+## Anti-goals (a failure even if it works)
+
+- Any form value that doesn't come from the admin: from the bank, or typed into the card.
+- Any AI model choosing what goes in a field. Label-to-answer matching is a fixed rule (see below), so text on
+  a page can't steer it. This keeps the research claim of no model in the run-time loop.
+- Submit, or anything rated `submit` or `payment`, pressed by GOV-AIOS.
+- Data sent to a site that isn't on the flow's destination list.
+
+## Decided (admin)
+
+- Answers come from a bank the admin prepares. Most questions are standard; the few that differ come back to
+  the admin.
+- One at a time from Talk first; batch later.
+
+## How it works (designer's calls unless marked)
+
+**Answer bank.** A file in the GOV-AIOS data home, `apply/answers.yaml`, mode 0600, which agents can't read
+(managed deny on Claude Code and Codex). Each entry has a key, the answer, and the labels it matches. For
+example: key `notice_period`, labels "Notice period" and "When can you start?". The panel shows and edits it,
+always as text the admin typed. Values never go into the audit log, a flow file or a run report.
+
+**Matching.** Normalise a field label (lower case, collapse spaces, drop punctuation and a trailing `*`), then
+look for an exact match against the bank's labels. Nothing fuzzy and no model. If a label matches more than
+one entry, the field goes to the admin. Field type must agree: a yes/no answer goes only into a checkbox,
+radio group or yes/no select.
+
+**Voluntary demographic questions** (gender, race, veteran, disability) are never filled from the bank. They
+always go to the admin.
+
+**Talk.** `/apply` shows a card listing JobLens applications that have a `jd_url` on himalayas.app, filled
+from the JobLens API on 127.0.0.1:8100 the same way delivery reaches it (`govaios/delivery.py`). The admin
+picks one and presses Start. During the run, a card lists the fields it couldn't fill: the field's label,
+an answer box, and a "save to my bank" tick. The run waits for those answers. At the end a card says "Filled
+N of M fields. Review the form in Chrome and press Submit yourself."
+
+**Flow** `flows/greenhouse_apply.yaml`. App JobLens; the same Chrome profile and account check as the
+Himalayas flow. Destinations are `https://himalayas.app` and `https://job-boards.greenhouse.io`. The
+Himalayas Apply button is rated `navigate`, and following it must land on the Greenhouse host or the run
+stops. `max_element_risk: modify`, so Submit (`submit`) can't be pressed.
+
+Steps:
+1. Open the job's Himalayas page.
+2. Classify the page, then follow Apply.
+3. Classify the page as `greenhouse_application`, matching the page shell captured once.
+4. Read the form's fields.
+5. Fill the fields that matched.
+6. Ask the admin about the rest.
+7. Attach the CV.
+8. Report, then leave the window open for the admin.
+
+**New engine pieces.** Today the engine can click, navigate, read and extract, nothing else.
+- `read_form`: collects editable fields, each with role, label and options, from the Accessibility tree
+  inside the page's form region. It reads only; field values are not recorded.
+- `fill_field` (risk `modify`): focus the field and type or choose the value. It works only on fields that
+  `read_form` returned in the same run.
+- `ask_admin`: stops at a Talk card and waits with a timeout (designer's call: 15 min, then stop and report).
+- `attach_file` (risk `submit`-equivalent for approval, see open items): press the CV field's Attach button,
+  then in the macOS open panel type the path with cmd+shift+G and press Enter. Only the CV file the admin
+  set in the bank is allowed.
+
+Greenhouse forms vary by company, so the page schema covers the shell only: page title area, the form
+region, the Submit button rated `submit`. Fields are discovered at run time but have to be inside the form
+region, and their values only come from the admin. This is a departure from fully pre-captured page schemas,
+and the paper has to say so.
+
+**Approval.** The flow is approved once like other flows (Touch ID). Per run, the first fill on a new company
+form needs no extra prompt. Attaching the CV needs Touch ID every time: the file leaves the Mac as soon as
+it's attached.
+
+**Audit.** Each fill logs `field label`, `source: bank:<key> | admin`, `decision`. The value is never logged.
+Unfilled fields and the end state are logged too ("stopped before Submit").
+
+## Left to the builder
+
+- Where the card wait lives (panel state plus runstate), within the existing run model.
+- The exact AX roles for Greenhouse fields, from one capture.
+- Tests: label normalisation and the ambiguous-match rule; the type-agreement rule; the demographic rule; no
+  value in the audit or the report; `fill_field` refuses a field `read_form` didn't return; Submit can't be
+  pressed; a destination outside the list stops the run.
+
+## Settled after the builder check (designer's calls)
+
+- **Attach risk.** The Attach button is rated `modify`, so the `modify` cap and "Submit can't be pressed"
+  both still hold. `attach_file` is its own permission, and every use asks for Touch ID (like `deliver`).
+  Submit is the only `submit` element.
+- **CV path.** The bank holds the path, and it's treated like any answer: never logged or reported. At run
+  time it must be a regular file under the user's home, not a symlink. If it's missing, attach is skipped and
+  the final card says "attach your CV yourself".
+- **Fields never auto-filled**, whatever the bank says: secure text fields, and labels that normalise to
+  password, SSN or national ID, bank or card. They always go to the admin.
+- **Conditional fields.** After the fills, run `read_form` again. New fields go through matching, at most
+  3 passes, then whatever's left goes to the admin.
+- **Unsupported field types** (multi-select, date, other file fields, anything not text, choice or checkbox):
+  not filled, and listed on the final card as "fill in Chrome yourself". Admin cards support text and
+  single choice only. A field with a character limit gets a bank answer only if the answer fits; otherwise it
+  goes to the admin.
+- **Hidden, disabled or off-screen fields** are skipped; only fields inside the form region count. A form
+  split over several pages is out of scope for v1: the run fills page one and stops.
+- **The wait.** The run keeps its lock and the Chrome window for up to 15 min, then stops and reports. The
+  bank is read once at the start. "Save to my bank" entries are written when the run ends, with this form's
+  label added. Each save is audited as `bank_updated <key>`, without the value.
+- **New tab.** If Apply opens a new tab or window, the engine follows the focused window. A host off the
+  list stops the run and reports.
+- **CAPTCHA.** If the page shows one, a card asks the admin to solve it in Chrome and press Continue. It
+  never gets solved automatically.
+- **Form region.** The page schema gains a `form_region` element. `read_form` and `fill_field` only act
+  inside it. This adds to classify and policy, so it's planned as its own task.
+
+## Open items
+
+- Whether Greenhouse shows a CAPTCHA, and the real AX roles of its fields: from the first capture.
+- CV attach through the macOS open panel is the most fragile step; the fallback is above.
+- Some companies host Greenhouse on their own domain (an embedded form). v1 stops on any other host.
