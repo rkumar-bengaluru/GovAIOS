@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 import pytest
 
 from govaios import sandbox
+from govaios.desktop import Node
 
 
 @pytest.fixture(autouse=True)
@@ -101,3 +102,94 @@ def ui(monkeypatch):
         return _s(_code_post(port, _t(r), WORD.search(seen[0])[1])[2])
     return SimpleNamespace(raw=_raw, signed_out=_signed_out, signin_post=_signin_post, signin=signin, WORD=WORD,
                            code_post=_code_post, t=_t, s=_s)
+
+
+ACCT = "test@example.invalid"
+
+
+def N(role, name="", **kw):
+    return Node(role, name, **kw)
+
+
+def google_home():
+    return N("document", "Google", children=[
+        N("link", "Gmail"), N("popup_button", f"Google Account: Tester ({ACCT})")])
+
+
+def matches():
+    card = N("article", children=[N("link", "SECRET-TITLE"), N("link", "SECRET-CO Verified"),
+                                  N("link", "View job"), N("time", children=[N("text", "2d ago")])])
+    return N("document", "Your matches | Himalayas", children=[
+        N("heading", "Your matches"), N("banner"),
+        N("group", dom_id="job-search-results", children=[card])])
+
+
+def detail():
+    return N("document", "SECRET-CO hiring SECRET-TITLE | Himalayas", children=[
+        N("main", children=[N("heading", "SECRET-TITLE"), N("link", "SECRET-CO"),
+                            N("article", children=[N("text", "SECRET-DESCRIPTION")])]),
+        N("heading", "Apply now")])
+
+
+class FakeDesktop:
+    """Canned trees; records instead of sending input. Never touches the OS."""
+
+    def __init__(self, answers):
+        self.answers, self.calls, self.url, self.typed = list(answers), [], "about:blank", ""
+        FakeDesktop.current = self
+
+    def activate(self, app):
+        self.calls.append("activate")
+
+    def focused_window_id(self, app):
+        return "win1"
+
+    def pin_window(self, token):
+        self.calls.append(("pin", token))
+
+    def launch_application(self, app, profile=None):
+        self.calls.append("launch")
+
+    def press(self, key):
+        self.calls.append(key)
+        if key == "enter":
+            self.url = self.typed
+        elif key == "browser_back":
+            self.url = "https://himalayas.app/jobs/matches"
+
+    def type_text(self, t):
+        self.typed = t
+
+    def scroll_into_view(self, node):
+        self.calls.append("scroll")
+
+    # Form input primitives: record the target, never the text or path.
+    def type_into(self, node, text):
+        self.calls.append(("type_into", getattr(node, "dom_id", None) or node.name))
+
+    def focused_is(self, node):
+        return True
+
+    def raise_pinned(self):
+        self.calls.append("raise_pinned")
+
+    def menu_open(self):
+        return False
+
+    def choose_file(self, path):
+        self.calls.append(("choose_file",))
+
+    def click(self, node):
+        self.calls.append("click")
+        self.url = "https://himalayas.app/jobs/secret-title"
+
+    def current_url(self, app):
+        return self.url + ("?utm=x" if "himalayas" in self.url else "")
+
+    def window_title(self, app):
+        return "x"
+
+    def web_root(self, app):
+        if "google.com" in self.url:
+            return google_home()
+        return detail() if "/jobs/secret" in self.url else matches()

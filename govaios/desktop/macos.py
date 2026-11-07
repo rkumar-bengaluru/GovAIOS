@@ -9,7 +9,7 @@ from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
 from ApplicationServices import (
     AXIsProcessTrusted, AXUIElementCreateApplication, AXUIElementCopyAttributeValue,
     AXUIElementCopyElementAtPosition, AXUIElementCopyMultipleAttributeValues, AXUIElementCreateSystemWide,
-    AXUIElementGetPid, AXUIElementSetAttributeValue, AXValueGetValue, kAXValueCGPointType, kAXValueCGSizeType,
+    AXUIElementGetPid, AXUIElementPerformAction, AXUIElementSetAttributeValue, AXValueGetValue, kAXValueCGPointType, kAXValueCGSizeType,
 )
 from CoreFoundation import CFEqual
 
@@ -257,12 +257,10 @@ class MacDesktop:
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.
-        from ApplicationServices import AXUIElementPerformAction
         AXUIElementPerformAction(node.handle, "AXScrollToVisible")
         time.sleep(PACE["after_action"])
 
-    def press(self, logical_key):
-        pid = self._require_focus()
+    def _key(self, pid, logical_key):
         *mods, key = self.keys[logical_key]
         flags = 0
         for m in mods:
@@ -274,13 +272,90 @@ class MacDesktop:
             time.sleep(0.05)
         time.sleep(PACE["key"])
 
+    def _char(self, pid, ch):
+        for down in (True, False):
+            ev = Q.CGEventCreateKeyboardEvent(None, 0, down)
+            Q.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
+            Q.CGEventSetFlags(ev, 0)
+            Q.CGEventPostToPid(pid, ev)
+        time.sleep(PACE["char"])
+
+    def press(self, logical_key):
+        self._key(self._require_focus(), logical_key)
+
     def type_text(self, text):
         for ch in text:
-            pid = self._require_focus()   # per character: focus can move mid-word
-            for down in (True, False):
-                ev = Q.CGEventCreateKeyboardEvent(None, 0, down)
-                Q.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
-                Q.CGEventSetFlags(ev, 0)
-                Q.CGEventPostToPid(pid, ev)
-            time.sleep(PACE["char"])
+            self._char(self._require_focus(), ch)   # per character: focus can move mid-word
         time.sleep(PACE["after_action"])
+
+    def _focus_el(self):
+        return _attr(AXUIElementCreateApplication(self._target_pid()), "AXFocusedUIElement")
+
+    def focused_is(self, node):
+        el = self._focus_el()
+        return el is not None and bool(CFEqual(el, node.handle))
+
+    def type_into(self, node, text):
+        """type_text, but the field itself (not just the window) must keep focus before every character."""
+        for ch in text:
+            pid = self._require_focus()
+            if not self.focused_is(node):
+                raise InputRefused("input refused: focus left the field")
+            self._char(pid, ch)
+        time.sleep(PACE["after_action"])
+
+    def _ancestor(self, role, el=None):
+        """First element with AXRole `role` on the AXParent chain from the focused element (bounded)."""
+        el = self._focus_el() if el is None else el
+        for _ in range(40):
+            if el is None:
+                return None
+            if _attr(el, "AXRole") == role:
+                return el
+            el = _attr(el, "AXParent")
+        return None
+
+    def menu_open(self):
+        return self._ancestor("AXMenu") is not None
+
+    def _in_pinned_sheet(self):
+        sheet = self._ancestor("AXSheet")
+        return sheet is not None and _within(_attr(sheet, "AXParent"), self._window)
+
+    def raise_pinned(self):
+        AXUIElementPerformAction(self._window, "AXRaise")
+        pid = self._target_pid()
+        self._app(self._target).activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+        for _ in range(8):
+            time.sleep(0.25)
+            if self._focused()[0] == pid:
+                break
+        self._require_focus()
+
+    def choose_file(self, path):
+        """Drive the native open sheet: Go to Folder, the path, Enter. The sheet (child of the pinned window)
+        replaces the window check here; self._window stays as it is. The path is never put in a message."""
+        pid = self._target_pid()
+        for _ in range(20):
+            if self._in_pinned_sheet():
+                break
+            time.sleep(0.25)
+        else:
+            raise InputRefused("input refused: no file dialog")
+
+        def guard():
+            if auth.screen_locked():
+                raise Stop("screen_locked")
+            if not self._in_pinned_sheet():
+                raise InputRefused("input refused: file dialog is not focused")
+        guard()
+        self._key(pid, "go_to_folder")
+        for ch in path:
+            guard()
+            self._char(pid, ch)
+        guard()
+        self._key(pid, "enter")
+        time.sleep(1)
+        if self._in_pinned_sheet():   # still open: the Go to Folder field needed a second Enter
+            guard()
+            self._key(pid, "enter")
