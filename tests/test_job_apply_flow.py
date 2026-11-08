@@ -81,7 +81,7 @@ def test_existing_flow_digests_unchanged():
     text = raw[REPO / "flows" / "himalayas_job_vetting.yaml"].decode()
     assert "  app: SyncJobLens\n" in text and yaml.safe_load(text)["workflow"]["version"] == 3
     assert read_bound(REPO / "flows" / "morning_inbox_briefing.yaml", REPO / "pages")[0] == \
-        "a1dca44ed9e272377fe86987aca8bece3a1dcd7c4ef797e6ed40d4e8386ff4ae"
+        "f949509d8a962723981d11a16c1aae944a42dc4f73d7441d8eee3d6ff31abc8b"
 
 
 # ---------- end to end on fake trees ----------
@@ -425,7 +425,8 @@ def test_emergency_stop_inside_a_task_ends_the_run(tmp_path):
     (tmp_path / "STOPPED").unlink()
     e, tasks, err = run_apply(tmp_path, d)
     assert str(err) == "emergency stop" and [t["status"] for t in tasks] == ["stopped", "waiting"]
-    assert not any(x.get("action") == "task_stop" for x in e)
+    [ts] = [x for x in e if x.get("action") == "task_stop"]   # in job 1's log, and the run ended
+    assert (ts["item"], ts["outcome"], ts["reason"]) == (1, "run_stopped", "emergency stop") and e[-1]["kind"] == "stop"
 
 
 @pytest.mark.usefixtures("env")
@@ -462,4 +463,42 @@ def test_an_engine_error_inside_a_job_ends_the_run(tmp_path):
     tasks = json.loads((tmp_path / "apply" / "tasks.json").read_text())["tasks"]
     assert [t["status"] for t in tasks] == ["stopped", "waiting"] and tasks[0]["reason"] == "AttributeError"
     e = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
-    assert e[-1]["kind"] == "stop" and not any(x.get("action") == "task_stop" for x in e)
+    assert e[-1]["kind"] == "stop" and [x["outcome"] for x in e if x.get("action") == "task_stop"] == ["run_stopped"]
+
+
+@pytest.mark.usefixtures("env")
+def test_job_linking_straight_to_its_form_skips_himalayas(tmp_path):
+    d = ApplyDesk(GH, links={"Lead": GH})   # Beta's link is the Greenhouse form itself
+    e, tasks, err = run_apply(tmp_path, d)
+    assert err is None and [(t["status"], t["filled"]) for t in tasks] == [("done", 5), ("done", 5)]
+    beta = [x for x in e if x.get("item") == 2]
+    assert not any(x.get("step") == "apply" for x in beta)   # no Himalayas Apply now for that job
+    assert any(x.get("step") == "on_form" and x.get("kind") == "verify" for x in beta)
+
+
+def test_skip_to_must_be_a_later_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
+    r = Runner.__new__(Runner)
+    r.home, r.step, r.ctx = tmp_path, None, {}
+    r.do_x = lambda s: ("skip_to", "a")   # back to itself: never a loop
+    with pytest.raises(engine.Stop, match="no such later step"):
+        r.steps([{"id": "a", "action": "x"}, {"id": "b", "action": "x"}])
+
+
+@pytest.mark.usefixtures("env")
+def test_two_jobs_with_the_same_client_and_role_are_both_done(tmp_path, monkeypatch):
+    monkeypatch.setattr(__import__(__name__), "JOBS", [("Acme Test", "Lead", "Ready"), ("Acme Test", "Lead", "Ready")])
+    d = ApplyDesk(GH)
+    rows, root_of = [], d.web_root
+    def web_root(app):
+        d.last = root_of(app)
+        return d.last
+    orig = d.click
+    def click(node):
+        if d.url == JL and node.role == "link":   # which of the two equal rows was clicked (0 is the header)
+            table = next(n for n in d.last.walk() if n.role == "table")
+            rows.append(next(i for i, r in enumerate(table.children) if any(x is node for x in r.walk())))
+        orig(node)
+    d.web_root, d.click = web_root, click
+    e, tasks, err = run_apply(tmp_path, d)
+    assert err is None and [t["status"] for t in tasks] == ["done", "done"] and rows == [1, 2]

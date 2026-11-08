@@ -336,7 +336,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 text = f"{panel.name}, the {app} flow is complete, thank you."
             else:
                 why = r.stopped_reason or f"exit {r.code}"
-                tell(f"{app} stopped: {why}")
+                cap = getattr(r, "capture", None)
+                tell(f"{app} stopped: {why}" + (f" Saved page: captures/{cap}" if cap else ""))
                 text = f"{panel.name}, the {app} flow stopped: {why}."
             panel.voice = threading.Thread(target=panel.speak, args=(text,), daemon=True)
             panel.voice.start()
@@ -793,6 +794,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 name=panel.name, label=c["label"][:120], job=c["job"][:120] or "the job"),)).start()
         job = (f"<p class=m><a href='/apply/task/{c['item']}'>Job {c['item']}: {escape(c['job'][:200])}</a></p>"
                if c["job"] else "")
+        cap = c.get("capture")
+        if isinstance(cap, str) and re.fullmatch(r"[0-9-]{22}-[a-z0-9_]{1,64}\.json", cap):
+            job += f"<p class=m>Saved page: <code>captures/{cap}</code></p>"
         btns = " ".join(f"<button{' class=go' if i == 0 else ''} name=choice value={v}>{t}</button>"
                         for i, (v, t) in enumerate(buttons))
         return (f"<section class=appcard><h2>{title}</h2>{job}<p>{text.format(label=escape(c['label'][:300]))}</p>"

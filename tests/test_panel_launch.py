@@ -162,3 +162,12 @@ def test_runlaunch_inputs_is_third_positional(env):
         time.sleep(0.02)
     c = calls.read_text().splitlines()[0]
     assert 'GOVAIOS_RUN_INPUT={"job_url": "u"}' in c and "-a /Applications/gov-aios.app" in c
+
+
+@pytest.mark.parametrize("line, want", [("capture saved: captures/20261108-201918-912751-job_apply.json",
+                                         "20261108-201918-912751-job_apply.json"),
+                                        ("capture saved: captures/../../x.json", None)])
+def test_last_capture_name_kept(env, monkeypatch, line, want):
+    monkeypatch.setenv("FAKE_LINE", line)
+    r, _ = run(env)
+    assert r.capture == want

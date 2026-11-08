@@ -1,7 +1,7 @@
 """Capture on stop: the page as it was when a web run stopped, for the admin's debugging.
 
 Dev mode: NOT masked (names and values as on the page). shortcut: unmasked, add spec §5.3 masking before
-this leaves dev or feeds Studio. Files are 0600 under <data home>/captures/, never printed; only the last KEEP stay (a run can save several: one per read-back mismatch, then the stop).
+this leaves dev or feeds Studio. Files are 0600 under <data home>/captures/, never printed; only the last KEEP per flow stay (a run can save several: one per read-back mismatch, then the stop).
 """
 import hashlib
 import json
@@ -41,6 +41,7 @@ def save(home: Path, flow_id: str, step, reason: str, url: str, title: str, root
     fd = os.open(d / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
-    for old in sorted(p for p in d.iterdir() if p.suffix == ".json")[:-KEEP]:
+    # per flow: a long sandbox session never prunes a failed run's captures, nor the other way round
+    for old in sorted(p for p in d.iterdir() if p.name.endswith(f"-{flow_id}.json"))[:-KEEP]:
         old.unlink()
     return name, hashlib.sha256(data).hexdigest()

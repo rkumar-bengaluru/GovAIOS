@@ -35,6 +35,8 @@ workflow:
           action: classify_page
           on_match:
             himalayas_job_apply: continue
+            greenhouse_application: { skip_to: on_form }   # a job whose link goes straight to its form
+            lever_application: { skip_to: on_form }
             himalayas_logged_out: stop_and_request_user
             himalayas_job_logged_out: stop_and_request_user
             unknown: stop_and_report
