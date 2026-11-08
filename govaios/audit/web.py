@@ -867,7 +867,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         rows = "".join(
             f"<li>{escape(str(p.get('title') or p.get('url') or '')[:200])}: "
             + (f"{num(p, 'fields')} fields, {num(p, 'buttons')} buttons, {num(p, 'links')} links "
-               f"<code>{escape(str(p.get('file'))[:80])}</code>" if p.get("file") else escape(str(p.get("note") or "not captured")[:80]))
+               f"<code>{escape(str(p.get('file'))[:80])}</code>"
+               + (f" \u00b7 draft page <code>{escape(p['draft'][:80])}</code>, app <i>Check</i> in Drafts"
+                  if isinstance(p.get("draft"), str) else "") if p.get("file") else escape(str(p.get("note") or "not captured")[:80]))
             + "</li>" for p in sb["pages"][:50] if isinstance(p, dict))
         return f"<p>Captured so far:</p><ul>{rows}</ul>" if rows else ""
 

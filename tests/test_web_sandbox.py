@@ -87,7 +87,7 @@ def run_sandbox(tmp_path, desk, choices, monkeypatch, site=SITE, run_id="r1", fi
 def test_flow_is_read_only_with_a_site_input():
     wf = yaml.safe_load(FLOW.read_text())["workflow"]
     assert wf["app"] == "Web Sandbox" and wf["permissions"]["max_element_risk"] == "read"
-    assert set(wf["permissions"]["allow"]) == {"launch_application", "navigate", "read_page", "ask_admin"}
+    assert set(wf["permissions"]["allow"]) == {"launch_application", "navigate", "read_page", "ask_admin", "write_draft"}
     assert wf["destinations"] == ["https://www.google.com"] and wf["destination_inputs"] == ["site"]
     assert pages_used(wf) == {"google_home"}
 
@@ -147,3 +147,20 @@ def test_site_typed_with_case_and_default_port_still_matches(tmp_path, monkeypat
     assert err is None and "https://shop.example.com for the first time" in asked[0]
     [p] = applyfiles.read_json(tmp_path, applyfiles.SANDBOX)["pages"]
     assert p["file"] is not None
+
+
+def test_each_capture_writes_a_draft_page_and_check_app(tmp_path, monkeypatch):
+    from govaios.panel.apps import list_apps
+    d = SiteDesk(pages=[SITE])
+    e, err, asked = run_sandbox(tmp_path, d, ["capture", "done"], monkeypatch)
+    [p] = applyfiles.read_json(tmp_path, applyfiles.SANDBOX)["pages"]
+    pid = p["draft"]
+    assert pid == "shop_example_com_page_at_https_shop_example_com"
+    src = tmp_path / "src"
+    page = yaml.safe_load((src / "pages" / f"{pid}.yaml").read_text())["page"]
+    assert page["elements"]["button_go"] == {"role": "button", "name": "Go", "risk": "submit"}
+    apps = {a.id: a for a in list_apps(src / "flows", tmp_path)}
+    check = apps[f"check_{pid}"]
+    assert check.name.startswith("Check ") and not check.approved   # a Draft until the admin approves it
+    assert any(x.get("action") == "write_draft" and x.get("outcome") == "done" for x in e)
+    assert any(x.get("action") == "write_draft" and x.get("decision") == "allow" for x in e)

@@ -9,10 +9,10 @@ Design: `docs/superpowers/specs/2026-11-08-joblens-tasks-design.md`. Branch `fea
 3. Copy the changed and new flows and pages into the apps folder. Install never overwrites it, and the installed copies match `main` today, so nothing of yours is lost:
    ```
    A=~/Library/Application\ Support/GOV-AIOS/apps
-   cp flows/job_apply.yaml flows/himalayas_job_vetting.yaml flows/web_sandbox.yaml "$A/flows/"
+   cp flows/job_apply.yaml flows/himalayas_job_vetting.yaml flows/web_sandbox.yaml flows/morning_inbox_briefing.yaml "$A/flows/"
    cp pages/joblens_applications.yaml pages/joblens_job.yaml "$A/pages/"
    ```
-4. In the panel, approve the three Drafts: **JobLens**, **SyncJobLens** and **Web Sandbox**. Each file changed, so each needs approving once.
+4. In the panel, approve the four Drafts: **JobLens**, **SyncJobLens**, **Web Sandbox** and **Inbox Brief** (the morning brief's new short name). Each file changed, so each needs approving once.
 
 ## A. JobLens — one task per Ready job
 
@@ -40,7 +40,7 @@ If a job hits a site the flow doesn't know (Workable, a direct company page), on
 1. Type `/web-sandbox`, enter an https link to a site whose terms allow a personal agent, and run it.
 2. Touch ID asks once for the new site.
 3. A **Web sandbox** card appears. Browse in Chrome to a page, then press **Capture this page**. The card lists it with its counts of fields, buttons and links. Repeat for more pages, then press **Done**.
-4. Tell Claude which captures to turn into a flow. The files are in `captures/`.
+4. Each capture also makes a **draft page** and a **Check app**. Its line on the card says "draft page …, app Check in Drafts". To confirm the draft against the live site, approve the Check app in the panel's Drafts and run it. Then tell Claude which draft pages to link into a bigger flow. Design: `docs/superpowers/specs/2026-11-08-studio-drafts-design.md`.
 5. A page on another site (a login redirect, say) is listed as "another site: not captured".
 
 ## C. SyncJobLens

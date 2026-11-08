@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 from urllib.parse import urlsplit
 
-from . import auth, capture, runstate
+from . import auth, capture, runstate, studio
 from .agents import user_home
 from .applyfiles import ASK, BANK, CARDS, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
@@ -567,7 +567,15 @@ class Runner:
                         return
                     continue
                 name = self._capture("sandbox", root, {"sandbox": True})
-                pages.append({"title": root.name[:200], "url": url_for_audit(url), "file": name,
+                draft = None
+                if name and "write_draft" in self.flow["permissions"]["allow"]:   # a draft page + its Check app
+                    self.gate("write_draft", "modify", target=name)
+                    try:
+                        draft = self._act("write_draft", studio.write_draft, self.flow_path.parent, self.pages_dir,
+                                          capture.tree(root), url, self.flow["browser"], name, target=name)
+                    except OSError:
+                        draft = None   # audited as an error; the capture itself is kept
+                pages.append({"title": root.name[:200], "url": url_for_audit(url), "file": name, "draft": draft,
                               "fields": sum(n.role in FIELD_ROLES for n in root.walk()),
                               "buttons": sum(n.role == "button" for n in root.walk()),
                               "links": sum(n.role == "link" for n in root.walk())})
