@@ -18,9 +18,22 @@ then later build a bigger flow (an app) by linking those draft pages.
 
 Checked on the admin's four real captures (Greenhouse ×3, Google): each draft identified its own capture, and every element resolved to exactly one node.
 
+## Composing a bigger app (built 2026-11-09, branch `feat/studio-compose`)
+
+The panel has a **Studio** page (rail link). It lists the draft pages that have a Check app, each with its start URL and whether its Check app is approved. Below the list, **Compose an app** takes a name and up to 10 steps, each picked from a list:
+- **Open `<page>`**: step 1 opens the page's URL; a later Open waits for the page a click led to;
+- **Click `<element>` on `<page>`**: only links and buttons rated read, navigate or modify are offered. A submit-rated click is never offered, and the core refuses it too;
+- **Fill the form on `<page>`**: from the answer bank, with fix cards for failed fields. A draft page has no `form_region`, so the whole page is the form;
+- **Hand over**: you check and submit in Chrome, then press Next.
+
+**Save as a Draft app** writes `apps/flows/studio_<name>.yaml` (exclusive, never replacing an app) and audits a `setting` / `studio_compose` entry. The flow's permissions are only what its steps need; its destinations are Google plus each opened page's site; its element ceiling is the highest-rated click. It runs only after you approve it, and that approval binds every draft page it uses.
+
+The core, `studio.catalogue()` + `studio.compose()` + `studio.write_composed()`, is UI-free, so a CLI or an LLM writer can use it later and get the same checks.
+
 ## Not built yet (next steps)
 
-- **Composing a bigger flow from the panel**: pick draft pages in order, choose a step for each (fill this form, click this button, wait for this page), and preview the flow YAML. Today Claude writes the bigger flow by hand from the draft pages.
+- **Repeated items** (lists, rows, cards: "for each job") in composed apps.
+- **A preview** of the composed YAML before saving, and editing a composed app in Studio.
 - **Lowering button risks** where it's safe: a reviewed Next or Continue becomes navigate.
 - **Masking captures** (spec §5.3, with the form amendment) before Studio leaves dev mode.
 - Page `fields:` for repeated items (job cards, rows) are not drafted. Claude adds them when a list page is linked.

@@ -689,6 +689,8 @@ class Runner:
         root = self.snapshot()
         if not identify(self.pages[page], root):
             raise Stop("left the form page")
+        if "form_region" not in self.pages[page]["elements"]:   # a Studio draft page: the whole page is the form
+            return root, root
         return root, self.element(f"{page}.form_region", root)[0]
 
     def _node(self, region, f, value):

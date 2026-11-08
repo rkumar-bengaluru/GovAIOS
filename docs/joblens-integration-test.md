@@ -43,6 +43,12 @@ If a job hits a site the flow doesn't know (Workable, a direct company page), on
 4. Each capture also makes a **draft page** and a **Check app**. Its line on the card says "draft page …, app Check in Drafts". To confirm the draft against the live site, approve the Check app in the panel's Drafts and run it. Then tell Claude which draft pages to link into a bigger flow. Design: `docs/superpowers/specs/2026-11-08-studio-drafts-design.md`.
 5. A page on another site (a login redirect, say) is listed as "another site: not captured".
 
+## B2. Studio compose
+
+1. Capture two or more pages in the Web Sandbox (B), then open **Studio** in the panel rail.
+2. Compose an app, for example: Open page 1, Click a link on page 1, Open page 2, Fill the form on page 2, Hand over. Then press **Save as a Draft app**.
+3. Approve it in Drafts and run it. Expected: it follows your steps and never clicks a submit-rated button.
+
 ## C. SyncJobLens
 
 Type `/syncjoblens`: the same Himalayas → JobLens sync as before, under its new name.

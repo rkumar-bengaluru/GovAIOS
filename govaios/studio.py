@@ -8,6 +8,7 @@ Risks are conservative: every button is submit until the admin or Claude lowers 
 """
 import re
 from datetime import date
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml
@@ -131,3 +132,108 @@ def write_draft(flows_dir, pages_dir, tree, url, browser, capture_name):
         (pages_dir / f"{pid}.yaml").unlink()
         raise OSError("draft flow exists")
     return pid
+
+
+# ---------- composing a bigger flow from draft pages ----------
+
+MAX_STEPS = 20
+CLICKABLE = ("read", "navigate", "modify")   # submit-rated elements stay the admin's: never composed into a click
+
+
+def catalogue(flows_dir, pages_dir):
+    """Draft pages ready to compose with: each has its Check app (the start URL and browser). {page id: info}."""
+    out = {}
+    for f in sorted(Path(flows_dir).glob("check_*.yaml")):
+        try:
+            wf = yaml.safe_load(f.read_text())["workflow"]
+            pid = wf["id"].removeprefix("check_")
+            url = next(s["value"] for s in wf["steps"] if s["id"] == "open_page")
+            page = yaml.safe_load((Path(pages_dir) / f"{pid}.yaml").read_text())["page"]
+        except Exception:   # unreadable or not a Check app: not offered
+            continue
+        out[pid] = {"url": url, "browser": wf["browser"], "title": wf.get("app", pid).removeprefix("Check "),
+                    "elements": {k: (s.get("role"), s.get("name") or s.get("dom_id") or k, s.get("risk"))
+                                 for k, s in page["elements"].items()}}
+    return out
+
+
+def compose(app, steps, cat):
+    """A draft flow from steps over draft pages, or ValueError naming what is wrong. Steps:
+    open:<page>  (the first opens its URL; later ones wait for a page a click led to)
+    click:<page>.<element>  (on the page last opened; never a submit-rated element)
+    fill:<page>  (fill its form from the answer bank, fix cards on failures)
+    review  (hand over: the admin checks and submits in Chrome, then Next)"""
+    name = " ".join(str(app).split())[:40]
+    fid = "studio_" + _slug(name, 40)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]*", name) or fid == "studio_":
+        raise ValueError("give the app a name (letters, digits, spaces)")
+    steps = [s for s in steps if s]
+    if not steps or not 1 <= len(steps) <= MAX_STEPS:
+        raise ValueError(f"between 1 and {MAX_STEPS} steps")
+    out, here, allow, risks, origins, browser = [], None, {"launch_application", "navigate", "read_page"}, [], [], None
+    for i, s in enumerate(steps, 1):
+        kind, _, arg = s.partition(":")
+        pid, _, el = arg.partition(".")
+        if kind in ("open", "click", "fill") and pid not in cat:
+            raise ValueError(f"step {i}: no draft page {pid!r}")
+        if kind == "open":
+            info = cat[pid]
+            if i == 1:
+                browser = info["browser"]
+                out.append({"id": "open_start", "action": "navigate", "value": info["url"]})
+            if (o := _origin(info["url"])) not in origins:
+                origins.append(o)
+            out.append({"id": f"s{i}_on_{pid}"[:64], "action": "classify_page",
+                        "on_match": {pid: "continue", "unknown": "stop_and_report"}})
+            here = pid
+        elif i == 1:
+            raise ValueError("step 1 must open a page")
+        elif kind in ("click", "fill") and pid != here:
+            raise ValueError(f"step {i}: open {pid} first (the run is on {here})")
+        elif kind == "click":
+            spec = cat[pid]["elements"].get(el)
+            if spec is None:
+                raise ValueError(f"step {i}: {pid} has no element {el!r}")
+            if spec[2] not in CLICKABLE:
+                raise ValueError(f"step {i}: {el} is rated {spec[2]}: that click stays yours")
+            out.append({"id": f"s{i}_click_{el}"[:64], "action": "click", "target": f"{pid}.{el}"})
+            allow.add("click")
+            risks.append(spec[2])
+        elif kind == "fill":
+            out.append({"id": f"s{i}_fill"[:64], "action": "fill_form"})
+            allow |= {"fill_field", "ask_admin"}
+        elif kind == "review":
+            out.append({"id": f"s{i}_review", "action": "hand_over"})
+            allow.add("ask_admin")
+        else:
+            raise ValueError(f"step {i}: unknown step {s!r}")
+    order = ["read", "navigate", "modify"]
+    return {"workflow": {
+        "id": fid, "app": name, "name": f"{name} (composed in Studio from draft pages)", "version": 1,
+        "site_terms": {"reviewed": date.today().isoformat(),
+                       "basis": "Composed in Studio from Web Sandbox drafts: the admin checked each site's terms"},
+        "browser": dict(browser),
+        "permissions": {"allow": sorted(allow), "max_element_risk": max(risks or ["navigate"], key=order.index)},
+        "destinations": ["https://www.google.com", *origins],
+        "steps": [
+            {"id": "launch_chrome", "action": "launch_application"},
+            {"id": "open_google", "action": "navigate", "value": "https://www.google.com"},
+            {"id": "on_google", "action": "classify_page", "on_match": {"google_home": "continue", "unknown": "stop_and_report"}},
+            {"id": "verify_account", "action": "verify_account", "target": "google_home.account_button"},
+            *out]}}
+
+
+def _origin(url):
+    u = urlsplit(url)
+    return f"{u.scheme}://{u.netloc}"
+
+
+def write_composed(flows_dir, flow):
+    """Save a composed flow as a Draft app (exclusive: an existing app of that name is never replaced)."""
+    if Path(flows_dir).is_symlink():
+        raise OSError("apps folder is a symlink")
+    text = (f"# Composed in Studio {date.today().isoformat()}. A Draft: it runs only after you approve it.\n"
+            + yaml.safe_dump(flow, sort_keys=False, allow_unicode=True))
+    if not _create(Path(flows_dir) / f"{flow['workflow']['id']}.yaml", text.encode()):
+        raise OSError("an app with that name exists")
+    return flow["workflow"]["id"]

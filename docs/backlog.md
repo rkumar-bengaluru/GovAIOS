@@ -35,7 +35,7 @@ Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-task
 - **Web Sandbox** built 2026-11-08 (`flows/web_sandbox.yaml`): open any https site (Touch ID on first contact), capture
   the pages the admin chooses, read only. Since night 2 (branch `feat/studio-drafts`) each capture also writes a draft
   page + a read-only Check app as Drafts (`docs/superpowers/specs/2026-11-08-studio-drafts-design.md`). Still open:
-  composing a bigger flow from draft pages on the panel (Claude writes it by hand now), lowering reviewed button risks,
+  repeated items and a YAML preview in Studio compose (compose itself built 2026-11-09, panel /studio), lowering reviewed button risks,
   masking before non-dev use, the terms gate (Plan 3).
 - **Capture on stop** — dev version built 2026-11-08 (branch `feat/capture-on-stop`): unmasked, in the run,
   `captures/` keeps the last 10. Still open: masking before non-dev/Studio use, the panel showing the reason,
