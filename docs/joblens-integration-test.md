@@ -48,6 +48,7 @@ If a job hits a site the flow doesn't know (Workable, a direct company page), on
 1. Capture two or more pages in the Web Sandbox (B), then open **Studio** in the panel rail.
 2. Compose an app, for example: Open page 1, Click a link on page 1, Open page 2, Fill the form on page 2, Hand over. Then press **Save as a Draft app**.
 3. Approve it in Drafts and run it. Expected: it follows your steps and never clicks a submit-rated button.
+4. **For each**: capture a list page (Himalayas matches, say). Its line on the Studio page should offer "For each item in items_1 on …". Compose: Open list → For each item → Click the item → Open the detail page → Hand over → End of for each. Expected: one task and one tab per item.
 
 ## C. SyncJobLens
 

@@ -30,9 +30,20 @@ The panel has a **Studio** page (rail link). It lists the draft pages that have 
 
 The core, `studio.catalogue()` + `studio.compose()` + `studio.write_composed()`, is UI-free, so a CLI or an LLM writer can use it later and get the same checks.
 
+## Repeated items: "for each" (built 2026-11-09)
+
+- **Detection** (`studio._repeats`, `_add_items`): 3 or more sibling nodes with the same shape (their role, and the set of roles inside them) that each hold a named link, such as cards, table rows or result items. The draft page gets a `list_<n>` container and an `items_<n>` element: `{role, has: {role: link}, within: list_<n>, direct: true, fields: {link, label}}`.
+  - The element is kept only if it finds exactly those items: no header row, no nav links, no inner groups.
+  - The engine gained `has` (a descendant matching a spec) and `direct` (only the scope's own children).
+- **Compose** steps:
+  - `For each item in <items> on <page>`: up to 10 items, each its own panel task in its own new tab, as JobLens jobs are;
+  - `Click the item`: its link;
+  - `End of for each`.
+  The steps in between run once per item: typically Click the item, Open the next page, Fill, Hand over. One loop at a time.
+- Checked on the admin's 8 real captures (Greenhouse forms, Google): no list was invented. Detection on a real list page (Himalayas matches, JobLens) is not yet checked live.
+
 ## Not built yet (next steps)
 
-- **Repeated items** (lists, rows, cards: "for each job") in composed apps.
 - **A preview** of the composed YAML before saving, and editing a composed app in Studio.
 - **Lowering button risks** where it's safe: a reviewed Next or Continue becomes navigate.
 - **Masking captures** (spec §5.3, with the form amendment) before Studio leaves dev mode.

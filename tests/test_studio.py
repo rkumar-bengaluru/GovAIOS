@@ -202,3 +202,113 @@ def test_write_composed_never_replaces_an_app(tmp_path):
     studio.write_composed(flows, flow)
     with pytest.raises(OSError, match="exists"):
         studio.write_composed(flows, flow)
+
+
+# ---------- repeated items (for each) ----------
+def card(title, company):
+    return {"role": "group", "children": [{"role": "group", "children": [{"role": "link", "name": title}]},
+                                          {"role": "text", "value": company}]}
+
+
+LIST = {"role": "document", "name": "Roles | Acme", "children": [
+    {"role": "heading", "name": "Roles"},
+    {"role": "navigation", "children": [{"role": "link", "name": "Home"}, {"role": "link", "name": "About"}]},
+    {"role": "group", "dom_id": "results", "children": [
+        {"role": "heading", "name": "4 roles"}, card("Lead", "Acme"), card("Dev", "Acme"), card("QA", "Beta"),
+        card("Ops", "Beta")]}]}
+TABLE = {"role": "document", "name": "Applications", "children": [{"role": "heading", "name": "Applications"}, {
+    "role": "table", "children": [
+        {"role": "row", "children": [{"role": "cell", "children": [{"role": "text", "value": h}]} for h in ("Client", "Role")]},
+        *({"role": "row", "children": [{"role": "cell", "children": [{"role": "text", "value": c}]},
+                                       {"role": "cell", "children": [{"role": "link", "name": r}]}]}
+          for c, r in (("Acme", "Lead"), ("Beta", "Dev"), ("Gamma", "QA")))]}]}
+
+
+@pytest.mark.parametrize("tree, want", [(LIST, ["Lead", "Dev", "QA", "Ops"]), (TABLE, ["Lead", "Dev", "QA"])])
+def test_repeated_items_detected_exactly(tree, want):
+    page = studio.draft_page(tree, "p")["page"]
+    items = page["elements"]["items_1"]
+    assert items["direct"] and items["has"] == {"role": "link"} and items["fields"]["link"]["risk"] == "navigate"
+    found = engine.find_all(node(tree), items, page)
+    assert [engine.find_all(f, items["fields"]["link"], page)[0].name for f in found] == want   # no header, no nav
+    assert "items_1" not in page["identification"]["anchors"]
+
+
+def test_two_similar_cards_are_not_a_list():
+    t = {"role": "document", "name": "x", "children": [card("A", "a"), card("B", "b")]}
+    assert not any(k.startswith("items_") for k in studio.draft_page(t, "p")["page"]["elements"])
+
+
+def each_dirs(tmp_path):
+    flows, pages = tmp_path / "apps" / "flows", tmp_path / "apps" / "pages"
+    flows.mkdir(parents=True), pages.mkdir()
+    (pages / "google_home.yaml").write_bytes((engine.REPO / "pages" / "google_home.yaml").read_bytes())
+    b = {**BROWSER, "account": ACCT}
+    lst = studio.write_draft(flows, pages, LIST, "https://acme.example/roles", b, "c1.json")
+    form = studio.write_draft(flows, pages, FORM, "https://apply.acme.example/form", b, "c2.json")
+    return flows, pages, lst, form
+
+
+@pytest.mark.parametrize("steps, why", [
+    (["open:L", "click_item"], "only inside a for each"),
+    (["open:L", "end_each"], "no for each to end"),
+    (["open:L", "each:L.items_1", "each:L.items_1"], "end the first for each"),
+    (["open:L", "each:L.nothing"], "no repeated items 'nothing'"),
+    (["open:F", "each:L.items_1"], "open L first"),
+    (["open:L", "click_item:x"], "unknown step"),
+])
+def test_compose_each_refuses(tmp_path, steps, why):
+    flows, pages, lst, form = each_dirs(tmp_path)
+    steps = [s.replace("L", lst).replace("F", form) if s.startswith(("open", "each")) else s for s in steps]
+    with pytest.raises(ValueError, match=why.replace("L", lst)):
+        studio.compose("Acme", steps, studio.catalogue(flows, pages))
+
+
+class EachDesk(AcmeDesk):
+    def __init__(self):
+        super().__init__()
+        self.clicked, self.filled = [], []
+
+    def press(self, key):
+        super().press(key)
+        if key == "new_tab":
+            self.url, self.values = "chrome://newtab/", {}
+
+    def click(self, node):
+        self.calls.append(("click", node.name))
+        if node.role == "link" and self.url == "https://acme.example/roles":
+            self.clicked.append(node.name)
+            self.url = "https://apply.acme.example/form"
+
+    def type_into(self, node, text):
+        super().type_into(node, text)
+        self.filled.append(self.clicked[-1])
+
+
+def test_composed_for_each_runs_once_per_item(tmp_path, monkeypatch):
+    flows, pages, lst, form = each_dirs(tmp_path)
+    flow = studio.compose("Acme roles", [f"open:{lst}", f"each:{lst}.items_1", "click_item", f"open:{form}",
+                                         f"fill:{form}", "review", "end_each"], studio.catalogue(flows, pages))
+    studio.write_composed(flows, flow)
+    monkeypatch.setattr(engine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
+    monkeypatch.setattr(engine, "user_home", lambda: tmp_path)
+    (tmp_path / "apply").mkdir(mode=0o700)
+    (tmp_path / "apply" / "answers.yaml").write_text(json.dumps({"answers": [
+        {"key": "email", "labels": ["Email"], "answer": "a@example.invalid"}]}))
+    d = EachDesk()
+
+    def root(app):
+        if d.url == "https://acme.example/roles":
+            return node(LIST)
+        return _acme_root(d)
+    d.web_root = root
+    r = engine.Runner(flows / "studio_acme_roles.yaml", d, tmp_path)
+    r.approvals.approve_flow(r.flow["id"], r.digest)
+    for o in r.flow["destinations"]:
+        r.approvals.approve_destination(r.flow["id"], o)
+    r.run()
+    assert d.clicked == ["Lead", "Dev", "QA", "Ops"] and d.filled == d.clicked and d.calls.count("new_tab") == 4
+    e = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert e[-1]["kind"] == "flow_end" and {x.get("item") for x in e if (x.get("step") or "").endswith("_fill")} == {1, 2, 3, 4}

@@ -1139,6 +1139,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return _page(f"<h1>Marketplace</h1><p>Templates that ship with GOV-AIOS. Setting one up makes a draft app; "
                      f"it runs only after you approve it with Touch ID.</p>{nodir}{''.join(cards)}", here="/market")
 
+    STEPS = 12   # step rows on the compose form
+
     def studio_page(csrf):
         """Draft pages from the Web Sandbox, and composing a bigger app from them (saved as a Draft)."""
         cat = studio.catalogue(flows_dir, flows_dir.parent / "pages") if flows_dir else {}
@@ -1151,15 +1153,21 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         for pid, info in cat.items():
             opts.append(f"<option value='open:{escape(pid)}'>Open {escape(pid)}</option>")
             opts.append(f"<option value='fill:{escape(pid)}'>Fill the form on {escape(pid)}</option>")
+            for el in info.get("items", {}):
+                opts.append(f"<option value='each:{escape(pid)}.{escape(el)}'>For each item in {escape(el)} on "
+                            f"{escape(pid)}</option>")
             for el, (role, label, risk) in info["elements"].items():
                 if role in ("button", "link") and risk in studio.CLICKABLE:
                     opts.append(f"<option value='click:{escape(pid)}.{escape(el)}'>Click {escape(str(label)[:60])} "
                                 f"on {escape(pid)}</option>")
+        opts.append("<option value=click_item>Click the item (inside a for each)</option>")
+        opts.append("<option value=end_each>End of for each</option>")
         opts.append("<option value=review>Hand over: you check and submit in Chrome</option>")
-        sel = "".join(f"<label>Step {i}<select name=s{i}>{''.join(opts)}</select></label>" for i in range(1, 11))
+        sel = "".join(f"<label>Step {i}<select name=s{i}>{''.join(opts)}</select></label>" for i in range(1, STEPS + 1))
         form = (f"<section class=appcard><h2>Compose an app</h2><p class=m>Steps run in order. Step 1 opens a page; "
-                f"later Opens wait for the page a click led to. Buttons rated submit are never offered: those clicks stay "
-                f"yours.</p><form method=post action=/studio/compose>{hidden(csrf)}<label>App name <input name=app "
+                f"later Opens wait for the page a click led to. For each runs the steps up to End of for each once per "
+                f"item (up to 10), each its own task and tab. Buttons rated submit are never offered: those clicks "
+                f"stay yours.</p><form method=post action=/studio/compose>{hidden(csrf)}<label>App name <input name=app "
                 f"maxlength=40 required></label>{sel}<button class=go>Save as a Draft app</button></form></section>"
                 if cat else "<p class=note>No draft pages yet. Capture pages with the Web Sandbox first.</p>")
         return _page(f"<h1>Studio</h1><p>Pages you captured in the Web Sandbox become draft pages. Run a page's Check app "
@@ -1171,7 +1179,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return None
         cat = studio.catalogue(flows_dir, flows_dir.parent / "pages")
         try:
-            flow = studio.compose(f.get("app", ""), [f.get(f"s{i}", "") for i in range(1, 11)], cat)
+            flow = studio.compose(f.get("app", ""), [f.get(f"s{i}", "") for i in range(1, STEPS + 1)], cat)
             fid = studio.write_composed(flows_dir, flow)
         except (ValueError, OSError) as e:
             tell(f"Studio: {e}.")

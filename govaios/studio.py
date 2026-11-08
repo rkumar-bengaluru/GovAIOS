@@ -77,12 +77,66 @@ def draft_page(tree, page_id):
             add("button " + n["name"], spec_for(n, risk="submit"))
     for n in [n for n in nodes if n["role"] == "link" and n.get("name") and len(n["name"]) <= 120][:MAX_LINKS]:
         add("link " + n["name"], spec_for(n, risk="navigate"))
+    _add_items(tree, nodes, elements, add)
     title = tree.get("name") or ""
     ident = {"title_matches": f"^{re.escape(title)}$" if title else "."}
-    anchors = [a for a in anchors if a][:2] or list(elements)[:1]
+    anchors = [a for a in anchors if a and "fields" not in elements[a]][:2] or [
+        k for k in elements if "fields" not in elements[k]][:1]
     if anchors:
         ident["anchors"] = anchors
     return {"page": {"id": page_id, "identification": ident, "elements": elements}}
+
+
+def _repeats(nodes):
+    """(parent, items): 3+ sibling nodes with the same shape (role and the roles inside) that each hold a named
+    link: job cards, table rows, result items. Largest first, at most 3 groups."""
+    out = []
+    for p in nodes:
+        groups = {}
+        for c in p.get("children", []):
+            inside = list(_walk(c))
+            if any(d["role"] == "link" and d.get("name") for d in inside[1:]):
+                groups.setdefault((c["role"], frozenset(d["role"] for d in inside[1:])), []).append(c)
+        best = max(groups.values(), key=len, default=[])
+        if len(best) >= 3:
+            out.append((p, best))
+    return sorted(out, key=lambda g: -len(g[1]))[:3]
+
+
+def _add_items(tree, nodes, elements, add):
+    """A repeated-item element for each group, only when its spec finds exactly that group's items."""
+    from . import engine   # engine imports studio
+    from .desktop import Node
+    made = {}
+
+    def node(d):
+        n = Node(d["role"], d.get("name", ""), d.get("value", ""), d.get("dom_id", ""), tuple(d.get("dom_class", [])),
+                 [node(c) for c in d.get("children", [])])
+        made[id(d)] = n
+        return n
+    root = node(tree)
+    for n, (parent, items) in enumerate(_repeats(nodes), 1):
+        same = [m for m in nodes if m["role"] == parent["role"] and _id(m) == _id(parent)
+                and (_id(parent) or (m.get("name") or "") == (parent.get("name") or ""))]
+        cont = {"role": parent["role"], **({"dom_id": _id(parent)} if _id(parent) else {"name": parent.get("name") or ""}),
+                "risk": "read"}
+        if len(same) > 1:
+            cont["index"] = next(i for i, m in enumerate(same) if m is parent)
+        fields = {"link": {"role": "link", "index": 0, "risk": "navigate"}}
+        if all(any(d["role"] == "text" and (d.get("value") or d.get("name")) for d in _walk(c)) for c in items):
+            fields["label"] = {"role": "text", "index": 0, "risk": "read"}
+        trial = dict(elements)
+        ck = f"list_{n}"
+        trial[ck] = cont
+        if ck in elements:
+            continue
+        spec = {"role": items[0]["role"], "has": {"role": "link"}, "within": ck, "direct": True, "risk": "read",
+                "fields": fields}
+        found = engine.find_all(root, spec, {"elements": trial})
+        if [id(x) for x in found] != [id(made[id(c)]) for c in items]:
+            continue   # the spec would also catch other nodes (or miss some): not offered
+        add(ck, cont)
+        add(f"items_{n}", spec)
 
 
 def draft_check_flow(page_id, url, browser, title):
@@ -153,7 +207,9 @@ def catalogue(flows_dir, pages_dir):
             continue
         out[pid] = {"url": url, "browser": wf["browser"], "title": wf.get("app", pid).removeprefix("Check "),
                     "elements": {k: (s.get("role"), s.get("name") or s.get("dom_id") or k, s.get("risk"))
-                                 for k, s in page["elements"].items()}}
+                                 for k, s in page["elements"].items() if "fields" not in s},
+                    "items": {k: dict(s["fields"]) for k, s in page["elements"].items()
+                              if isinstance(s.get("fields"), dict) and "link" in s["fields"]}}
     return out
 
 
@@ -162,7 +218,11 @@ def compose(app, steps, cat):
     open:<page>  (the first opens its URL; later ones wait for a page a click led to)
     click:<page>.<element>  (on the page last opened; never a submit-rated element)
     fill:<page>  (fill its form from the answer bank, fix cards on failures)
-    review  (hand over: the admin checks and submits in Chrome, then Next)"""
+    review  (hand over: the admin checks and submits in Chrome, then Next)
+    each:<page>.<items>  (for each repeated item on the page last opened, up to 10: one panel task per item,
+                          each in its own tab; the steps up to end_each run per item)
+    click_item  (inside each: click the item's link)
+    end_each"""
     name = " ".join(str(app).split())[:40]
     fid = "studio_" + _slug(name, 40)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]*", name) or fid == "studio_":
@@ -171,11 +231,14 @@ def compose(app, steps, cat):
     if not steps or not 1 <= len(steps) <= MAX_STEPS:
         raise ValueError(f"between 1 and {MAX_STEPS} steps")
     out, here, allow, risks, origins, browser = [], None, {"launch_application", "navigate", "read_page"}, [], [], None
+    top, loop = out, None
     for i, s in enumerate(steps, 1):
         kind, _, arg = s.partition(":")
         pid, _, el = arg.partition(".")
-        if kind in ("open", "click", "fill") and pid not in cat:
+        if kind in ("open", "click", "fill", "each") and pid not in cat:
             raise ValueError(f"step {i}: no draft page {pid!r}")
+        if kind in ("click_item", "end_each", "review") and arg:
+            raise ValueError(f"step {i}: unknown step {s!r}")
         if kind == "open":
             info = cat[pid]
             if i == 1:
@@ -205,6 +268,32 @@ def compose(app, steps, cat):
         elif kind == "review":
             out.append({"id": f"s{i}_review", "action": "hand_over"})
             allow.add("ask_admin")
+        elif kind == "each":
+            if loop is not None:
+                raise ValueError(f"step {i}: end the first for each before another")
+            if pid != here:
+                raise ValueError(f"step {i}: open {pid} first (the run is on {here})")
+            if el not in cat[pid]["items"]:
+                raise ValueError(f"step {i}: {pid} has no repeated items {el!r}")
+            inner = [{"id": f"s{i}_tab", "action": "new_tab"},   # each item in its own tab, its form kept as left
+                     {"id": f"s{i}_list", "action": "navigate", "value": cat[pid]["url"]},
+                     {"id": f"s{i}_on_list", "action": "classify_page",
+                      "on_match": {pid: "continue", "unknown": "stop_and_report"}}]
+            out.append({"id": f"s{i}_pick", "action": "select_items", "target": f"{pid}.{el}", "count": 10,
+                        "none": "no items on the page"})
+            out.append({"id": f"s{i}_each", "action": "for_each_item", "task_title": ["link"], "steps": inner})
+            out, loop = inner, pid
+        elif kind == "click_item":
+            if loop is None or here != loop:
+                raise ValueError(f"step {i}: click the item only inside a for each, on its list page")
+            out.append({"id": f"s{i}_click_item", "action": "click", "target": "current_item.link"})
+            allow.add("click")
+            risks.append("navigate")
+            here = None   # until the next Open says where the click led
+        elif kind == "end_each":
+            if loop is None:
+                raise ValueError(f"step {i}: no for each to end")
+            out, loop, here = top, None, None
         else:
             raise ValueError(f"step {i}: unknown step {s!r}")
     order = ["read", "navigate", "modify"]
