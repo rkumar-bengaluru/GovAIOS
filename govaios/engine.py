@@ -359,6 +359,10 @@ class Runner:
                 self.gate("read_page", "read", destination=url)      # landed origin must be declared
                 self.ctx["page"] = page
                 return
+            if isinstance(what, dict):                   # an interstitial (a popup): click past it once, look again
+                candidates.remove(page)
+                self.do_click({"id": self.step, "target": f"{page}.{what['click']}"})
+                continue
             if what == "stop_and_report":
                 raise Stop("unexpected page")
             # stop_and_request_user (Rule 6)

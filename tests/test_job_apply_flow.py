@@ -16,7 +16,7 @@ JOB = "https://himalayas.app/companies/acme-test/jobs/staff-engineer"
 GH = "https://job-boards.greenhouse.io/acmetest/jobs/1234567"
 LV = "https://jobs.lever.co/acmetest/0000-1111/apply"
 DESTS = ["https://www.google.com", "https://himalayas.app", "https://job-boards.greenhouse.io", "https://jobs.lever.co"]
-NEW_PAGES = ("himalayas_job_apply", "himalayas_job_logged_out", "greenhouse_application", "lever_application")
+NEW_PAGES = ("himalayas_job_apply", "himalayas_apply_prompt", "himalayas_job_logged_out", "greenhouse_application", "lever_application")
 CV = "Resume-Test.pdf"
 SECRET = "SECRET-NOTICE"   # an answer value: must never reach the audit log or output
 
@@ -32,7 +32,7 @@ def submit_elements():
 def test_flow_loads_and_binds_pages():
     digest, raw = read_bound(FLOW, REPO / "pages")
     wf = yaml.safe_load(raw[FLOW])["workflow"]
-    assert pages_used(wf) == {"google_home", "himalayas_job_apply", "himalayas_logged_out", "himalayas_job_logged_out",
+    assert pages_used(wf) == {"google_home", "himalayas_job_apply", "himalayas_apply_prompt", "himalayas_logged_out", "himalayas_job_logged_out",
                               "greenhouse_application", "lever_application"}
     assert (wf["id"], wf["app"], wf["permissions"]["max_element_risk"], wf["destinations"]) == \
         ("job_apply", "Job Apply", "modify", DESTS)
@@ -49,7 +49,8 @@ def test_submit_buttons_denied(pid, el, tmp_path):
 def test_submit_elements_are_the_expected_ones():
     assert set(submit_elements()) == {
         ("himalayas_job_apply", "save_link"), ("himalayas_job_apply", "save_button"),
-        ("himalayas_job_apply", "job_expired"), ("greenhouse_application", "submit"),
+        ("himalayas_job_apply", "job_expired"), ("himalayas_apply_prompt", "ai_cover_letter"),
+        ("himalayas_apply_prompt", "ai_resume"), ("greenhouse_application", "submit"),
         ("greenhouse_application", "autofill"), ("lever_application", "submit"), ("lever_application", "linkedin")}
 
 
@@ -94,11 +95,19 @@ def test_submit_guard_covers_himalayas_and_forms():
 
 def job_page(logged_in=True):
     kind = "button" if logged_in else "link"   # Save / Apply now are links when logged out
+    apply = lambda: [N("heading", "Apply now"), N("button", "Job expired?"), N(kind, "Apply now")]  # noqa: E731
+    # as the live page: the Apply block appears twice inside main
     return N("document", "Acme Test hiring Staff Engineer | Himalayas", children=[
         N("banner", children=[] if logged_in else [N("link", "Log in")]),
         N("main", children=[N("heading", "Staff Engineer"), N("link", "Acme Test"), N(kind, "Save"),
-                            N("article", children=[N("text", "A job.")])]),
-        N("heading", "Apply now"), N(kind, "Apply now"), N("button", "Job expired?")])
+                            N("article", children=[N("text", "A job.")]), *apply(),
+                            N("navigation", "Breadcrumbs"), *apply()])])
+
+
+def test_apply_button_is_the_first_of_the_repeated_blocks():
+    root, page = job_page(), _page("himalayas_job_apply")
+    first = next(n for n in root.walk() if n.role == "button" and n.name == "Apply now")
+    assert [id(n) for n in engine.find_all(root, page["elements"]["apply_button"], page)] == [id(first)]
 
 
 @pytest.mark.parametrize("logged_in,want", [(True, "himalayas_job_apply"), (False, "himalayas_job_logged_out")])
@@ -151,15 +160,22 @@ def lever(d):
 
 
 class ApplyDesk(FakeDesktop):
-    def __init__(self, form_url):
+    def __init__(self, form_url, prompt=False):
         super().__init__([])
         self.form_url, self.values, self.open_list = form_url, {}, False
+        self.prompt, self.prompt_open = prompt, False   # Himalayas' "I'm ready to apply" popup
 
     def web_root(self, app):
         if "google.com" in self.url:
             return google_home()
         if "himalayas.app" in self.url:
-            return job_page()
+            root = job_page()
+            if self.prompt_open:   # as live: over the job page, the button with a text child of the same name
+                root.children.append(N("dialog", children=[
+                    N("heading", "Don't let your application get lost in the pile"), N("button", "Close"),
+                    N("button", "Generate cover letter with AI"), N("button", "Generate resume with AI"),
+                    N("button", "I\u2019m ready to apply", children=[N("text", "I\u2019m ready to apply")])]))
+            return root
         return greenhouse(self) if "greenhouse" in self.url else lever(self)
 
     def current_url(self, app):
@@ -182,7 +198,11 @@ class ApplyDesk(FakeDesktop):
         assert not any(engine.matches(node, spec) for spec in SUBMIT_SPECS), f"clicked {node.name}"
         self.calls.append(("click", node.dom_id or node.name))
         if node.name == "Apply now":
-            self.url = self.form_url
+            self.prompt_open = self.prompt
+            if not self.prompt:
+                self.url = self.form_url
+        elif node.name == "I\u2019m ready to apply" and node.role == "button":
+            self.url, self.prompt_open = self.form_url, False
         elif node.role == "radio":
             self.values["radio"] = node.name
         elif self.open_list and node.role == "group" and node.name in ("Yes", "No"):
@@ -261,6 +281,16 @@ def test_end_to_end_fake_lever(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr()
     for blob in ((tmp_path / "audit.jsonl").read_text(), out.out, out.err):
         assert SECRET not in blob and str(tmp_path / CV) not in blob
+
+
+@pytest.mark.usefixtures("env")
+def test_ready_to_apply_popup_is_clicked_through(tmp_path):
+    d = ApplyDesk(GH, prompt=True)
+    e, res = run_apply(tmp_path, d)
+    assert e[-1]["kind"] == "flow_end"
+    clicks = [c[1] for c in d.calls if isinstance(c, tuple) and c[0] == "click"]
+    assert clicks.count("I\u2019m ready to apply") == 1 and clicks.index("Apply now") < clicks.index("I\u2019m ready to apply")
+    assert res["filled"] == 5 and d.values["cv"] == CV
 
 
 def test_job_apply_in_marketplace_and_set_up_as_draft(tmp_path):

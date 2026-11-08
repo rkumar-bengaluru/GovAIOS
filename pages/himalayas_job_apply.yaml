@@ -13,6 +13,7 @@ page:
     # Save / Apply now are links when logged out and buttons when logged in.
     save_link:     { role: link, name: "Save", within: main, risk: submit }
     save_button:   { role: button, name: "Save", within: main, risk: submit }
-    apply_link:    { role: link, name: "Apply now", risk: navigate }
-    apply_button:  { role: button, name: "Apply now", risk: navigate }
+    # The live page repeats the Apply block inside main (seen 2026-11-07): take the first in reading order.
+    apply_link:    { role: link, name: "Apply now", within: main, index: 0, risk: navigate }
+    apply_button:  { role: button, name: "Apply now", within: main, index: 0, risk: navigate }
     job_expired:   { role: button, name: "Job expired?", risk: submit }

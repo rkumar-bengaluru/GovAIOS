@@ -35,6 +35,7 @@ workflow:
     - id: on_form
       action: classify_page
       on_match:
+        himalayas_apply_prompt: { click: ready }   # the "I'm ready to apply" popup, when it shows
         greenhouse_application: continue
         lever_application: continue
         unknown: stop_and_report
