@@ -253,7 +253,10 @@ class MacDesktop:
         if self._window is not None and not CFEqual(_attr(hit, "AXWindow"), self._window):
             raise InputRefused("input refused: click point is not in the verified window")
         if not _within(hit, target):
-            raise InputRefused("input refused: click point is not on the target element")
+            # roles only (never names or values): tells a stale target from an overlay from a coarse hit
+            rel = "contains" if _within(target, hit) else "is unrelated to"
+            raise InputRefused(f"input refused: click point is not on the target element (hit {_s(_attr(hit, 'AXRole'))}"
+                               f" {rel} target {_s(_attr(target, 'AXRole')) or 'gone'})")
 
     def scroll_into_view(self, node):
         # AXScrollToVisible is an accessibility action, not input; it only scrolls.

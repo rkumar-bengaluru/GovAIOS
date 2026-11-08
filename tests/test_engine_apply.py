@@ -142,6 +142,15 @@ def test_fills_bank_matches_and_audits_no_values(tmp_path, capsys):
         assert SECRET not in blob
 
 
+def test_field_scrolled_into_view_before_click(tmp_path):
+    # Greenhouse puts the form below the job description: an off-screen field fails the click-point check
+    d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period*")))
+    _, _, err = run(tmp_path, d)
+    assert err is None
+    i = d.calls.index(("click", "notice"))
+    assert d.calls[i - 1] == "scroll"
+
+
 def test_no_result_file_without_run_id(tmp_path):
     d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period")))
     _, _, err = run(tmp_path, d, run_id=None)

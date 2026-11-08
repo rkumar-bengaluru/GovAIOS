@@ -519,6 +519,8 @@ class Runner:
         ok = node is not None and ok_value(value, f.kind)
         if ok:
             self.gate("fill_field", "modify", target=label, destination=self.d.current_url(self.app))
+            # the form can sit below the fold (Greenhouse: under the job description); click() checks the point
+            self._act("scroll_into_view", self.d.scroll_into_view, node, target=label)
             before = set(_lists(root))
             ok = self._enter(f.kind, node, value, before, label)
             root, region = self._form()   # re-found after entry or escape: the old handle may be stale
