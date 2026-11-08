@@ -1,44 +1,51 @@
 workflow:
   id: job_apply
-  app: "Job Apply"
-  name: "Apply to a job"
-  version: 1
-  site_terms: { reviewed: 2026-11-07, basis: "Greenhouse, Lever: no candidate terms; employer's notice governs; admin submits. Himalayas cl. 30A" }
+  app: JobLens
+  name: "Apply to your Ready JobLens jobs"
+  version: 2
+  site_terms: { reviewed: 2026-11-08, basis: "JobLens: the admin's own app on this Mac. Greenhouse, Lever: no candidate terms; employer's notice governs; admin submits. Himalayas cl. 30A" }
 
   browser:
     application: chrome
     profile_directory: "Profile 2"     # same Chrome profile for both flows
     account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
 
-  inputs:
-    job_url: { label: "Himalayas job link", pattern: "https://himalayas\\.app/companies/[a-z0-9-]+/jobs/[a-z0-9-]+" }
-
   permissions:                          # Rule 9: unlisted = denied
     allow: [launch_application, navigate, read_page, click, fill_field, ask_admin, attach_file]
-    max_element_risk: modify            # Submit / Autofill / Apply with LinkedIn are submit: the admin submits
-  destinations: ["https://www.google.com", "https://himalayas.app", "https://job-boards.greenhouse.io", "https://jobs.lever.co"]
+    max_element_risk: modify            # Submit / Autofill / Apply with LinkedIn / Mark submitted are submit: the admin does them
+  destinations: ["https://www.google.com", "http://localhost:8100", "https://himalayas.app", "https://job-boards.greenhouse.io", "https://jobs.lever.co"]
 
   steps:
     - { id: launch_chrome, action: launch_application }
     - { id: open_google, action: navigate, value: "https://www.google.com" }
     - { id: on_google, action: classify_page, on_match: { google_home: continue, unknown: stop_and_report } }
     - { id: verify_account, action: verify_account, target: google_home.account_button }
-    - { id: open_job, action: navigate, value_from: input.job_url }
-    - id: authentication_guard
-      action: classify_page
-      on_match:
-        himalayas_job_apply: continue
-        himalayas_logged_out: stop_and_request_user
-        himalayas_job_logged_out: stop_and_request_user
-        unknown: stop_and_report
-    - { id: apply, action: click, target: himalayas_job_apply.apply_button }
-    - id: on_form
-      action: classify_page
-      on_match:
-        himalayas_apply_prompt: { click: ready }   # the "I'm ready to apply" popup, when it shows
-        greenhouse_application: continue
-        lever_application: continue
-        unknown: stop_and_report
-    - { id: fill, action: fill_form }
-    - { id: attach_cv, action: attach_file, target: current_page.resume_attach, check: current_page.resume_input }
-    # no close_window: the admin reviews and submits in this window
+    - { id: open_joblens, action: navigate, value: "http://localhost:8100/" }
+    - { id: on_joblens, action: classify_page, on_match: { joblens_applications: continue, unknown: stop_and_report } }
+    - { id: select_jobs, action: select_items, target: joblens_applications.ready_rows, count: 10, none: "no Ready jobs in JobLens" }
+    - id: each_job                      # one task per job on the panel: a stop ends only that job
+      action: for_each_item
+      task_title: [client, role]
+      steps:
+        - { id: job_tab, action: new_tab }   # each job in its own tab: an earlier job's form stays as you left it
+        - { id: open_list, action: navigate, value: "http://localhost:8100/" }
+        - { id: open_job, action: click, target: current_item.role, verify_page: joblens_job }
+        - { id: open_apply, action: click, target: joblens_job.apply_button }
+        - id: authentication_guard
+          action: classify_page
+          on_match:
+            himalayas_job_apply: continue
+            himalayas_logged_out: stop_and_request_user
+            himalayas_job_logged_out: stop_and_request_user
+            unknown: stop_and_report
+        - { id: apply, action: click, target: himalayas_job_apply.apply_button }
+        - id: on_form
+          action: classify_page
+          on_match:
+            himalayas_apply_prompt: { click: ready }   # the "I'm ready to apply" popup, when it shows
+            greenhouse_application: continue
+            lever_application: continue
+            unknown: stop_and_report
+        - { id: fill, action: fill_form }
+        - { id: attach_cv, action: attach_file, target: current_page.resume_attach, check: current_page.resume_input }
+        - { id: review, action: hand_over }   # you check and submit in Chrome, then Next job

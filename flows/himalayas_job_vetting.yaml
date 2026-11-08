@@ -1,6 +1,6 @@
 workflow:
   id: himalayas_job_vetting
-  app: JobLens
+  app: SyncJobLens
   name: "Himalayas Job Vetting → JobLens"
   version: 3
   site_terms: { reviewed: 2026-11-05, basis: "Himalayas Terms cl. 30A (Personal Agent)" }

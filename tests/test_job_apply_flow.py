@@ -1,5 +1,10 @@
-"""job_apply flow: Himalayas Apply -> Greenhouse or Lever form, filled and CV attached, never submitted."""
+"""job_apply flow (app JobLens): each Ready JobLens job -> Himalayas Apply -> Greenhouse or Lever form, filled and CV
+attached, never submitted; one panel task per job."""
+import itertools
 import json
+import threading
+import time
+import types
 
 import pytest
 import yaml
@@ -15,8 +20,8 @@ FLOW = REPO / "flows" / "job_apply.yaml"
 JOB = "https://himalayas.app/companies/acme-test/jobs/staff-engineer"
 GH = "https://job-boards.greenhouse.io/acmetest/jobs/1234567"
 LV = "https://jobs.lever.co/acmetest/0000-1111/apply"
-DESTS = ["https://www.google.com", "https://himalayas.app", "https://job-boards.greenhouse.io", "https://jobs.lever.co"]
-NEW_PAGES = ("himalayas_job_apply", "himalayas_apply_prompt", "himalayas_job_logged_out", "greenhouse_application", "lever_application")
+DESTS = ["https://www.google.com", "http://localhost:8100", "https://himalayas.app", "https://job-boards.greenhouse.io", "https://jobs.lever.co"]
+NEW_PAGES = ("joblens_applications", "joblens_job", "himalayas_job_apply", "himalayas_apply_prompt", "himalayas_job_logged_out", "greenhouse_application", "lever_application")
 CV = "Resume-Test.pdf"
 SECRET = "SECRET-NOTICE"   # an answer value: must never reach the audit log or output
 
@@ -32,11 +37,11 @@ def submit_elements():
 def test_flow_loads_and_binds_pages():
     digest, raw = read_bound(FLOW, REPO / "pages")
     wf = yaml.safe_load(raw[FLOW])["workflow"]
-    assert pages_used(wf) == {"google_home", "himalayas_job_apply", "himalayas_apply_prompt", "himalayas_logged_out", "himalayas_job_logged_out",
+    assert pages_used(wf) == {"google_home", "joblens_applications", "joblens_job", "himalayas_job_apply", "himalayas_apply_prompt", "himalayas_logged_out", "himalayas_job_logged_out",
                               "greenhouse_application", "lever_application"}
     assert (wf["id"], wf["app"], wf["permissions"]["max_element_risk"], wf["destinations"]) == \
-        ("job_apply", "Job Apply", "modify", DESTS)
-    assert "close_window" not in json.dumps(wf["steps"])
+        ("job_apply", "JobLens", "modify", DESTS)
+    assert "close_window" not in json.dumps(wf["steps"]) and "inputs" not in wf
 
 
 @pytest.mark.parametrize("pid,el", list(submit_elements()))
@@ -51,7 +56,8 @@ def test_submit_elements_are_the_expected_ones():
         ("himalayas_job_apply", "save_link"), ("himalayas_job_apply", "save_button"),
         ("himalayas_job_apply", "job_expired"), ("himalayas_apply_prompt", "ai_cover_letter"),
         ("himalayas_apply_prompt", "ai_resume"), ("greenhouse_application", "submit"),
-        ("greenhouse_application", "autofill"), ("lever_application", "submit"), ("lever_application", "linkedin")}
+        ("greenhouse_application", "autofill"), ("lever_application", "submit"), ("lever_application", "linkedin"),
+        ("joblens_job", "mark_submitted")}
 
 
 def test_other_host_denied(tmp_path):
@@ -63,15 +69,17 @@ def test_other_host_denied(tmp_path):
 def test_list_apps_shows_job_apply(tmp_path):
     apps = list_apps(REPO / "flows", tmp_path)
     by_id = {a.id: a.name for a in apps}
-    assert by_id["job_apply"] == "Job Apply"
-    assert by_id["himalayas_job_vetting"] == "JobLens" and "morning_inbox_briefing" in by_id
-    assert match("run joblens", apps)[1].id == "himalayas_job_vetting"
+    assert by_id["job_apply"] == "JobLens" and by_id["web_sandbox"] == "Web Sandbox"
+    assert by_id["himalayas_job_vetting"] == "SyncJobLens" and "morning_inbox_briefing" in by_id
+    assert match("run joblens", apps)[1].id == "job_apply"
+    assert match("syncjoblens", apps)[1].id == "himalayas_job_vetting"
 
 
 def test_existing_flow_digests_unchanged():
-    # recorded from main (flows/ and pages/ identical to this branch's base)
-    assert read_bound(REPO / "flows" / "himalayas_job_vetting.yaml", REPO / "pages")[0] == \
-        "d902703645bbd8f381a7d912789624171e77cae3c52c77eb62addaea9008e546"
+    # the vetting flow changed only its app name (JobLens -> SyncJobLens, 2026-11-08): re-approved once
+    raw = read_bound(REPO / "flows" / "himalayas_job_vetting.yaml", REPO / "pages")[1]
+    text = raw[REPO / "flows" / "himalayas_job_vetting.yaml"].decode()
+    assert "  app: SyncJobLens\n" in text and yaml.safe_load(text)["workflow"]["version"] == 3
     assert read_bound(REPO / "flows" / "morning_inbox_briefing.yaml", REPO / "pages")[0] == \
         "a1dca44ed9e272377fe86987aca8bece3a1dcd7c4ef797e6ed40d4e8386ff4ae"
 
@@ -112,7 +120,8 @@ def test_apply_button_is_the_first_of_the_repeated_blocks():
 
 @pytest.mark.parametrize("logged_in,want", [(True, "himalayas_job_apply"), (False, "himalayas_job_logged_out")])
 def test_job_page_classified_by_login_state(logged_in, want):
-    guard = next(s for s in yaml.safe_load(FLOW.read_text())["workflow"]["steps"] if s["id"] == "authentication_guard")
+    each = next(s for s in yaml.safe_load(FLOW.read_text())["workflow"]["steps"] if s["id"] == "each_job")
+    guard = next(s for s in each["steps"] if s["id"] == "authentication_guard")
     hits = [p for p in guard["on_match"] if p != "unknown" and engine.identify(_page(p), job_page(logged_in))]
     assert hits == [want]
     assert guard["on_match"][want] == ("continue" if logged_in else "stop_and_request_user")
@@ -159,15 +168,41 @@ def lever(d):
             N("button", "SUBMIT APPLICATION", dom_id="btn-submit")])])
 
 
+JL = "http://localhost:8100/"
+JOBS = [("Acme Test", "Staff Engineer", "Ready"), ("Old Corp", "Engineer", "Submitted"), ("Beta Test", "Lead", "Ready")]
+
+
+def joblens_list():
+    row = lambda c, t, st: N("row", children=[   # noqa: E731
+        N("cell", children=[N("text", c)]), N("cell", children=[N("link", t)]),
+        N("cell", children=[N("text", "Himalayas")]), N("cell", children=[N("text", st)])])
+    head = N("row", children=[N("cell", children=[N("text", h)]) for h in ("Client", "Role", "Source", "Status")])
+    return N("document", "JobLens", children=[N("heading", "Applications"), N("link", "+ New Application"),
+                                              N("table", children=[head, *(row(*j) for j in JOBS)])])
+
+
+def joblens_job(title):
+    return N("document", "JobLens", children=[N("heading", title), N("group", "Apply", children=[
+        N("button", "Apply"), N("text", "Judge score: 80"), N("button", "Mark submitted (v1)")])])
+
+
 class ApplyDesk(FakeDesktop):
-    def __init__(self, form_url, prompt=False):
+    def __init__(self, form_url, prompt=False, links=None):
         super().__init__([])
         self.form_url, self.values, self.open_list = form_url, {}, False
         self.prompt, self.prompt_open = prompt, False   # Himalayas' "I'm ready to apply" popup
+        self.links = links or {}   # job title -> where its JobLens Apply leads (default: the Himalayas job)
+        self.job = None
 
     def web_root(self, app):
         if "google.com" in self.url:
             return google_home()
+        if self.url == JL:
+            return joblens_list()
+        if self.url.startswith(JL + "jobs/"):
+            return joblens_job(self.job)
+        if self.url == "chrome://newtab/":
+            return N("document", "New Tab", children=[N("text", "New Tab")])
         if "himalayas.app" in self.url:
             root = job_page()
             if self.prompt_open:   # as live: over the job page, the button with a text child of the same name
@@ -176,7 +211,11 @@ class ApplyDesk(FakeDesktop):
                     N("button", "Generate cover letter with AI"), N("button", "Generate resume with AI"),
                     N("button", "I\u2019m ready to apply", children=[N("text", "I\u2019m ready to apply")])]))
             return root
-        return greenhouse(self) if "greenhouse" in self.url else lever(self)
+        if "greenhouse" in self.url:
+            return greenhouse(self)
+        if "lever" in self.url:
+            return lever(self)
+        return N("document", "Somewhere else", children=[N("heading", "Apply here")])
 
     def current_url(self, app):
         return self.url
@@ -186,6 +225,9 @@ class ApplyDesk(FakeDesktop):
         self.calls.append(key)
         if key == "enter":
             self.url = self.typed
+        elif key == "new_tab":
+            self.url = "chrome://newtab/"
+            self.values, self.open_list = {}, False   # a fresh form for the next job
 
     def type_into(self, node, text):
         super().type_into(node, text)
@@ -197,7 +239,11 @@ class ApplyDesk(FakeDesktop):
     def click(self, node):
         assert not any(engine.matches(node, spec) for spec in SUBMIT_SPECS), f"clicked {node.name}"
         self.calls.append(("click", node.dom_id or node.name))
-        if node.name == "Apply now":
+        if self.url == JL and node.role == "link":
+            self.job, self.url = node.name, JL + f"jobs/{node.name.lower().replace(' ', '-')}"
+        elif self.url.startswith(JL + "jobs/") and node.name == "Apply":
+            self.url = self.links.get(self.job, JOB)   # JobLens opens the job link (a new tab, live)
+        elif node.name == "Apply now":
             self.prompt_open = self.prompt
             if not self.prompt:
                 self.url = self.form_url
@@ -236,7 +282,26 @@ def env(monkeypatch, tmp_path):
     (tmp_path / CV).write_bytes(b"%PDF")
 
 
-def run_apply(tmp_path, desk):
+def answer_cards(tmp_path, choose, seen):
+    """The panel's side: answer every card the run shows (choose(card) -> reply) until the run ends."""
+    from govaios import applyfiles
+    done = threading.Event()
+
+    def go():
+        while not done.is_set():
+            ask = applyfiles.read_json(tmp_path, applyfiles.ASK)
+            if ask and "card" in ask and applyfiles.read_json(tmp_path, applyfiles.REPLY) is None:
+                seen.append(ask["card"])
+                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "card": choose(ask["card"])})
+                while applyfiles.read_json(tmp_path, applyfiles.ASK) == ask and not done.is_set():
+                    time.sleep(0.002)
+            time.sleep(0.002)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    return done
+
+
+def run_apply(tmp_path, desk, choose=lambda c: "next", seen=None, run_id="r1"):
     wf = yaml.safe_load(FLOW.read_text())
     wf["workflow"]["browser"]["account"] = ACCT   # the fake Google page's account; the shipped file is untouched
     src = tmp_path / "src"
@@ -245,52 +310,137 @@ def run_apply(tmp_path, desk):
     (src / "flows" / "job_apply.yaml").write_text(yaml.safe_dump(wf))
     for p in (REPO / "pages").glob("*.yaml"):
         (src / "pages" / p.name).write_bytes(p.read_bytes())
-    r = Runner(src / "flows" / "job_apply.yaml", desk, tmp_path, inputs={"job_url": JOB})
+    r = Runner(src / "flows" / "job_apply.yaml", desk, tmp_path)
     r.approvals.approve_flow(r.flow["id"], r.digest)
     for o in DESTS:
         r.approvals.approve_destination(r.flow["id"], o)
-    r.run_id = "r1"
-    r.run()
+    r.run_id = run_id
+    done = answer_cards(tmp_path, choose, seen if seen is not None else [])
+    err = None
+    try:
+        r.run()
+    except engine.Stop as e:
+        err = e
+    finally:
+        done.set()
     entries = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
-    return entries, json.loads((tmp_path / "apply" / "result.json").read_text())
+    tasks = (json.loads((tmp_path / "apply" / "tasks.json").read_text())["tasks"]
+             if (tmp_path / "apply" / "tasks.json").exists() else None)
+    return entries, tasks, err
+
+
+@pytest.fixture
+def fast_clock(monkeypatch):
+    """Page waits time out at once (a page that never comes)."""
+    c = itertools.count(0, 30)
+    monkeypatch.setattr(engine, "time", types.SimpleNamespace(sleep=lambda s: None, time=lambda: next(c),
+                                                             monotonic=time.monotonic))
 
 
 @pytest.mark.usefixtures("env")
 def test_end_to_end_fake_greenhouse(tmp_path, monkeypatch, capsys):
     d = ApplyDesk(GH)
-    e, res = run_apply(tmp_path, d)
-    assert e[-1]["kind"] == "flow_end"
+    seen = []
+    e, tasks, err = run_apply(tmp_path, d, seen=seen)
+    assert err is None and e[-1]["kind"] == "flow_end"
     assert {k: d.values[k] for k in ("first_name", "last_name", "email", "question_1000000001", "sel", "cv")} == \
         {"first_name": "Testa", "last_name": "Example", "email": "testa@example.invalid",
          "question_1000000001": SECRET, "sel": "No", "cv": CV}
-    assert res == {"run": "r1", "filled": 5, "total": 6, "yourself": ["Gender"], "check": []}
+    # the two Ready jobs, never the Submitted one; each its own task, reviewed by the admin
+    assert [(t["n"], t["title"], t["status"], t["filled"], t["total"], t["yourself"]) for t in tasks] == [
+        (1, "Acme Test \u2014 Staff Engineer", "done", 5, 6, ["Gender"]),
+        (2, "Beta Test \u2014 Lead", "done", 5, 6, ["Gender"])]
+    assert [(c["kind"], c["job"], c["item"]) for c in seen] == [
+        ("review", "Acme Test \u2014 Staff Engineer", 1), ("review", "Beta Test \u2014 Lead", 2)]
+    clicks = [c[1] for c in d.calls if isinstance(c, tuple) and c[0] == "click"]
+    assert "Engineer" not in clicks and clicks.count("Apply") == 2
+    assert d.calls.count("new_tab") == 2   # each job in its own tab
+    assert {x.get("item") for x in e if x.get("step") == "fill"} == {1, 2}
     assert not any(x.get("decision") == "deny" for x in e)
     out = capsys.readouterr()
-    for blob in ((tmp_path / "audit.jsonl").read_text(), out.out, out.err):
+    for blob in ((tmp_path / "audit.jsonl").read_text(), out.out, out.err, json.dumps(tasks)):
         assert SECRET not in blob and str(tmp_path / CV) not in blob
 
 
 @pytest.mark.usefixtures("env")
 def test_end_to_end_fake_lever(tmp_path, monkeypatch, capsys):
     d = ApplyDesk(LV)
-    e, res = run_apply(tmp_path, d)
-    assert e[-1]["kind"] == "flow_end"
-    assert {k: d.values[k] for k in ("Full name✱", "Email✱", "q1", "radio", "cv")} == \
-        {"Full name✱": "Testa Example", "Email✱": "testa@example.invalid", "q1": SECRET, "radio": "Yes", "cv": CV}
-    assert res == {"run": "r1", "filled": 4, "total": 4, "yourself": [], "check": []}
-    out = capsys.readouterr()
-    for blob in ((tmp_path / "audit.jsonl").read_text(), out.out, out.err):
-        assert SECRET not in blob and str(tmp_path / CV) not in blob
+    e, tasks, err = run_apply(tmp_path, d)
+    assert err is None and e[-1]["kind"] == "flow_end"
+    assert {k: d.values[k] for k in ("Full name\u2731", "Email\u2731", "q1", "radio", "cv")} == \
+        {"Full name\u2731": "Testa Example", "Email\u2731": "testa@example.invalid", "q1": SECRET, "radio": "Yes", "cv": CV}
+    assert [(t["filled"], t["total"], t["yourself"]) for t in tasks] == [(4, 4, []), (4, 4, [])]
 
 
 @pytest.mark.usefixtures("env")
 def test_ready_to_apply_popup_is_clicked_through(tmp_path):
     d = ApplyDesk(GH, prompt=True)
-    e, res = run_apply(tmp_path, d)
-    assert e[-1]["kind"] == "flow_end"
+    e, tasks, err = run_apply(tmp_path, d)
+    assert err is None and e[-1]["kind"] == "flow_end"
     clicks = [c[1] for c in d.calls if isinstance(c, tuple) and c[0] == "click"]
-    assert clicks.count("I\u2019m ready to apply") == 1 and clicks.index("Apply now") < clicks.index("I\u2019m ready to apply")
-    assert res["filled"] == 5 and d.values["cv"] == CV
+    assert clicks.count("I\u2019m ready to apply") == 2 and clicks.index("Apply now") < clicks.index("I\u2019m ready to apply")
+    assert tasks[0]["filled"] == 5 and d.values["cv"] == CV
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_a_job_that_stops_ends_only_its_task(tmp_path):
+    """Acme's link leads to a site the flow doesn't know: that task stops (captured), the admin picks Next job."""
+    d = ApplyDesk(GH, links={"Staff Engineer": "https://apply.example.invalid/x"})
+    seen = []
+    e, tasks, err = run_apply(tmp_path, d, seen=seen)
+    assert err is None and e[-1]["kind"] == "flow_end"
+    assert [(t["status"], t.get("reason")) for t in tasks] == [("stopped", "unexpected page"), ("done", None)]
+    assert [(c["kind"], c["label"], c["item"]) for c in seen] == [("stopped", "unexpected page", 1), ("review", "", 2)]
+    [st] = [x for x in e if x.get("action") == "task_stop"]
+    assert st["item"] == 1 and st["reason"] == "unexpected page"
+    # the undeclared site is never read for a capture
+    assert [x["outcome"] for x in e if x.get("action") == "capture" and x.get("item") == 1] == ["not_declared"]
+    assert not (tmp_path / "captures").exists()
+    assert not any(x["kind"] == "stop" for x in e)
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_end_on_a_stopped_task_ends_the_run(tmp_path):
+    d = ApplyDesk(GH, links={"Staff Engineer": "https://apply.example.invalid/x"})
+    e, tasks, err = run_apply(tmp_path, d, choose=lambda c: "end")
+    assert str(err) == "ended by admin" and e[-1]["kind"] == "stop"
+    assert [t["status"] for t in tasks] == ["stopped", "waiting"]
+
+
+@pytest.mark.usefixtures("env")
+def test_end_at_review_ends_the_run(tmp_path):
+    d = ApplyDesk(GH)
+    e, tasks, err = run_apply(tmp_path, d, choose=lambda c: "end")
+    assert str(err) == "ended by admin"
+    assert [t["status"] for t in tasks] == ["done", "waiting"]
+    assert d.calls.count("new_tab") == 1
+
+
+@pytest.mark.usefixtures("env")
+def test_emergency_stop_inside_a_task_ends_the_run(tmp_path):
+    d = ApplyDesk(GH)
+    (tmp_path / "STOPPED").touch()   # pressed while the first job runs: before any of its steps
+    orig = d.press
+    d.press = lambda k: (orig(k), (tmp_path / "STOPPED").touch() if k == "new_tab" else None)[0]
+    (tmp_path / "STOPPED").unlink()
+    e, tasks, err = run_apply(tmp_path, d)
+    assert str(err) == "emergency stop" and [t["status"] for t in tasks] == ["stopped", "waiting"]
+    assert not any(x.get("action") == "task_stop" for x in e)
+
+
+@pytest.mark.usefixtures("env")
+def test_cli_run_fills_every_job_in_its_own_tab_without_cards(tmp_path):
+    d = ApplyDesk(GH)
+    e, tasks, err = run_apply(tmp_path, d, run_id=None)
+    assert err is None and tasks is None and d.calls.count("new_tab") == 2
+    assert not any(x.get("action") == "ask_admin" for x in e)
+
+
+@pytest.mark.usefixtures("env")
+def test_no_ready_job_stops_with_a_clear_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(__import__(__name__), "JOBS", [("Old Corp", "Engineer", "Submitted")])
+    e, tasks, err = run_apply(tmp_path, ApplyDesk(GH))
+    assert str(err) == "no Ready jobs in JobLens"
 
 
 def test_job_apply_in_marketplace_and_set_up_as_draft(tmp_path):
@@ -299,4 +449,17 @@ def test_job_apply_in_marketplace_and_set_up_as_draft(tmp_path):
     out = market.setup(t, "Profile 5", "x.y@example.com", tmp_path / "apps/flows", REPO)
     b = yaml.safe_load(out.read_text())["workflow"]["browser"]
     assert (b["profile_directory"], b["account"]) == ("Profile 5", "x.y@example.com")
-    assert [a.name for a in list_apps(tmp_path / "apps/flows", tmp_path)] == ["Job Apply"]
+    assert [a.name for a in list_apps(tmp_path / "apps/flows", tmp_path)] == ["JobLens"]
+
+
+@pytest.mark.usefixtures("env")
+def test_an_engine_error_inside_a_job_ends_the_run(tmp_path):
+    """Not a Stop (an AX or engine bug): fail closed, never carry on to the next job."""
+    d = ApplyDesk(GH)
+    d.scroll_into_view = lambda node: (_ for _ in ()).throw(AttributeError("AX gone"))
+    with pytest.raises(AttributeError):
+        run_apply(tmp_path, d)
+    tasks = json.loads((tmp_path / "apply" / "tasks.json").read_text())["tasks"]
+    assert [t["status"] for t in tasks] == ["stopped", "waiting"] and tasks[0]["reason"] == "AttributeError"
+    e = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert e[-1]["kind"] == "stop" and not any(x.get("action") == "task_stop" for x in e)

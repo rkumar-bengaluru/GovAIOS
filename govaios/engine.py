@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+from urllib.parse import urlsplit
 
 from . import auth, capture, runstate
 from .agents import user_home
-from .applyfiles import ASK, BANK, REPLY, RESULT, read_json, remove, write_json
+from .applyfiles import ASK, BANK, CARDS, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
                        read_form, restricted)
 from .audit.log import AuditLog, url_for_audit
@@ -30,6 +31,16 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 NO_DEST = object()
 FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
+
+
+# A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
+RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
+             "the browser has no window in front")
+
+
+def _ends_run(e):
+    m = str(e)
+    return m.startswith(RUN_STOPS) or m.startswith("input refused") and "not on the target element" not in m
 
 
 class Denied(Stop):
@@ -55,6 +66,9 @@ def matches(node, spec):
         return False
     if node.name in spec.get("exclude_names", []):
         return False
+    if "has_text" in spec and not any(d.role == "text" and (d.value or d.name) == spec["has_text"]
+                                      for d in node.walk()):
+        return False   # e.g. a JobLens row whose Status cell shows "Ready"
     return True
 
 
@@ -190,6 +204,8 @@ class Runner:
 
     def _audit(self, kind, **f):
         """One signed entry; console shows only kind, step and decision (no content)."""
+        if self.ctx.get("task"):   # JobLens: which job's task this line belongs to
+            f.setdefault("item", self.ctx["task"])
         self.audit.append(kind, flow=self.flow["id"], flow_version=self.flow["version"],
                           executor=self.executor, step=self.step, **f)
         print(f"[{datetime.now():%H:%M:%S}] {kind} {self.step or ''} {f.get('decision') or ''}".rstrip(), flush=True)
@@ -309,6 +325,17 @@ class Runner:
             if set(given) != set(decl) or not all(
                     isinstance(v, str) and re.fullmatch(decl[k]["pattern"], v) for k, v in given.items()):
                 raise Stop("bad run input")
+            for k in self.flow.get("destination_inputs", []):   # web sandbox: the site the admin typed (Touch ID on
+                try:
+                    u = urlsplit(given[k])
+                    port = u.port
+                except ValueError:
+                    raise Stop("bad destination input") from None
+                if k not in decl or u.scheme != "https" or u.username or u.password or not u.hostname:
+                    raise Stop("bad destination input")   # first contact asks for Touch ID, as any destination
+                site = f"https://{u.hostname.lower()}" + (f":{port}" if port not in (None, 443) else "")
+                self.flow["destinations"] = [*self.flow["destinations"], site]
+                self.inputs = {**given, k: site + given[k][len(f"{u.scheme}://{u.netloc}"):]}   # navigate there too
             approved = self.approvals.flow_ok(self.flow["id"], self.digest)
             if self.ticket is not None:   # panel run: never a prompt; the ticket is the start proof
                 from .panel import tickets
@@ -340,7 +367,14 @@ class Runner:
         """Save the page as it is at the stop, for debugging. Never on a locked screen or an emergency stop,
         never before a step ran; a failed capture is audited and never replaces the original stop."""
         if self.step is None or runstate.stopped(self.home) or auth.screen_locked():
-            return
+            return None
+        try:
+            url = self.d.current_url(self.app) or ""
+        except Exception:
+            url = ""
+        if origin(url) not in {origin(d) for d in self.flow.get("destinations", [])}:
+            self._audit("action", action="capture", outcome="not_declared")   # never read a site the flow may not reach
+            return None
         try:
             name, digest = capture.save(
                 self.home, self.flow["id"], self.step, reason, self.d.current_url(self.app),
@@ -348,9 +382,10 @@ class Runner:
                 extra if extra is not None else getattr(self.d, "last_refusal", None))
         except Exception:
             self._audit("action", action="capture", outcome="error")
-            return
+            return None
         self._audit("action", action="capture", target=name, file_hash=digest, outcome="done")
         print(f"capture saved: {capture.DIR}/{name}", flush=True)
+        return name
 
     def steps(self, steps):
         for s in steps:
@@ -418,7 +453,7 @@ class Runner:
         spec = self.pages[page_id]["elements"][el_id]
         items = find_all(root, spec, self.pages[page_id])[: s["count"]]
         if not items:
-            raise Stop("no items found")
+            raise Stop(s.get("none", "no items found"))
         # remember identity, not handles: the tree is rebuilt after each navigation
         self.ctx["items"] = [self._fields(it, spec, page_id) for it in items]
         self.ctx["item_spec"] = (page_id, el_id)
@@ -431,9 +466,97 @@ class Runner:
         return out
 
     def do_for_each_item(self, s):
+        """With task_title (JobLens): each item is the admin's task on the panel. A stop inside one ends only that
+        task (captured, then the admin picks Next job or End); safety stops still end the run (RUN_STOPS)."""
+        tasks = "task_title" in s
+        if tasks:
+            self.tasks = [{"n": i, "title": " \u2014 ".join(str(it.get(k) or "") for k in s["task_title"])[:200],
+                           "status": "waiting"} for i, it in enumerate(self.ctx["items"], 1)]
+            self._write_tasks()
         for i, item in enumerate(self.ctx["items"], 1):
             self.ctx["item"], self.ctx["n"] = item, i
-            self.steps(s["steps"])
+            if not tasks:
+                self.steps(s["steps"])
+                continue
+            self.ctx["task"] = i
+            self._task("working")
+            try:
+                self.steps(s["steps"])
+                self._task("done")
+            except Exception as e:
+                reason = str(e) if isinstance(e, Stop) else type(e).__name__
+                if self._current_task()["status"] != "done":
+                    self._task("stopped", reason=reason[:200])
+                if not isinstance(e, Stop) or _ends_run(e):   # an engine or AX error: fail closed, end the run
+                    raise
+                self._capture(reason)
+                self._audit("action", action="task_stop", reason=reason, outcome="error")
+                if self.card("stopped", reason) == "end":
+                    raise Stop("ended by admin") from None
+            finally:
+                self.ctx["task"] = None
+
+    def _current_task(self):
+        n = self.ctx.get("task")
+        return self.tasks[n - 1] if n and getattr(self, "tasks", None) else None
+
+    def _task(self, status, **extra):
+        t = self._current_task()
+        if t is not None:
+            t.update(status=status, **extra)
+            self._write_tasks()
+
+    def _write_tasks(self):
+        if self.run_id is not None:   # labels and counts only, never values
+            write_json(self.home, TASKS, {"run": self.run_id, "tasks": self.tasks})
+
+    def do_hand_over(self, s):
+        """JobLens: the form is filled; the admin checks it and submits in Chrome, then Next job (or End)."""
+        self._task("review")
+        choice = self.card("review", "")
+        self._task("done")
+        if choice == "end":
+            raise Stop("ended by admin")
+
+    def do_new_tab(self, s):
+        """Each JobLens job in its own tab: the earlier job's form stays as the admin left it."""
+        self.gate("navigate", "navigate")
+        self._act("press", self.d.press, "new_tab")
+        time.sleep(1)
+
+    def do_capture_pages(self, s):
+        """Web sandbox: the admin browses in Chrome; each Capture saves the page they are on (read only).
+        A CLI run captures the current page once."""
+        pages = []
+        while True:
+            choice = self.card("sandbox", f"{len(pages)} captured")
+            if choice == "done":
+                return
+            url = self.d.current_url(self.app)
+            try:
+                self.gate("read_page", "read", destination=url)
+            except Denied:   # another site than the one opened: never read
+                pages.append({"title": "", "url": url_for_audit(url) if url else "", "file": None,
+                              "note": "another site: not captured"})
+            else:
+                root = self.snapshot()
+                if origin(self.d.current_url(self.app) or "") != origin(url):   # moved on while it was read
+                    pages.append({"title": "", "url": url_for_audit(url), "file": None,
+                                  "note": "page changed while capturing: not captured"})
+                    if self.run_id is not None:
+                        write_json(self.home, SANDBOX, {"run": self.run_id, "pages": pages[-50:]})
+                    if choice is None:
+                        return
+                    continue
+                name = self._capture("sandbox", root, {"sandbox": True})
+                pages.append({"title": root.name[:200], "url": url_for_audit(url), "file": name,
+                              "fields": sum(n.role in FIELD_ROLES for n in root.walk()),
+                              "buttons": sum(n.role == "button" for n in root.walk()),
+                              "links": sum(n.role == "link" for n in root.walk())})
+            if self.run_id is not None:
+                write_json(self.home, SANDBOX, {"run": self.run_id, "pages": pages[-50:]})
+            if choice is None:
+                return
 
     def _current_item_node(self, field):
         page_id, el_id = self.ctx["item_spec"]
@@ -597,17 +720,28 @@ class Runner:
             self.ctx["apply"]["yourself"].append(f.label)
         return ok
 
-    def fix_by_hand(self, f, shown0):
-        """Panel run only: the admin fills the failed field in Chrome, then Continue (or Skip). Re-read after."""
+    def card(self, kind, label):
+        """Panel run only: show a card (applyfiles.CARDS) and wait for the admin's choice, then bring the pinned
+        window back. None when there is no panel or the flow may not ask (a CLI run carries on without it)."""
         if self.run_id is None or decide({"action": "ask_admin", "risk": "read", "destination": None},
-                                         self.flow, self.approvals) != "allow":   # no card allowed: fill yourself
-            return False
+                                         self.flow, self.approvals) != "allow":
+            return None
         self.gate("ask_admin", "read")
-        reply = self._ask({"fix": {"key": f.key, "label": f.label}})
-        if reply.get("fix") not in ("continue", "skip"):
+        task = self._current_task()
+        reply = self._ask({"card": {"kind": kind, "label": label[:300],
+                                    "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}})
+        choice = reply.get("card")
+        if choice not in CARDS[kind]:
             raise Stop("bad reply")
         self._act("raise_pinned", self.d.raise_pinned)
-        if reply["fix"] == "skip":
+        return choice
+
+    def fix_by_hand(self, f, shown0):
+        """Panel run only: the admin fills the failed field in Chrome, then Continue (or Skip). Re-read after."""
+        self._task("needs_you")
+        choice = self.card("fix", f.label)
+        self._task("working")
+        if choice in (None, "skip"):
             return False
         region = self._form()[1]
         now = next((x for x in read_form(region) if x.key == f.key), None)
@@ -753,7 +887,8 @@ class Runner:
         """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it)."""
         try:
             remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
-            write_json(self.home, ASK, {"run": self.run_id, **body})
+            self.asks = getattr(self, "asks", 0) + 1   # each ask unique: a stale reply never answers the next one
+            write_json(self.home, ASK, {"run": self.run_id, "seq": self.asks, **body})
             deadline = time.monotonic() + ASK_TIMEOUT_S
             while True:
                 reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet
@@ -776,4 +911,8 @@ class Runner:
         if self.run_id is not None:
             write_json(self.home, RESULT, {"run": self.run_id, "filled": a["filled"], "total": a["total"],
                                            "yourself": a["yourself"], "check": a["check"]})
+        t = self._current_task()
+        if t is not None:   # JobLens: the counts on this job's task
+            t.update(filled=a["filled"], total=a["total"], yourself=list(a["yourself"]), check=list(a["check"]))
+            self._write_tasks()
         print(f"apply: filled {a['filled']} of {a['total']}", flush=True)

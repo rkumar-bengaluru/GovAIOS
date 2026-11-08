@@ -36,7 +36,7 @@ def test_list_apps_approved_and_draft(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     apps = list_apps(tmp_path / "flows", home)
-    assert len(apps) == 3 and not any(a.approved for a in apps)
+    assert len(apps) == 4 and not any(a.approved for a in apps)
     one = apps[0]
     Approvals(home / "approvals.json").approve_flow(one.id, one.digest)
     apps = list_apps(tmp_path / "flows", home)

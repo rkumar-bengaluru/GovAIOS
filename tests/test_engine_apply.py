@@ -726,7 +726,7 @@ def fix_when_asked(tmp_path, d, choice, typed=None, seen=None):
                 (seen if seen is not None else []).append(ask)
                 if typed is not None:
                     d.values["notice"] = typed   # the admin types it in Chrome
-                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "fix": choice})
+                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "card": choice})
                 return
             threading.Event().wait(0.005)
     t = threading.Thread(target=go, daemon=True)
@@ -750,7 +750,7 @@ def test_fix_by_hand_continue_counts_as_filled(tmp_path, capsys):
     t = fix_when_asked(tmp_path, d, "continue", typed="15 days", seen=seen)
     _, e, err = run(tmp_path, d, allow=ASKED)
     t.join(1)
-    assert err is None and seen[0]["fix"] == {"key": seen[0]["fix"]["key"], "label": "Notice period"}
+    assert err is None and seen[0]["card"] == {"kind": "fix", "label": "Notice period", "job": "", "item": 0}
     assert "fields" not in seen[0]
     assert [(f["source"], f["outcome"]) for f in fills(e)] == [("bank:notice", "mismatch"), ("admin_manual", "done")]
     assert result(tmp_path)["filled"] == 1 and result(tmp_path)["yourself"] == []
@@ -784,3 +784,21 @@ def test_covered_field_on_panel_run_asks_fix(tmp_path):
     _, e, err = run(tmp_path, d, allow=ASKED)
     t.join(1)
     assert err is None and result(tmp_path)["filled"] == 1
+
+
+def test_each_ask_is_unique_so_a_stale_reply_never_answers_the_next(tmp_path):
+    d = FormDesk(lambda d: form(text_field(d, "a", "School"), text_field(d, "b", "College")), keep=lambda t: t[:1])
+    seen = []
+    def go():
+        for _ in range(4000):
+            ask = applyfiles.read_json(tmp_path, applyfiles.ASK)
+            if ask and ask not in seen:
+                seen.append(ask)
+                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "card": "skip"})
+            threading.Event().wait(0.002)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    rows = ({"key": "s", "labels": ["School"], "answer": "Uni"}, {"key": "c", "labels": ["College"], "answer": "Uni"})
+    _, e, err = run(tmp_path, d, rows, allow=ASKED)
+    assert err is None and [a["card"]["label"] for a in seen] == ["School", "College"]
+    assert seen[0]["seq"] != seen[1]["seq"]   # same-label cards still differ, so their digests do too

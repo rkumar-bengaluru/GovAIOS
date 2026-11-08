@@ -162,7 +162,7 @@ def _seq(e):
     return s if type(s) is int else None
 
 
-PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "bank_updated")
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "apply_card", "bank_updated")
 
 
 def _runs(entries):
@@ -245,7 +245,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/claude|/codex")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/claude|/codex")
 DOES = {"claude_code": "Every command Claude Code runs is checked by GOV-AIOS first and written to the audit log.",
         "codex": "Shell commands, file edits and plugin calls are checked by GOV-AIOS first and written to the audit "
                  "log. Plugins stay on; each new plugin tool asks you once."}
@@ -697,8 +697,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                f"autocomplete=one-time-code required autofocus><button class=go>Open session</button></form>"
                if not s.active() and store.load() is not None else "")
         cmds = "".join(f"<option value='{escape(x)}'>" for x in slashes())
-        ans = answer_card(csrf) or fix_card(csrf)   # the admin is answering: no reload wipes it, no box steals focus
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{ans}{result_card()}{otp}"
+        ans = answer_card(csrf) or task_card(csrf)   # the admin is answering: no reload wipes it, no box steals focus
+        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{ans}{tasks_card()}{result_card()}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
                      f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp or ans else ' autofocus'} "
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
@@ -750,57 +750,133 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             rows.append(f"<fieldset><legend>{lab}</legend>{ctl}"
                         f"<label><input type=checkbox name='{escape('save:' + f['key'][:200])}' value=1> Save to my bank</label>"
                         f"</fieldset>")
-        return (f"<section class=appcard><h2>Job Apply needs your answers</h2>"
+        return (f"<section class=appcard><h2>JobLens needs your answers</h2>"
                 f"<p class=m>Leave one empty to fill it in Chrome yourself.</p>"
                 f"<form method=post action=/apply/answer>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
                 f"{''.join(rows)}<button class=go>Send answers</button></form></section>")
 
-    def fix_asked():
-        """The live run's failed field as (digest, label); None when there is none. The label is untrusted page text."""
+    # The run's cards (applyfiles.CARDS): what each says and its buttons. Labels come from the page: untrusted.
+    CARD_TEXT = {
+        "fix": ("Fill this field in Chrome", "It couldn't fill <b>{label}</b>. Fill it in Chrome yourself, then "
+                "press Continue. Skip leaves it on the list to fill before you submit.",
+                (("continue", "Continue"), ("skip", "Skip")),
+                "{name}, I couldn't fill {label}. Please fill it in Chrome, then press Continue."),
+        "review": ("Ready for you to submit", "The form is filled. Check it in Chrome and press Submit there yourself. "
+                   "Then press Next job, or End to stop here.", (("next", "Next job"), ("end", "End")),
+                   "{name}, {job} is ready. Please check it and submit it in Chrome."),
+        "stopped": ("This job stopped", "It stopped: <b>{label}</b>. The page is saved for debugging. You can finish it "
+                    "in Chrome yourself. Press Next job to go on, or End.", (("next", "Next job"), ("end", "End")),
+                    "{name}, {job} stopped: {label}."),
+        "sandbox": ("Web sandbox", "Go to the page you want in Chrome, then press Capture this page. Done ends the "
+                    "sandbox.", (("capture", "Capture this page"), ("done", "Done")), None),
+    }
+
+    def card_asked():
+        """The live run's card as (digest, card); None when there is none for this run."""
         a = applyfiles.read_json(home, applyfiles.ASK)
-        fx = a.get("fix") if live() and a and a.get("run") == panel.run_id else None
-        if not isinstance(fx, dict) or not isinstance(fx.get("label"), str):
+        c = a.get("card") if live() and a and a.get("run") == panel.run_id else None
+        if not isinstance(c, dict) or not isinstance(c.get("kind"), str) or c.get("kind") not in CARD_TEXT or not all(
+                isinstance(c.get(k), str) for k in ("label", "job")) or type(c.get("item")) is not int:
             return None
-        return hashlib.sha256(json.dumps(a, sort_keys=True).encode()).hexdigest()[:16], fx["label"][:300]
+        return hashlib.sha256(json.dumps(a, sort_keys=True).encode()).hexdigest()[:16], c
 
-    def fix_card(csrf):
-        q = fix_asked()
-        if q is None or applyfiles.read_json(home, applyfiles.REPLY) is not None:
+    def task_card(csrf, item=None):
+        """The waiting card, on Talk or on its own task's page (item). Speaks once per card."""
+        q = card_asked()
+        if q is None or applyfiles.read_json(home, applyfiles.REPLY) is not None or item not in (None, q[1]["item"]):
             return ""
-        if panel.fix_spoken != q[0]:   # once per failed field, on its own thread (say blocks)
+        c = q[1]
+        title, text, buttons, say = CARD_TEXT[c["kind"]]
+        if say and panel.fix_spoken != q[0]:   # once per card, on its own thread (say blocks)
             panel.fix_spoken = q[0]
-            threading.Thread(target=panel.speak, daemon=True, args=(
-                f"{panel.name}, I couldn't fill {q[1][:120]}. Please fill it in Chrome, then press Continue.",)).start()
-        return (f"<section class=appcard><h2>Fill this field in Chrome</h2>"
-                f"<p>Job Apply couldn't fill <b>{escape(q[1])}</b>. Fill it in Chrome yourself, then press Continue. "
-                f"Skip leaves it on the list to fill before you submit.</p>"
-                f"<form method=post action=/apply/fix>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
-                f"<button class=go name=fix value=continue>Continue</button> "
-                f"<button name=fix value=skip>Skip</button></form></section>")
+            threading.Thread(target=panel.speak, daemon=True, args=(say.format(
+                name=panel.name, label=c["label"][:120], job=c["job"][:120] or "the job"),)).start()
+        job = (f"<p class=m><a href='/apply/task/{c['item']}'>Job {c['item']}: {escape(c['job'][:200])}</a></p>"
+               if c["job"] else "")
+        btns = " ".join(f"<button{' class=go' if i == 0 else ''} name=choice value={v}>{t}</button>"
+                        for i, (v, t) in enumerate(buttons))
+        return (f"<section class=appcard><h2>{title}</h2>{job}<p>{text.format(label=escape(c['label'][:300]))}</p>"
+                f"{sandbox_pages() if c['kind'] == 'sandbox' else ''}"
+                f"<form method=post action=/apply/card>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
+                f"{btns}</form></section>")
 
-    def apply_fix(f):
-        """Write reply.json once for this failed field: continue or skip. Nothing from the page is echoed."""
+    def apply_card(f):
+        """Write reply.json once for this card, with one of its own choices. Nothing from the page is echoed."""
         with panel.lock:
-            q = fix_asked() if panel.session.active() else None
+            q = card_asked() if panel.session.active() else None
             if q is None or f.get("ask") != q[0] or applyfiles.read_json(home, applyfiles.REPLY) is not None \
-                    or f.get("fix") not in ("continue", "skip"):
-                tell("That field is no longer waiting.")
+                    or f.get("choice") not in applyfiles.CARDS[q[1]["kind"]]:
+                tell("That card is no longer waiting.")
                 return "/"
-            audited("apply_fix", {"outcome": f["fix"]},
-                    lambda: applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "fix": f["fix"]}))
-            tell("Job Apply is carrying on." if f["fix"] == "continue" else "Skipped: fill it before you submit.")
-        return "/"
+            audited("apply_card", {"outcome": f["choice"], "item": q[1]["item"]},
+                    lambda: applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "card": f["choice"]}))
+            tell({"continue": "Carrying on.", "skip": "Skipped: fill it before you submit.",
+                  "next": "On to the next job.", "end": "Ending the run.", "capture": "Capturing this page.",
+                  "done": "Sandbox done."}[f["choice"]])
+        return "/" if q[1]["kind"] == "sandbox" or not q[1]["item"] else f"/apply/task/{q[1]['item']}"
+
+    TASK_WORDS = {"waiting": "Not started", "working": "Working", "needs_you": "Needs you", "review": "Ready to submit",
+                  "done": "Done", "stopped": "Stopped"}
+
+    def tasks():
+        """This (or the last) panel run's JobLens tasks, shape-checked; [] when there are none."""
+        t = applyfiles.read_json(home, applyfiles.TASKS)
+        if not t or panel.run_id is None or t.get("run") != panel.run_id or not isinstance(t.get("tasks"), list):
+            return []
+        return [x for x in t["tasks"][:50] if isinstance(x, dict) and type(x.get("n")) is int
+                and isinstance(x.get("title"), str) and isinstance(x.get("status"), str) and x["status"] in TASK_WORDS]
+
+    def tasks_card():
+        ts = tasks()
+        if not ts:
+            return ""
+        rows = "".join(f"<li><a href='/apply/task/{t['n']}'>{t['n']}. {escape(t['title'][:200])}</a> \u00b7 "
+                       f"{TASK_WORDS[t['status']]}</li>" for t in ts)
+        return f"<section class=appcard><h2>JobLens jobs</h2><ul>{rows}</ul></section>"
+
+    def task_page(n, csrf):
+        t = next((x for x in tasks() if x["n"] == n), None)
+        if t is None:
+            return None
+        lst = lambda k: "<ul>" + "".join(f"<li>{escape(str(x)[:300])}</li>" for x in (t.get(k) or [])[:50]) + "</ul>" \
+            if isinstance(t.get(k), list) and t.get(k) else ""   # noqa: E731
+        num = lambda k: t.get(k) if type(t.get(k)) is int else 0   # noqa: E731
+        runs = [r for r in _runs(_entries(log))[0] if r[0].get("flow") == "job_apply"]
+        lines = [e for e in (runs[-1] if runs else []) if e.get("item") == n]
+        cols = ["step", "action", "target", "decision", "outcome", "reason"]
+        rows = "".join("<tr>" + _td((e.get("ts") or "")[11:19]) + "".join(_td(e.get(c)) for c in cols) + "</tr>"
+                       for e in lines[-300:])
+        why = f"<p>Stopped: {escape(str(t.get('reason'))[:300])}</p>" if t.get("reason") else ""
+        return _page(f"<h1>Job {n}: {escape(t['title'][:200])}</h1><p>{TASK_WORDS[t['status']]}. Filled {num('filled')} "
+                     f"of {num('total')} fields.</p>{why}{task_card(csrf, n)}"
+                     + (f"<p>Fill in Chrome yourself:</p>{lst('yourself')}" if lst("yourself") else "")
+                     + (f"<p>Check:</p>{lst('check')}" if lst("check") else "")
+                     + f"<h2>Log</h2><table><tr><th>time</th>{''.join(f'<th>{c}</th>' for c in cols)}</tr>{rows}</table>"
+                     + "<p><a href='/'>Talk</a></p>",
+                     '<meta http-equiv="refresh" content="3">' if live() and not task_card(csrf, n) else "", here="/")
+
+    def sandbox_pages():
+        sb = applyfiles.read_json(home, applyfiles.SANDBOX)
+        if not sb or sb.get("run") != panel.run_id or not isinstance(sb.get("pages"), list):
+            return ""
+        num = lambda p, k: p.get(k) if type(p.get(k)) is int else 0   # noqa: E731
+        rows = "".join(
+            f"<li>{escape(str(p.get('title') or p.get('url') or '')[:200])}: "
+            + (f"{num(p, 'fields')} fields, {num(p, 'buttons')} buttons, {num(p, 'links')} links "
+               f"<code>{escape(str(p.get('file'))[:80])}</code>" if p.get("file") else escape(str(p.get("note") or "not captured")[:80]))
+            + "</li>" for p in sb["pages"][:50] if isinstance(p, dict))
+        return f"<p>Captured so far:</p><ul>{rows}</ul>" if rows else ""
 
     def result_card():
         r = applyfiles.read_json(home, applyfiles.RESULT)
-        if live() or panel.run is None or not r or r.get("run") != panel.run_id:
-            return ""
+        if live() or panel.run is None or not r or r.get("run") != panel.run_id or tasks():
+            return ""   # a JobLens run shows its jobs' tasks instead
         labels = lambda k: "<ul>" + "".join(f"<li>{escape(str(x)[:300])}</li>" for x in (r.get(k) or [])[:50]) + "</ul>" \
             if isinstance(r.get(k), list) and r.get(k) else ""
         you, chk = labels("yourself"), labels("check")
         num = lambda k: r.get(k) if type(r.get(k)) is int else 0   # a garbled count must not break the Talk page
         done = panel.run.code == 0 and panel.run.stopped_reason is None
-        return (f"<section class=appcard><h2>Job Apply</h2><p>Filled {num('filled')} of {num('total')} fields. "
+        return (f"<section class=appcard><h2>JobLens</h2><p>Filled {num('filled')} of {num('total')} fields. "
                 + ("Review the form in Chrome and press Submit yourself." if done
                    else "The run stopped. Check the form in Chrome.") + "</p>"
                 + (f"<p>Fill in Chrome yourself:</p>{you}" if you else "")
@@ -1202,7 +1278,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         audited("revoke", fields, apply)
         return "/approvals"
 
-    POSTS = {"/apply/answer": apply_answer, "/apply/fix": apply_fix, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+    POSTS = {"/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
@@ -1375,11 +1451,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 a = re.fullmatch(r"/audit/app/([^/]{1,200})", u.path)
                 mk = re.fullmatch(r"/market/setup/([a-z0-9_]{1,64})", u.path)
                 cs = re.fullmatch(r"/audit/(claude|codex)/([A-Za-z0-9-]{1,64})", u.path)
+                tk = re.fullmatch(r"/apply/task/([0-9]{1,2})", u.path)
                 ap = by_slash(u.path[1:])
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
                         else bank_page(sess[1]) if u.path == "/apply/bank"
+                        else task_page(int(tk[1]), sess[1]) if tk
                         else market_page() if u.path == "/market" else agent_page(ap, sess[1]) if ap
                         else market_setup_page(sess[1], mk[1]) if mk
                         else cc_session_page(by_slash(cs[1]), cs[2]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
