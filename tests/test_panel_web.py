@@ -1633,3 +1633,54 @@ def test_bank_page_get_refuses_symlinked_dir(cc):
     (real / "answers.yaml").write_text("# DIRSECRET\n")
     (cc.home / "apply").symlink_to(real)
     assert "DIRSECRET" not in cc.get("/apply/bank")[1]
+
+
+def _fixing(P, label="Notice <b>period</b>"):
+    """A live Job Apply run waiting for the admin to fill one failed field in Chrome."""
+    from govaios import applyfiles
+    rid = _asking(P, ASKED)
+    applyfiles.write_json(P.home, applyfiles.ASK, {"run": rid, "fix": {"key": "#np", "label": label}})
+    return rid
+
+
+def _spoken_soon(P, n):
+    for _ in range(200):
+        if len(P.spoken) >= n:
+            return P.spoken
+        time.sleep(0.01)
+    return P.spoken
+
+
+@pytest.mark.parametrize("choice", ["continue", "skip"])
+def test_fix_card_round_trip(cc, choice):
+    from govaios import applyfiles
+    rid = _fixing(cc)
+    page = cc.get("/")[1]
+    assert "Fill this field in Chrome" in page and "Notice &lt;b&gt;period" in page and "<b>period" not in page
+    assert 'http-equiv="refresh"' not in page   # no reload under the admin's click
+    cc.get("/")
+    assert _spoken_soon(cc, 1) == ["Rupak, I couldn't fill Notice <b>period</b>. Please fill it in Chrome, "
+                                   "then press Continue."]   # once, not on every reload
+    cc.post("/apply/fix", ask=_ask_digest(cc), fix=choice)
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "fix": choice}
+    assert [x["outcome"] for x in _log(cc.home, "apply_fix")] == [choice]
+    cc.post("/apply/fix", ask="x", fix="skip")   # a second reply is refused
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["fix"] == choice and len(_log(cc.home, "apply_fix")) == 1
+
+
+@pytest.mark.parametrize("body", [{"fix": "submit"}, {"fix": "continue", "ask": "0"}])
+def test_fix_rejects_bad_choice_or_digest(cc, body):
+    from govaios import applyfiles
+    _fixing(cc)
+    cc.post("/apply/fix", **{"ask": _ask_digest(cc), **body})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None and not _log(cc.home, "apply_fix")
+
+
+def test_fix_needs_session_and_this_run(cc):
+    from govaios import applyfiles
+    _fixing(cc)
+    d = _ask_digest(cc)
+    cc.req("/apply/fix", "POST", body={"ask": d, "fix": "continue"})   # no browser cookie
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": "0" * 16, "fix": {"key": "k", "label": "x"}})
+    assert "Fill this field in Chrome" not in cc.get("/")[1]

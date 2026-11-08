@@ -127,6 +127,13 @@ def _named(n, value):
             yield from _named(c, value)
 
 
+def _shown(region, n):
+    """Text shown beside a combo's input (its pick or placeholder), not counting an open list's options."""
+    parent = next((p for p in region.walk() if any(c is n for c in p.children)), n)
+    in_list = {id(x) for l in parent.walk() if l.role == "list" for x in l.walk()}
+    return [d.value or d.name for d in parent.walk() if d.role == "text" and id(d) not in in_list]
+
+
 def _shows_tail(value, texts):
     """The field shows value's trailing whole words (Greenhouse Country: "India +91" shows "+" "91")."""
     words = value.split()
@@ -545,13 +552,21 @@ class Runner:
         Never logs the value; Enter only inside a confirmed-open native menu."""
         root, region = self._form()
         node, label = self._node(region, f, value), f.label[:80]
+        shown0 = _shown(region, node) if node is not None and f.kind == "combo" else []
+        refused = False   # a refused click was captured already, with what was under the point
         ok = node is not None and ok_value(value, f.kind)
         if ok:
             self.gate("fill_field", "modify", target=label, destination=self.d.current_url(self.app))
             # the form can sit below the fold (Greenhouse: under the job description); click() checks the point
             self._act("scroll_into_view", self.d.scroll_into_view, node, target=label)
             before = set(_lists(root))
-            ok = self._enter(f.kind, node, value, before, label, region)
+            try:
+                ok = self._enter(f.kind, node, value, before, label, region)
+            except Exception as e:   # only "something else under the point" is this field's problem; the rest stop
+                if "not on the target element" not in str(e):
+                    raise
+                self._capture(str(e))
+                ok, refused = False, True
             root, region = self._form()   # re-found after entry or escape: the old handle may be stale
             node = n = self._node(region, f, value)
             if not ok or n is None:
@@ -561,14 +576,12 @@ class Runner:
             elif f.kind == "select":
                 ok = value in (n.value, n.name)
             elif f.kind == "combo":   # picked only once the dropdown closed; text in a still-open list doesn't count
-                parent = next((p for p in region.walk() if any(c is n for c in p.children)), n)
-                in_list = {id(x) for l in parent.walk() if l.role == "list" for x in l.walk()}
-                shown = [d.value or d.name for d in parent.walk() if d.role == "text" and id(d) not in in_list]
+                shown = _shown(region, n)
                 ok = not _new_lists(before, root, region) and (n.value == value or value in shown
                                                                  or _shows_tail(value, shown))
             else:
                 ok = n.value == value or _same_phone(value, n.value)
-        if not ok and node is not None:   # before clearing: what the page actually held
+        if not ok and node is not None and not refused:   # before clearing: what the page actually held
             self._capture(f"read-back mismatch: {label}", root, {"field": label, "kind": f.kind, "expected": value,
                                                                   "read_back": node.value})
         if not ok and node is not None and f.kind in ("text", "textarea", "combo") and self.d.focused_is(node):
@@ -577,9 +590,31 @@ class Runner:
             if f.kind == "combo":   # deleting reopens the full list; left open it can cover the next field
                 self._act("press", self.d.press, "escape", target=label)
         self._audit("action", action="fill_field", target=label, source=source, outcome="done" if ok else "mismatch")
+        if not ok and self.fix_by_hand(f, shown0):
+            self._audit("action", action="fill_field", target=label, source="admin_manual", outcome="done")
+            ok = True
         if not ok:
             self.ctx["apply"]["yourself"].append(f.label)
         return ok
+
+    def fix_by_hand(self, f, shown0):
+        """Panel run only: the admin fills the failed field in Chrome, then Continue (or Skip). Re-read after."""
+        if self.run_id is None or decide({"action": "ask_admin", "risk": "read", "destination": None},
+                                         self.flow, self.approvals) != "allow":   # no card allowed: fill yourself
+            return False
+        self.gate("ask_admin", "read")
+        reply = self._ask({"fix": {"key": f.key, "label": f.label}})
+        if reply.get("fix") not in ("continue", "skip"):
+            raise Stop("bad reply")
+        self._act("raise_pinned", self.d.raise_pinned)
+        if reply["fix"] == "skip":
+            return False
+        region = self._form()[1]
+        now = next((x for x in read_form(region) if x.key == f.key), None)
+        n = self._node(region, f, "")
+        # a react-select keeps its pick in text beside an empty input: filled once that text changed
+        return now is not None and (now.filled or f.kind == "combo" and n is not None and
+                                    _shown(region, n) not in ([], shown0))
 
     def _enter(self, kind, node, value, before, label, region):
         if kind in ("text", "textarea"):
@@ -599,7 +634,9 @@ class Runner:
             self._act("type_into", self.d.type_into, node, value, target=label)
             new = _new_lists(before, *self._form())
             cands = list({id(c): c for l in new for c in _named(l, value)}.values())
-            if len(cands) != 1:
+            if len(cands) != 1:   # the open list shows which options there were, before Escape closes it
+                self._capture(f"{len(cands)} options named as the answer: {label}", None,
+                              {"field": label, "expected": value})
                 self._act("press", self.d.press, "escape", target=label)
                 return False
             self._act("click", self.d.click, cands[0], target=label)
@@ -696,10 +733,27 @@ class Runner:
         offered = {f.key: list(f.options[1:] if f.kind == "select" else f.options if f.kind == "radio" else ())
                    for f in pend}
         asked = {f.key: f for f in pend}
+        reply = self._ask({"fields": [
+            {"key": f.key, "label": f.label, "kind": f.kind, "options": offered[f.key]} for f in pend]})
+        answers = reply.get("answers")
+        if not isinstance(answers, dict) or not all(
+                k in asked and isinstance(v, str) and len(v) <= 2000 and ok_value(v, asked[k].kind)
+                and (not v or asked[k].kind not in ("select", "radio") or v in offered[k])
+                for k, v in answers.items()):
+            raise Stop("bad reply")
+        self._act("raise_pinned", self.d.raise_pinned)
+        for f in pend:
+            v = answers.get(f.key, "")
+            if v:
+                a["filled"] += self.fill(f, v, "admin")
+            else:
+                a["yourself"].append(f.label)
+
+    def _ask(self, body):
+        """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it)."""
         try:
             remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
-            write_json(self.home, ASK, {"run": self.run_id, "fields": [
-                {"key": f.key, "label": f.label, "kind": f.kind, "options": offered[f.key]} for f in pend]})
+            write_json(self.home, ASK, {"run": self.run_id, **body})
             deadline = time.monotonic() + ASK_TIMEOUT_S
             while True:
                 reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet
@@ -714,19 +768,7 @@ class Runner:
                 time.sleep(1)
         finally:
             remove(self.home, ASK, REPLY)
-        answers = reply.get("answers")
-        if not isinstance(answers, dict) or not all(
-                k in asked and isinstance(v, str) and len(v) <= 2000 and ok_value(v, asked[k].kind)
-                and (not v or asked[k].kind not in ("select", "radio") or v in offered[k])
-                for k, v in answers.items()):
-            raise Stop("bad reply")
-        self._act("raise_pinned", self.d.raise_pinned)
-        for f in pend:
-            v = answers.get(f.key, "")
-            if v:
-                a["filled"] += self.fill(f, v, "admin")
-            else:
-                a["yourself"].append(f.label)
+        return reply
 
     def write_result(self):
         """Counts and labels only, never values."""
