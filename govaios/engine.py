@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from . import auth, runstate
+from . import auth, capture, runstate
 from .agents import user_home
 from .applyfiles import ASK, BANK, REPLY, RESULT, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
@@ -311,10 +311,27 @@ class Runner:
                 self.approve_flow()
             self.steps(self.flow["steps"])
         except Exception as e:   # fail closed: any failure is a recorded stop
-            self._audit("stop", reason=str(e) if isinstance(e, Stop) else type(e).__name__)
+            self._capture(e)
+            self._audit("stop",reason=str(e) if isinstance(e, Stop) else type(e).__name__)
             raise
         self.step = None
         self._audit("flow_end", outcome="done")
+
+    def _capture(self, e):
+        """Save the page as it is at the stop, for debugging. Never on a locked screen or an emergency stop,
+        never before a step ran; a failed capture is audited and never replaces the original stop."""
+        if self.step is None or runstate.stopped(self.home) or auth.screen_locked():
+            return
+        try:
+            name, digest = capture.save(
+                self.home, self.flow["id"], self.step, str(e) if isinstance(e, Stop) else type(e).__name__,
+                self.d.current_url(self.app), self.d.window_title(self.app), self.d.web_root(self.app),
+                getattr(self.d, "last_refusal", None))
+        except Exception:
+            self._audit("action", action="capture", outcome="error")
+            return
+        self._audit("action", action="capture", target=name, file_hash=digest, outcome="done")
+        print(f"capture saved: {capture.DIR}/{name}", flush=True)
 
     def steps(self, steps):
         for s in steps:

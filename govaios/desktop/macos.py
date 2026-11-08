@@ -45,6 +45,18 @@ def _within(el, target, depth=40):
     return False
 
 
+def _chain(el, depth=8):
+    """el and its AXParent chain (innermost first): role, subrole, title, description, value, dom id."""
+    out = []
+    for _ in range(depth):
+        if el is None:
+            break
+        out.append({k: _s(_attr(el, a)) for k, a in (("role", "AXRole"), ("subrole", "AXSubrole"),
+                    ("title", "AXTitle"), ("desc", "AXDescription"), ("value", "AXValue"), ("dom_id", "AXDOMIdentifier"))})
+        el = _attr(el, "AXParent")
+    return out
+
+
 def _s(v):
     return str(v).replace("\n", " ").strip() if isinstance(v, str) else ""
 
@@ -255,6 +267,8 @@ class MacDesktop:
         if not _within(hit, target):
             # roles only (never names or values): tells a stale target from an overlay from a coarse hit
             rel = "contains" if _within(target, hit) else "is unrelated to"
+            # dev capture only (engine writes it 0600 on stop, never logged): the full picture, names included
+            self.last_refusal = {"point": list(pt), "relation": rel, "hit": _chain(hit), "target": _chain(target)}
             raise InputRefused(f"input refused: click point is not on the target element (hit {_s(_attr(hit, 'AXRole'))}"
                                f" {rel} target {_s(_attr(target, 'AXRole')) or 'gone'})")
 

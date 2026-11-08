@@ -289,6 +289,7 @@ def test_click_refuses_when_something_else_is_under_the_point(env):
     with pytest.raises(RuntimeError, match="not on the target element") as e:
         env.d.click(Node("link", "SECRET", handle="job_link"))
     assert "SECRET" not in str(e.value) and "target" in str(e.value).split("(")[1]   # roles only, never names
+    assert env.d.last_refusal["relation"] and env.d.last_refusal["target"]   # kept for the 0600 dev capture only
     assert env.posted == []   # not even the pointer move
     env.ax.hit_parent = "job_link"   # the hit is the link's text, inside the link
     env.d.click(Node("link", "SECRET", handle="job_link"))

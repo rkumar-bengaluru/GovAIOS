@@ -573,3 +573,73 @@ def test_stop_at_cv_prompt_leaves_cv_on_card(tmp_path, monkeypatch):
     monkeypatch.setattr(engine.auth, "approve", prompt)
     r, entries, err = attach(tmp_path, CvDesk())
     assert str(err) == "emergency stop" and result(tmp_path)["yourself"] == ["Resume/CV"]
+
+
+# ----- capture on stop (dev mode: unmasked, for debugging a failed web run) -----
+class RefusingDesk(FormDesk):
+    def click(self, node):
+        self.last_refusal = {"target": [{"role": "AXTextField", "name": node.name}],
+                             "hit": [{"role": "AXGroup", "name": "overlay"}]}
+        raise InputRefused("input refused: click point is not on the target element")
+
+
+def captures(home):
+    d = home / "captures"
+    return sorted(d.iterdir()) if d.exists() else []
+
+
+def test_stop_saves_capture_of_the_page(tmp_path):
+    d = RefusingDesk(lambda d: form(text_field(d, "notice", "Notice period*")))
+    _, e, err = run(tmp_path, d)
+    assert "not on the target element" in str(err)
+    [p] = captures(tmp_path)
+    assert p.stat().st_mode & 0o777 == 0o600
+    c = json.loads(p.read_text())
+    assert c["step"] == "fill" and "not on the target element" in c["reason"]
+    assert c["url"] == URL and c["refusal"]["hit"][0]["name"] == "overlay"
+    assert any(n.get("name") == "Notice period*" for n in _flat(c["tree"]))
+    [a] = [x for x in e if x.get("action") == "capture"]
+    assert a["outcome"] == "done" and a["target"] == p.name and len(a["file_hash"]) == 64
+    assert [x["kind"] for x in e[-2:]] == ["action", "stop"]   # captured before the stop is recorded
+    assert "Notice period" not in json.dumps(a)   # the audit holds the fingerprint, never page content
+
+
+def _flat(n):
+    yield n
+    for c in n.get("children", []):
+        yield from _flat(c)
+
+
+@pytest.mark.parametrize("why", ["locked", "emergency"])
+def test_no_capture_when_locked_or_emergency_stop(tmp_path, monkeypatch, why):
+    if why == "locked":
+        monkeypatch.setattr(engine.auth, "screen_locked", lambda: True)
+    else:
+        monkeypatch.setattr(engine.runstate, "stopped", lambda home: True)
+    _, e, err = run(tmp_path, RefusingDesk(lambda d: form(text_field(d, "notice", "Notice period*"))))
+    assert err is not None and captures(tmp_path) == []
+
+
+def test_no_capture_before_any_step(tmp_path):
+    run(tmp_path, FormDesk(lambda d: form()))   # writes the flow and approves it
+    r = Runner(tmp_path / "src" / "flows" / "test_apply.yaml", RefusingDesk(lambda d: form()), tmp_path,
+               inputs={"unexpected": "x"})   # refused before the first step touches a page
+    with pytest.raises(Stop, match="bad run input"):
+        r.run()
+    assert captures(tmp_path) == []
+
+
+def test_captures_keep_only_the_last_ten(tmp_path):
+    from govaios import capture
+    for _ in range(12):
+        capture.save(tmp_path, "f", "s", "r", URL, "t", form(), None)
+    assert len(captures(tmp_path)) == 10
+
+
+def test_failed_capture_never_hides_the_stop(tmp_path):
+    class Broken(RefusingDesk):
+        def window_title(self, app):
+            raise RuntimeError("AX gone")
+    _, e, err = run(tmp_path, Broken(lambda d: form(text_field(d, "notice", "Notice period*"))))
+    assert "not on the target element" in str(err)
+    assert [x["outcome"] for x in e if x.get("action") == "capture"] == ["error"]
