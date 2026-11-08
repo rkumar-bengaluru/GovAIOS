@@ -1,0 +1,16 @@
+# JobLens (your app, http://localhost:8100) Applications tab: the jobs you approved.
+# Written 2026-11-08 from JobLens source (pages/ApplicationsPage.tsx), NOT yet checked against a live capture.
+page:
+  id: joblens_applications
+  identification:
+    title_matches: '^JobLens$'          # every JobLens page has this title: the heading tells them apart
+    anchors: [page_heading]
+  elements:
+    page_heading: { role: heading, name: "Applications", risk: read }
+    ready_rows:                         # rows whose Status is Ready (a finalized CV: the job page has Apply)
+      role: row
+      has_text: "Ready"
+      risk: read
+      fields:
+        client: { role: cell, index: 0, text: true, risk: read }
+        role:   { role: link, index: 0, risk: navigate }

@@ -1,0 +1,12 @@
+# JobLens job page (/jobs/<id>). Written 2026-11-08 from JobLens source (components/ApplyBar.tsx),
+# NOT yet checked against a live capture. Apply downloads the tailored CV and opens the job link in a new tab.
+page:
+  id: joblens_job
+  identification:
+    title_matches: '^JobLens$'
+    anchors: [apply_button]
+    absent: [list_heading]
+  elements:
+    list_heading:   { role: heading, name: "Applications", risk: read }
+    apply_button:   { role: button, name: "Apply", index: 0, risk: navigate }
+    mark_submitted: { role: button, name_matches: '^(Mark submitted|Submitted v)', risk: submit }   # never clicked

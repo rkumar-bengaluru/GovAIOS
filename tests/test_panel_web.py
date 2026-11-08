@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import re
+from pathlib import Path
 import shutil
 import threading
 import time
@@ -73,9 +74,11 @@ def panel(tmp_path, monkeypatch, ui):
     flows = tmp_path / "flows"
     shutil.copytree(REPO / "flows", flows)
     shutil.copytree(REPO / "pages", tmp_path / "pages")
+    shutil.copy(Path(__file__).parent / "data" / "job_apply_link.yaml", flows / "job_apply.yaml")   # a flow with an input
+    (flows / "web_sandbox.yaml").unlink()
     for f, app in (("himalayas_job_vetting", "JobLens"), ("morning_inbox_briefing", "Inbox briefing")):
         p = flows / f"{f}.yaml"
-        p.write_text(p.read_text().replace("\n  name:", f"\n  app: {app}\n  name:", 1))
+        p.write_text(re.sub(r"(?m)^  app: .*\n", "", p.read_text(), count=1).replace("\n  name:", f"\n  app: {app}\n  name:", 1))
     home = tmp_path / "home"
     home.mkdir()
     jl = next(a for a in list_apps(flows, home) if a.name == "JobLens")
@@ -967,7 +970,7 @@ def test_marketplace_lists_templates_installed_and_not(panel):
     P = panel
     (P.flows / "morning_inbox_briefing.yaml").unlink()
     body = P.get("/market")[1]
-    assert "Morning Gmail Briefing" in body and "Sync Himalayas to JobLens" in body
+    assert "Morning Gmail Briefing" in body and "SyncJobLens" in body and "Web Sandbox" in body
     assert "Installed as JobLens" in body and "href='/market/setup/morning_inbox_briefing'" in body
     assert "href='/market/setup/himalayas_job_vetting'" not in body and "aria-current=page>Marketplace" in body
 
@@ -1591,11 +1594,11 @@ def _result(cc, done_ok):
 
 def test_result_card_finished_says_submit_yourself(cc):
     page = _result(cc, True)
-    assert "press Submit yourself" in page and "stopped" not in page.split("Job Apply</h2>")[-1]
+    assert "press Submit yourself" in page and "stopped" not in page.split("JobLens</h2>")[-1]
 
 
 def test_result_card_stopped_run_says_check_form(cc):
-    page = _result(cc, False).split("Job Apply</h2>")[-1]
+    page = _result(cc, False).split("JobLens</h2>")[-1]
     assert "press Submit yourself" not in page
     assert "The run stopped. Check the form in Chrome." in page and "Resume/CV" in page
 
@@ -1635,11 +1638,12 @@ def test_bank_page_get_refuses_symlinked_dir(cc):
     assert "DIRSECRET" not in cc.get("/apply/bank")[1]
 
 
-def _fixing(P, label="Notice <b>period</b>"):
-    """A live Job Apply run waiting for the admin to fill one failed field in Chrome."""
+def _carding(P, kind="fix", label="Notice <b>period</b>", job="", item=0):
+    """A live Job Apply run waiting on one of its cards (applyfiles.CARDS)."""
     from govaios import applyfiles
     rid = _asking(P, ASKED)
-    applyfiles.write_json(P.home, applyfiles.ASK, {"run": rid, "fix": {"key": "#np", "label": label}})
+    applyfiles.write_json(P.home, applyfiles.ASK, {"run": rid, "card": {"kind": kind, "label": label, "job": job,
+                                                                        "item": item}})
     return rid
 
 
@@ -1654,33 +1658,84 @@ def _spoken_soon(P, n):
 @pytest.mark.parametrize("choice", ["continue", "skip"])
 def test_fix_card_round_trip(cc, choice):
     from govaios import applyfiles
-    rid = _fixing(cc)
+    rid = _carding(cc)
     page = cc.get("/")[1]
     assert "Fill this field in Chrome" in page and "Notice &lt;b&gt;period" in page and "<b>period" not in page
     assert 'http-equiv="refresh"' not in page   # no reload under the admin's click
     cc.get("/")
     assert _spoken_soon(cc, 1) == ["Rupak, I couldn't fill Notice <b>period</b>. Please fill it in Chrome, "
                                    "then press Continue."]   # once, not on every reload
-    cc.post("/apply/fix", ask=_ask_digest(cc), fix=choice)
-    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "fix": choice}
-    assert [x["outcome"] for x in _log(cc.home, "apply_fix")] == [choice]
-    cc.post("/apply/fix", ask="x", fix="skip")   # a second reply is refused
-    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["fix"] == choice and len(_log(cc.home, "apply_fix")) == 1
+    cc.post("/apply/card", ask=_ask_digest(cc), choice=choice)
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": choice}
+    assert [(x["outcome"], x["item"]) for x in _log(cc.home, "apply_card")] == [(choice, 0)]
+    cc.post("/apply/card", ask="x", choice="skip")   # a second reply is refused
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["card"] == choice and len(_log(cc.home, "apply_card")) == 1
 
 
-@pytest.mark.parametrize("body", [{"fix": "submit"}, {"fix": "continue", "ask": "0"}])
-def test_fix_rejects_bad_choice_or_digest(cc, body):
+@pytest.mark.parametrize("body", [{"choice": "submit"}, {"choice": "next"}, {"choice": "continue", "ask": "0"}])
+def test_card_rejects_other_choices_or_digest(cc, body):
     from govaios import applyfiles
-    _fixing(cc)
-    cc.post("/apply/fix", **{"ask": _ask_digest(cc), **body})
-    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None and not _log(cc.home, "apply_fix")
+    _carding(cc)   # a fix card: "next" belongs to another kind
+    cc.post("/apply/card", **{"ask": _ask_digest(cc), **body})
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None and not _log(cc.home, "apply_card")
 
 
-def test_fix_needs_session_and_this_run(cc):
+def test_card_needs_session_and_this_run(cc):
     from govaios import applyfiles
-    _fixing(cc)
+    _carding(cc)
     d = _ask_digest(cc)
-    cc.req("/apply/fix", "POST", body={"ask": d, "fix": "continue"})   # no browser cookie
+    cc.req("/apply/card", "POST", body={"ask": d, "choice": "continue"})   # no browser cookie
     assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
-    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": "0" * 16, "fix": {"key": "k", "label": "x"}})
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": "0" * 16, "card": {"kind": "fix", "label": "x", "job": "",
+                                                                             "item": 0}})
     assert "Fill this field in Chrome" not in cc.get("/")[1]
+
+
+def _tasks(P, rid, ts):
+    from govaios import applyfiles
+    applyfiles.write_json(P.home, applyfiles.TASKS, {"run": rid, "tasks": ts})
+
+
+def test_review_card_and_tasks_in_talk(cc):
+    from govaios import applyfiles
+    rid = _carding(cc, "review", "", "Acme <i>Test</i> \u2014 Lead", 2)
+    _tasks(cc, rid, [{"n": 1, "title": "Old \u2014 Dev", "status": "done", "filled": 3, "total": 3},
+                     {"n": 2, "title": "Acme <i>Test</i> \u2014 Lead", "status": "review", "filled": 5, "total": 6,
+                      "yourself": ["Gender"]}, {"n": "x", "title": 3, "status": "bad"}])
+    page = cc.get("/")[1]
+    assert "Ready for you to submit" in page and "Acme &lt;i&gt;Test" in page and "<i>Test" not in page
+    assert "<a href='/apply/task/1'>1. Old \u2014 Dev</a> \u00b7 Done" in page and "Ready to submit" in page
+    assert "/apply/task/3" not in page   # a malformed task is not shown
+    assert _spoken_soon(cc, 1)[-1] == "Rupak, Acme <i>Test</i> \u2014 Lead is ready. Please check it and submit it in Chrome."
+    s, _, r = cc.post("/apply/card", ask=_ask_digest(cc), choice="next")
+    assert r.getheader("Location") == "/apply/task/2"
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": "next"}
+
+
+def test_task_page_shows_its_log_counts_and_card(cc):
+    from govaios.audit.log import AuditLog
+    rid = _carding(cc, "stopped", "unexpected page", "Acme \u2014 Lead", 1)
+    _tasks(cc, rid, [{"n": 1, "title": "Acme \u2014 Lead", "status": "stopped", "reason": "unexpected page",
+                      "filled": 0, "total": 0}])
+    log = AuditLog(cc.home)
+    log.append("flow_start", flow="job_apply", flow_hash="h")
+    log.append("action", flow="job_apply", step="open_job", action="click", target="Lead", outcome="done", item=1)
+    log.append("action", flow="job_apply", step="other", action="click", target="Other job", outcome="done", item=2)
+    page = cc.get("/apply/task/1")[1]
+    assert "Job 1: Acme \u2014 Lead" in page and "Stopped: unexpected page" in page and "This job stopped" in page
+    assert "open_job" in page and "Other job" not in page
+    assert cc.get("/apply/task/9")[0] == 404
+    assert cc.req("/apply/task/1")[0] in (302, 303)   # signed out: to the Locked page
+
+
+def test_sandbox_card_lists_captured_pages(cc):
+    from govaios import applyfiles
+    rid = _carding(cc, "sandbox", "1 captured")
+    applyfiles.write_json(cc.home, applyfiles.SANDBOX, {"run": rid, "pages": [
+        {"title": "Shop <b>", "url": "https://shop.example", "file": "x.json", "fields": 2, "buttons": 3, "links": 4},
+        {"title": "", "url": "https://other.example/", "file": None, "note": "another site: not captured"}]})
+    page = cc.get("/")[1]
+    assert "Capture this page" in page and "Shop &lt;b&gt;: 2 fields, 3 buttons, 4 links" in page
+    assert "another site: not captured" in page
+    s, _, r = cc.post("/apply/card", ask=_ask_digest(cc), choice="capture")
+    assert r.getheader("Location") == "/" and applyfiles.read_json(cc.home, applyfiles.REPLY)["card"] == "capture"

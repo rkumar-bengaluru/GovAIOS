@@ -1,0 +1,29 @@
+workflow:
+  id: web_sandbox
+  app: Web Sandbox
+  name: "Web sandbox: open a site and capture its pages"
+  version: 1
+  # Enter only sites whose terms allow a personal agent (the terms gate is not built yet: backlog Plan 3).
+  site_terms: { reviewed: 2026-11-08, basis: "The admin checks each site's terms before entering its link" }
+
+  browser:
+    application: chrome
+    profile_directory: "Profile 2"
+    account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
+
+  inputs:
+    site: { label: "Site link (https)", pattern: "https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[^\\s]*)?" }
+  destination_inputs: [site]            # the site you type, Touch ID on first contact; nothing else
+
+  permissions:                          # Rule 9: unlisted = denied. Read only: it never clicks or types on the site.
+    allow: [launch_application, navigate, read_page, ask_admin]
+    max_element_risk: read
+  destinations: ["https://www.google.com"]
+
+  steps:
+    - { id: launch_chrome, action: launch_application }
+    - { id: open_google, action: navigate, value: "https://www.google.com" }
+    - { id: on_google, action: classify_page, on_match: { google_home: continue, unknown: stop_and_report } }
+    - { id: verify_account, action: verify_account, target: google_home.account_button }
+    - { id: open_site, action: navigate, value_from: input.site }
+    - { id: capture, action: capture_pages }   # you browse in Chrome; each Capture saves the page you are on

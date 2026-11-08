@@ -21,7 +21,7 @@ BUNDLES = {"chrome": ("com.google.Chrome", "Google Chrome")}
 # Fixed human pace (spec 5.8): reliability and fair site load, never bot-detection evasion (no jitter).
 # shortcut: fixed values, not the admin's learned pace; replaced by bootstrap-learned pace in plan 4.
 PACE = {"char": 0.12, "key": 0.15, "pointer": 0.25, "after_action": 1.0}
-KEYCODES = {"l": 37, "[": 33, "return": 36, "left": 123, "w": 13, "a": 0, "g": 5, "backspace": 51, "escape": 53}
+KEYCODES = {"l": 37, "[": 33, "return": 36, "left": 123, "w": 13, "t": 17, "a": 0, "g": 5, "backspace": 51, "escape": 53}
 FLAGS = {"cmd": Q.kCGEventFlagMaskCommand, "alt": Q.kCGEventFlagMaskAlternate,
          "ctrl": Q.kCGEventFlagMaskControl, "shift": Q.kCGEventFlagMaskShift}
 ATTRS = ["AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXDOMIdentifier", "AXDOMClassList", "AXChildren"]

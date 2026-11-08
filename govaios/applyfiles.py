@@ -9,6 +9,10 @@ BANK = "apply/answers.yaml"
 ASK = "apply/ask.json"
 REPLY = "apply/reply.json"
 RESULT = "apply/result.json"
+TASKS = "apply/tasks.json"       # JobLens: one task per job, its status and counts (labels only, never values)
+SANDBOX = "apply/sandbox.json"   # web sandbox: the pages captured so far
+# a card the run shows on the panel, and the only replies each kind accepts
+CARDS = {"fix": ("continue", "skip"), "review": ("next", "end"), "stopped": ("next", "end"), "sandbox": ("capture", "done")}
 MAX = 64 * 1024
 
 

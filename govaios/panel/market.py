@@ -22,12 +22,16 @@ CATALOG = (
     Template("morning_inbox_briefing", "Morning Gmail Briefing",
              "Reads your Gmail inbox and gives you a short summary of the newest mail.",
              ("Google account", "Chrome"), "Reads mail.google.com only. Never sends, replies or deletes."),
-    Template("himalayas_job_vetting", "Sync Himalayas to JobLens",
+    Template("himalayas_job_vetting", "SyncJobLens",
              "Vets your Himalayas job matches and sends the good ones to JobLens on this Mac.",
              ("Google account", "Chrome", "JobLens"), "Reads himalayas.app only. Never applies for or saves a job."),
-    Template("job_apply", "Job Apply",
-             "Opens a Himalayas job you paste, fills its Greenhouse or Lever form from your answers and attaches your CV.",
-             ("Google account", "Chrome", "Touch ID"), "Never submits: you check the form and submit it yourself."),
+    Template("job_apply", "JobLens",
+             "Opens your Ready jobs in JobLens one by one, fills each Greenhouse or Lever form from your answers and "
+             "attaches your CV. Each job is a task on the panel.",
+             ("Google account", "Chrome", "JobLens", "Touch ID"), "Never submits: you check each form and submit it yourself."),
+    Template("web_sandbox", "Web Sandbox",
+             "Opens a site you name and saves each page you choose, so new apps can be built for it.",
+             ("Google account", "Chrome", "Touch ID"), "Read only: never clicks or types on the site. Use only sites whose terms allow a personal agent."),
 )
 PROFILE_DIR = re.compile(r"Default|Profile [0-9]{1,3}")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){1,4}")

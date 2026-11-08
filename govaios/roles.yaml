@@ -57,6 +57,7 @@ keys:
   focus_address_bar: { macos: [cmd, l],   windows: [ctrl, l] }
   browser_back:      { macos: [cmd, "["], windows: [alt, left] }
   close_window:      { macos: [cmd, shift, w], windows: [ctrl, shift, w] }
+  new_tab:           { macos: [cmd, t],   windows: [ctrl, t] }
   enter:             { macos: [return],   windows: [enter] }
   select_all:        { macos: [cmd, a],   windows: [ctrl, a] }
   delete_back:       { macos: [backspace], windows: [backspace] }
