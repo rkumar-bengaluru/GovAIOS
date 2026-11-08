@@ -289,6 +289,7 @@ def test_click_refuses_when_something_else_is_under_the_point(env):
     with pytest.raises(RuntimeError, match="not on the target element") as e:
         env.d.click(Node("link", "SECRET", handle="job_link"))
     assert "SECRET" not in str(e.value) and "target" in str(e.value).split("(")[1]   # roles only, never names
+    assert env.d.last_refusal["relation"] and env.d.last_refusal["target"]   # kept for the 0600 dev capture only
     assert env.posted == []   # not even the pointer move
     env.ax.hit_parent = "job_link"   # the hit is the link's text, inside the link
     env.d.click(Node("link", "SECRET", handle="job_link"))
@@ -456,3 +457,33 @@ def test_raise_pinned_without_pinned_window_refused(form):
     with pytest.raises(macos.InputRefused, match="no pinned window"):
         form.d.raise_pinned()
     assert form.performed == []
+
+
+def test_click_rechecks_after_the_page_moves(env, monkeypatch):
+    """Greenhouse 2026-11-08: a scroll still moving put the neighbour's label under the point; settle again."""
+    tries = []
+    def hit_parent_after_first(el, x, y, _):
+        tries.append((x, y))
+        env.ax.hit_parent = "job_link" if len(tries) > 1 else None   # second look: the field is under the point
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", hit_parent_after_first)
+    env.d.click(Node("text_field", "SECRET", handle="job_link"))
+    assert len(env.posted) == 3
+
+
+def test_click_refuses_when_the_point_never_settles(env):
+    with pytest.raises(RuntimeError, match="not on the target element"):
+        env.d.click(Node("text_field", "SECRET", handle="job_link"))
+    assert env.posted == []
+
+
+def test_click_uses_centre_when_left_edge_is_covered(env, monkeypatch):
+    """Greenhouse 2026-11-08: "Locate me" sat over the Location option's left edge; its centre was clear."""
+    def covered_left(el, x, y, _):
+        env.ax.hit_parent = "job_link" if x > 30 else None   # bounds (10, 10, 100, 20): left x=30, centre x=60
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", covered_left)
+    pts = []
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", lambda src, t, pt, b: pts.append(pt) or ("mouse", t))
+    env.d.click(Node("text", "SECRET", handle="job_link"))
+    assert pts == [(60, 20)] * 3

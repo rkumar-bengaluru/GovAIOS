@@ -120,6 +120,7 @@ class BlankUrl(FakeDesktop):
 
 def test_blank_url_denied(tmp_path):
     r, e, err = run(tmp_path, [True] * 10, BlankUrl)
+    e = [x for x in e if x.get("action") != "capture"]   # capture on stop sits just before the stop
     assert isinstance(err, Stop)
     assert [x["kind"] for x in e][-2:] == ["request", "stop"]
     assert e[-2]["decision"] == "deny" and e[-2]["reason"] == "no url"
@@ -132,7 +133,8 @@ def test_write_json_outside_home_stops(tmp_path, d):
     home.mkdir()
     _, e, err = run(home, [True] * 10, directory=d)
     assert isinstance(err, Stop) and e[-1]["kind"] == "stop"
-    assert not (tmp_path / "x").exists() and not [p for p in home.glob("**/*.json") if p.name != "approvals.json"]
+    assert not (tmp_path / "x").exists() and not [p for p in home.glob("**/*.json")
+                                                  if p.name != "approvals.json" and p.parent.name != "captures"]
 
 
 class LoggedOut(FakeDesktop):
@@ -208,6 +210,7 @@ class ExtractBlank(FakeDesktop):
 def test_extract_blank_url_denied(tmp_path, monkeypatch):
     monkeypatch.setattr(engine.Runner, "do_click", lambda self, s: setattr(self.d, "url", "https://himalayas.app/jobs/secret-title"))
     _, e, err = run(tmp_path, [True] * 10, ExtractBlank)
+    e = [x for x in e if x.get("action") != "capture"]
     assert isinstance(err, Stop) and e[-2]["action"] == "extract_visible_text" and e[-2]["reason"] == "no url"
 
 

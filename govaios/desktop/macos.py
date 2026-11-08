@@ -45,6 +45,22 @@ def _within(el, target, depth=40):
     return False
 
 
+def _chain(el, depth=8):
+    """el and its AXParent chain (innermost first): role, subrole, title, description, value, dom id."""
+    out = []
+    for _ in range(depth):
+        if el is None:
+            break
+        out.append({k: _s(_attr(el, a)) for k, a in (("role", "AXRole"), ("subrole", "AXSubrole"),
+                    ("title", "AXTitle"), ("desc", "AXDescription"), ("value", "AXValue"), ("dom_id", "AXDOMIdentifier"))})
+        pos, size = _attr(el, "AXPosition"), _attr(el, "AXSize")
+        if pos is not None and size is not None:   # x, y, w, h on screen
+            p, s = AXValueGetValue(pos, kAXValueCGPointType, None)[1], AXValueGetValue(size, kAXValueCGSizeType, None)[1]
+            out[-1]["frame"] = [p.x, p.y, s.width, s.height]
+        el = _attr(el, "AXParent")
+    return out
+
+
 def _s(v):
     return str(v).replace("\n", " ").strip() if isinstance(v, str) else ""
 
@@ -220,9 +236,8 @@ class MacDesktop:
         _, s = AXValueGetValue(size, kAXValueCGSizeType, None)
         return p.x, p.y, s.width, s.height
 
-    def click(self, node):
-        self._require_focus()
-        # wait for layout to settle (ads, hydration) so the click hits the element, max ~3s
+    def _settled_points(self, node):
+        # wait for layout to settle (ads, hydration, smooth scroll) so the click hits the element, max ~3s
         x, y, w, h = self._bounds(node)
         for _ in range(10):
             time.sleep(0.3)
@@ -232,7 +247,24 @@ class MacDesktop:
             x, y, w, h = b
         if w <= 0 or h <= 0:
             raise RuntimeError("element not visible")
-        pt = (x + min(w / 2, 20), y + h / 2)   # near the left edge: link text, not trailing whitespace
+        return (x + min(w / 2, 20), y + h / 2), (x + w / 2, y + h / 2)
+
+    def click(self, node):
+        self._require_focus()
+        pt = None
+        for attempt in range(3):
+            # left spot first (link text, not trailing whitespace), then the centre: a page button can sit over
+            # an option's left edge (Greenhouse "Locate me" under the Location list)
+            for i, p in enumerate(self._settled_points(node)):
+                try:
+                    self._require_point(p, node.handle)
+                    pt = p
+                    break
+                except InputRefused as e:   # a scroll still moving can leave a neighbour under a stale point
+                    if "not on the target element" not in str(e) or (attempt == 2 and i == 1):   # other app/window: at once
+                        raise
+            if pt is not None:
+                break
         for t in (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
             if t != Q.kCGEventLeftMouseUp:   # re-check after the pointer pause; never strand a pressed button
                 self._require_point(pt, node.handle)
@@ -255,6 +287,8 @@ class MacDesktop:
         if not _within(hit, target):
             # roles only (never names or values): tells a stale target from an overlay from a coarse hit
             rel = "contains" if _within(target, hit) else "is unrelated to"
+            # dev capture only (engine writes it 0600 on stop, never logged): the full picture, names included
+            self.last_refusal = {"point": list(pt), "relation": rel, "hit": _chain(hit), "target": _chain(target)}
             raise InputRefused(f"input refused: click point is not on the target element (hit {_s(_attr(hit, 'AXRole'))}"
                                f" {rel} target {_s(_attr(target, 'AXRole')) or 'gone'})")
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from . import auth, runstate
+from . import auth, capture, runstate
 from .agents import user_home
 from .applyfiles import ASK, BANK, REPLY, RESULT, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
@@ -125,6 +125,18 @@ def _named(n, value):
             yield c
         else:
             yield from _named(c, value)
+
+
+def _shows_tail(value, texts):
+    """The field shows value's trailing whole words (Greenhouse Country: "India +91" shows "+" "91")."""
+    words = value.split()
+    return bool({" ".join(words[i:]) for i in range(len(words))} & {"".join(texts), " ".join(texts)} - {""})
+
+
+def _same_phone(value, got):
+    """A phone number the page reformatted as typed: same digits, other spacing or punctuation."""
+    digits = re.sub(r"\D", "", value)
+    return bool(re.fullmatch(r"\+?[\d\s().-]{7,}", value)) and digits == re.sub(r"\D", "", got)
 
 
 def _option(group, value):
@@ -311,10 +323,27 @@ class Runner:
                 self.approve_flow()
             self.steps(self.flow["steps"])
         except Exception as e:   # fail closed: any failure is a recorded stop
-            self._audit("stop", reason=str(e) if isinstance(e, Stop) else type(e).__name__)
+            self._capture(str(e) if isinstance(e, Stop) else type(e).__name__)
+            self._audit("stop",reason=str(e) if isinstance(e, Stop) else type(e).__name__)
             raise
         self.step = None
         self._audit("flow_end", outcome="done")
+
+    def _capture(self, reason, root=None, extra=None):
+        """Save the page as it is at the stop, for debugging. Never on a locked screen or an emergency stop,
+        never before a step ran; a failed capture is audited and never replaces the original stop."""
+        if self.step is None or runstate.stopped(self.home) or auth.screen_locked():
+            return
+        try:
+            name, digest = capture.save(
+                self.home, self.flow["id"], self.step, reason, self.d.current_url(self.app),
+                self.d.window_title(self.app), root if root is not None else self.d.web_root(self.app),
+                extra if extra is not None else getattr(self.d, "last_refusal", None))
+        except Exception:
+            self._audit("action", action="capture", outcome="error")
+            return
+        self._audit("action", action="capture", target=name, file_hash=digest, outcome="done")
+        print(f"capture saved: {capture.DIR}/{name}", flush=True)
 
     def steps(self, steps):
         for s in steps:
@@ -522,7 +551,7 @@ class Runner:
             # the form can sit below the fold (Greenhouse: under the job description); click() checks the point
             self._act("scroll_into_view", self.d.scroll_into_view, node, target=label)
             before = set(_lists(root))
-            ok = self._enter(f.kind, node, value, before, label)
+            ok = self._enter(f.kind, node, value, before, label, region)
             root, region = self._form()   # re-found after entry or escape: the old handle may be stale
             node = n = self._node(region, f, value)
             if not ok or n is None:
@@ -534,26 +563,39 @@ class Runner:
             elif f.kind == "combo":   # picked only once the dropdown closed; text in a still-open list doesn't count
                 parent = next((p for p in region.walk() if any(c is n for c in p.children)), n)
                 in_list = {id(x) for l in parent.walk() if l.role == "list" for x in l.walk()}
-                ok = not _new_lists(before, root, region) and (n.value == value or any(
-                    d.role == "text" and (d.value or d.name) == value and id(d) not in in_list for d in parent.walk()))
+                shown = [d.value or d.name for d in parent.walk() if d.role == "text" and id(d) not in in_list]
+                ok = not _new_lists(before, root, region) and (n.value == value or value in shown
+                                                                 or _shows_tail(value, shown))
             else:
-                ok = n.value == value
+                ok = n.value == value or _same_phone(value, n.value)
+        if not ok and node is not None:   # before clearing: what the page actually held
+            self._capture(f"read-back mismatch: {label}", root, {"field": label, "kind": f.kind, "expected": value,
+                                                                  "read_back": node.value})
         if not ok and node is not None and f.kind in ("text", "textarea", "combo") and self.d.focused_is(node):
             self._act("press", self.d.press, "select_all", target=label)
             self._act("press", self.d.press, "delete_back", target=label)
+            if f.kind == "combo":   # deleting reopens the full list; left open it can cover the next field
+                self._act("press", self.d.press, "escape", target=label)
         self._audit("action", action="fill_field", target=label, source=source, outcome="done" if ok else "mismatch")
         if not ok:
             self.ctx["apply"]["yourself"].append(f.label)
         return ok
 
-    def _enter(self, kind, node, value, before, label):
+    def _enter(self, kind, node, value, before, label, region):
         if kind in ("text", "textarea"):
             self._act("click", self.d.click, node, target=label)
             if not self.d.focused_is(node):
                 return False
             self._act("type_into", self.d.type_into, node, value, target=label)
         elif kind == "combo":
-            self._act("click", self.d.click, node, target=label)
+            from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
+            try:
+                self._act("click", self.d.click, node, target=label)
+            except InputRefused as e:   # an empty react-select input is 4 px wide under its placeholder: click its box
+                box = next((p for p in region.walk() if any(c is node for c in p.children)), None)
+                if box is None or "not on the target element" not in str(e):
+                    raise
+                self._act("click", self.d.click, box, target=label)
             self._act("type_into", self.d.type_into, node, value, target=label)
             new = _new_lists(before, *self._form())
             cands = list({id(c): c for l in new for c in _named(l, value)}.values())
