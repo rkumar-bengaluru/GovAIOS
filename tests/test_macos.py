@@ -457,3 +457,21 @@ def test_raise_pinned_without_pinned_window_refused(form):
     with pytest.raises(macos.InputRefused, match="no pinned window"):
         form.d.raise_pinned()
     assert form.performed == []
+
+
+def test_click_rechecks_after_the_page_moves(env, monkeypatch):
+    """Greenhouse 2026-11-08: a scroll still moving put the neighbour's label under the point; settle again."""
+    tries = []
+    def hit_parent_after_first(el, x, y, _):
+        tries.append((x, y))
+        env.ax.hit_parent = "job_link" if len(tries) > 1 else None   # second look: the field is under the point
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", hit_parent_after_first)
+    env.d.click(Node("text_field", "SECRET", handle="job_link"))
+    assert len(env.posted) == 3
+
+
+def test_click_refuses_when_the_point_never_settles(env):
+    with pytest.raises(RuntimeError, match="not on the target element"):
+        env.d.click(Node("text_field", "SECRET", handle="job_link"))
+    assert env.posted == []

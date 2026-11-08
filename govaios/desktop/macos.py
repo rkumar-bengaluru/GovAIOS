@@ -53,6 +53,10 @@ def _chain(el, depth=8):
             break
         out.append({k: _s(_attr(el, a)) for k, a in (("role", "AXRole"), ("subrole", "AXSubrole"),
                     ("title", "AXTitle"), ("desc", "AXDescription"), ("value", "AXValue"), ("dom_id", "AXDOMIdentifier"))})
+        pos, size = _attr(el, "AXPosition"), _attr(el, "AXSize")
+        if pos is not None and size is not None:   # x, y, w, h on screen
+            p, s = AXValueGetValue(pos, kAXValueCGPointType, None)[1], AXValueGetValue(size, kAXValueCGSizeType, None)[1]
+            out[-1]["frame"] = [p.x, p.y, s.width, s.height]
         el = _attr(el, "AXParent")
     return out
 
@@ -232,9 +236,8 @@ class MacDesktop:
         _, s = AXValueGetValue(size, kAXValueCGSizeType, None)
         return p.x, p.y, s.width, s.height
 
-    def click(self, node):
-        self._require_focus()
-        # wait for layout to settle (ads, hydration) so the click hits the element, max ~3s
+    def _settled_point(self, node):
+        # wait for layout to settle (ads, hydration, smooth scroll) so the click hits the element, max ~3s
         x, y, w, h = self._bounds(node)
         for _ in range(10):
             time.sleep(0.3)
@@ -244,7 +247,18 @@ class MacDesktop:
             x, y, w, h = b
         if w <= 0 or h <= 0:
             raise RuntimeError("element not visible")
-        pt = (x + min(w / 2, 20), y + h / 2)   # near the left edge: link text, not trailing whitespace
+        return (x + min(w / 2, 20), y + h / 2)   # near the left edge: link text, not trailing whitespace
+
+    def click(self, node):
+        self._require_focus()
+        for attempt in range(3):
+            pt = self._settled_point(node)
+            try:
+                self._require_point(pt, node.handle)
+                break
+            except InputRefused as e:   # a scroll still moving can leave a neighbour under a stale point
+                if attempt == 2 or "not on the target element" not in str(e):   # other app/window: at once
+                    raise
         for t in (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
             if t != Q.kCGEventLeftMouseUp:   # re-check after the pointer pause; never strand a pressed button
                 self._require_point(pt, node.handle)
