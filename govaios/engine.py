@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+from urllib.parse import urlsplit
 
 from . import auth, capture, runstate
 from .agents import user_home
@@ -325,9 +326,16 @@ class Runner:
                     isinstance(v, str) and re.fullmatch(decl[k]["pattern"], v) for k, v in given.items()):
                 raise Stop("bad run input")
             for k in self.flow.get("destination_inputs", []):   # web sandbox: the site the admin typed (Touch ID on
-                if k not in decl or not given[k].startswith("https://"):   # first contact, as any destination)
-                    raise Stop("bad destination input")
-                self.flow["destinations"] = [*self.flow["destinations"], origin(given[k])]
+                try:
+                    u = urlsplit(given[k])
+                    port = u.port
+                except ValueError:
+                    raise Stop("bad destination input") from None
+                if k not in decl or u.scheme != "https" or u.username or u.password or not u.hostname:
+                    raise Stop("bad destination input")   # first contact asks for Touch ID, as any destination
+                site = f"https://{u.hostname.lower()}" + (f":{port}" if port not in (None, 443) else "")
+                self.flow["destinations"] = [*self.flow["destinations"], site]
+                self.inputs = {**given, k: site + given[k][len(f"{u.scheme}://{u.netloc}"):]}   # navigate there too
             approved = self.approvals.flow_ok(self.flow["id"], self.digest)
             if self.ticket is not None:   # panel run: never a prompt; the ticket is the start proof
                 from .panel import tickets
@@ -359,6 +367,13 @@ class Runner:
         """Save the page as it is at the stop, for debugging. Never on a locked screen or an emergency stop,
         never before a step ran; a failed capture is audited and never replaces the original stop."""
         if self.step is None or runstate.stopped(self.home) or auth.screen_locked():
+            return None
+        try:
+            url = self.d.current_url(self.app) or ""
+        except Exception:
+            url = ""
+        if origin(url) not in {origin(d) for d in self.flow.get("destinations", [])}:
+            self._audit("action", action="capture", outcome="not_declared")   # never read a site the flow may not reach
             return None
         try:
             name, digest = capture.save(
@@ -472,7 +487,7 @@ class Runner:
                 reason = str(e) if isinstance(e, Stop) else type(e).__name__
                 if self._current_task()["status"] != "done":
                     self._task("stopped", reason=reason[:200])
-                if _ends_run(e):
+                if not isinstance(e, Stop) or _ends_run(e):   # an engine or AX error: fail closed, end the run
                     raise
                 self._capture(reason)
                 self._audit("action", action="task_stop", reason=reason, outcome="error")
@@ -525,6 +540,14 @@ class Runner:
                               "note": "another site: not captured"})
             else:
                 root = self.snapshot()
+                if origin(self.d.current_url(self.app) or "") != origin(url):   # moved on while it was read
+                    pages.append({"title": "", "url": url_for_audit(url), "file": None,
+                                  "note": "page changed while capturing: not captured"})
+                    if self.run_id is not None:
+                        write_json(self.home, SANDBOX, {"run": self.run_id, "pages": pages[-50:]})
+                    if choice is None:
+                        return
+                    continue
                 name = self._capture("sandbox", root, {"sandbox": True})
                 pages.append({"title": root.name[:200], "url": url_for_audit(url), "file": name,
                               "fields": sum(n.role in FIELD_ROLES for n in root.walk()),
@@ -864,7 +887,8 @@ class Runner:
         """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it)."""
         try:
             remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
-            write_json(self.home, ASK, {"run": self.run_id, **body})
+            self.asks = getattr(self, "asks", 0) + 1   # each ask unique: a stale reply never answers the next one
+            write_json(self.home, ASK, {"run": self.run_id, "seq": self.asks, **body})
             deadline = time.monotonic() + ASK_TIMEOUT_S
             while True:
                 reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet

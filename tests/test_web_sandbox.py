@@ -123,3 +123,27 @@ def test_bad_site_input_refused(tmp_path, monkeypatch, site):
 def test_cli_run_captures_the_site_once(tmp_path, monkeypatch):
     e, err, asked = run_sandbox(tmp_path, SiteDesk(), [], monkeypatch, run_id=None)
     assert err is None and len(list((tmp_path / "captures").iterdir())) == 1
+
+
+def test_page_that_moves_while_captured_is_not_saved(tmp_path, monkeypatch):
+    class Moving(SiteDesk):
+        def web_root(self, app):
+            root = super().web_root(app)
+            if "shop.example" in self.url and "google" not in self.url:
+                self.url = "https://evil.example/landing"   # the tab moved on during the read
+            return root
+    d = Moving()
+    e, err, asked = run_sandbox(tmp_path, d, ["capture", "done"], monkeypatch)
+    [p] = applyfiles.read_json(tmp_path, applyfiles.SANDBOX)["pages"]
+    assert p["file"] is None and p["note"] == "page changed while capturing: not captured"
+    assert not (tmp_path / "captures").exists() or not any(
+        "evil.example" in f.read_text() for f in (tmp_path / "captures").iterdir())
+
+
+def test_site_typed_with_case_and_default_port_still_matches(tmp_path, monkeypatch):
+    d = SiteDesk()
+    d.press = lambda k: (d.calls.append(k), setattr(d, "url", d.typed.lower().replace(":443", "")) if k == "enter" else None)
+    e, err, asked = run_sandbox(tmp_path, d, ["capture", "done"], monkeypatch, site="https://Shop.Example.com:443/a")
+    assert err is None and "https://shop.example.com for the first time" in asked[0]
+    [p] = applyfiles.read_json(tmp_path, applyfiles.SANDBOX)["pages"]
+    assert p["file"] is not None

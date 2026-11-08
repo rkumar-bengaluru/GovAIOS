@@ -784,3 +784,21 @@ def test_covered_field_on_panel_run_asks_fix(tmp_path):
     _, e, err = run(tmp_path, d, allow=ASKED)
     t.join(1)
     assert err is None and result(tmp_path)["filled"] == 1
+
+
+def test_each_ask_is_unique_so_a_stale_reply_never_answers_the_next(tmp_path):
+    d = FormDesk(lambda d: form(text_field(d, "a", "School"), text_field(d, "b", "College")), keep=lambda t: t[:1])
+    seen = []
+    def go():
+        for _ in range(4000):
+            ask = applyfiles.read_json(tmp_path, applyfiles.ASK)
+            if ask and ask not in seen:
+                seen.append(ask)
+                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "card": "skip"})
+            threading.Event().wait(0.002)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    rows = ({"key": "s", "labels": ["School"], "answer": "Uni"}, {"key": "c", "labels": ["College"], "answer": "Uni"})
+    _, e, err = run(tmp_path, d, rows, allow=ASKED)
+    assert err is None and [a["card"]["label"] for a in seen] == ["School", "College"]
+    assert seen[0]["seq"] != seen[1]["seq"]   # same-label cards still differ, so their digests do too

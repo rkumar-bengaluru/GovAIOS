@@ -393,7 +393,9 @@ def test_a_job_that_stops_ends_only_its_task(tmp_path):
     assert [(c["kind"], c["label"], c["item"]) for c in seen] == [("stopped", "unexpected page", 1), ("review", "", 2)]
     [st] = [x for x in e if x.get("action") == "task_stop"]
     assert st["item"] == 1 and st["reason"] == "unexpected page"
-    assert any(x.get("action") == "capture" and x.get("item") == 1 for x in e)
+    # the undeclared site is never read for a capture
+    assert [x["outcome"] for x in e if x.get("action") == "capture" and x.get("item") == 1] == ["not_declared"]
+    assert not (tmp_path / "captures").exists()
     assert not any(x["kind"] == "stop" for x in e)
 
 
@@ -448,3 +450,16 @@ def test_job_apply_in_marketplace_and_set_up_as_draft(tmp_path):
     b = yaml.safe_load(out.read_text())["workflow"]["browser"]
     assert (b["profile_directory"], b["account"]) == ("Profile 5", "x.y@example.com")
     assert [a.name for a in list_apps(tmp_path / "apps/flows", tmp_path)] == ["JobLens"]
+
+
+@pytest.mark.usefixtures("env")
+def test_an_engine_error_inside_a_job_ends_the_run(tmp_path):
+    """Not a Stop (an AX or engine bug): fail closed, never carry on to the next job."""
+    d = ApplyDesk(GH)
+    d.scroll_into_view = lambda node: (_ for _ in ()).throw(AttributeError("AX gone"))
+    with pytest.raises(AttributeError):
+        run_apply(tmp_path, d)
+    tasks = json.loads((tmp_path / "apply" / "tasks.json").read_text())["tasks"]
+    assert [t["status"] for t in tasks] == ["stopped", "waiting"] and tasks[0]["reason"] == "AttributeError"
+    e = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert e[-1]["kind"] == "stop" and not any(x.get("action") == "task_stop" for x in e)

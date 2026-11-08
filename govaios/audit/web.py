@@ -775,7 +775,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         """The live run's card as (digest, card); None when there is none for this run."""
         a = applyfiles.read_json(home, applyfiles.ASK)
         c = a.get("card") if live() and a and a.get("run") == panel.run_id else None
-        if not isinstance(c, dict) or c.get("kind") not in CARD_TEXT or not all(
+        if not isinstance(c, dict) or not isinstance(c.get("kind"), str) or c.get("kind") not in CARD_TEXT or not all(
                 isinstance(c.get(k), str) for k in ("label", "job")) or type(c.get("item")) is not int:
             return None
         return hashlib.sha256(json.dumps(a, sort_keys=True).encode()).hexdigest()[:16], c
@@ -824,7 +824,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if not t or panel.run_id is None or t.get("run") != panel.run_id or not isinstance(t.get("tasks"), list):
             return []
         return [x for x in t["tasks"][:50] if isinstance(x, dict) and type(x.get("n")) is int
-                and isinstance(x.get("title"), str) and x.get("status") in TASK_WORDS]
+                and isinstance(x.get("title"), str) and isinstance(x.get("status"), str) and x["status"] in TASK_WORDS]
 
     def tasks_card():
         ts = tasks()

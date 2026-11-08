@@ -1739,3 +1739,13 @@ def test_sandbox_card_lists_captured_pages(cc):
     assert "another site: not captured" in page
     s, _, r = cc.post("/apply/card", ask=_ask_digest(cc), choice="capture")
     assert r.getheader("Location") == "/" and applyfiles.read_json(cc.home, applyfiles.REPLY)["card"] == "capture"
+
+
+@pytest.mark.parametrize("bad", [{"kind": ["fix"], "label": "x", "job": "", "item": 0}, {"kind": {}, "label": "x"}])
+def test_malformed_card_or_tasks_never_break_talk(cc, bad):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": rid, "card": bad})
+    _tasks(cc, rid, [{"n": 1, "title": "t", "status": ["done"]}, {"n": 2, "title": "t", "status": {}}])
+    s, page, _ = cc.get("/")
+    assert s == 200 and "JobLens jobs" not in page
