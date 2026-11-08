@@ -162,7 +162,7 @@ def _seq(e):
     return s if type(s) is int else None
 
 
-PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "bank_updated")
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "bank_updated")
 
 
 def _runs(entries):
@@ -290,7 +290,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
                             speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
-                            told=None, voice=None, card=None, run_id=None)
+                            told=None, voice=None, card=None, run_id=None, fix_spoken=None)
 
     def tell(line):
         panel.convo.append(f"GOV-AIOS -> {line}")
@@ -697,7 +697,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                f"autocomplete=one-time-code required autofocus><button class=go>Open session</button></form>"
                if not s.active() and store.load() is not None else "")
         cmds = "".join(f"<option value='{escape(x)}'>" for x in slashes())
-        ans = answer_card(csrf)   # the admin is typing answers: no reload wipes them, no box steals focus
+        ans = answer_card(csrf) or fix_card(csrf)   # the admin is answering: no reload wipes it, no box steals focus
         return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{ans}{result_card()}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
                      f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp or ans else ' autofocus'} "
@@ -754,6 +754,42 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 f"<p class=m>Leave one empty to fill it in Chrome yourself.</p>"
                 f"<form method=post action=/apply/answer>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
                 f"{''.join(rows)}<button class=go>Send answers</button></form></section>")
+
+    def fix_asked():
+        """The live run's failed field as (digest, label); None when there is none. The label is untrusted page text."""
+        a = applyfiles.read_json(home, applyfiles.ASK)
+        fx = a.get("fix") if live() and a and a.get("run") == panel.run_id else None
+        if not isinstance(fx, dict) or not isinstance(fx.get("label"), str):
+            return None
+        return hashlib.sha256(json.dumps(a, sort_keys=True).encode()).hexdigest()[:16], fx["label"][:300]
+
+    def fix_card(csrf):
+        q = fix_asked()
+        if q is None or applyfiles.read_json(home, applyfiles.REPLY) is not None:
+            return ""
+        if panel.fix_spoken != q[0]:   # once per failed field, on its own thread (say blocks)
+            panel.fix_spoken = q[0]
+            threading.Thread(target=panel.speak, daemon=True, args=(
+                f"{panel.name}, I couldn't fill {q[1][:120]}. Please fill it in Chrome, then press Continue.",)).start()
+        return (f"<section class=appcard><h2>Fill this field in Chrome</h2>"
+                f"<p>Job Apply couldn't fill <b>{escape(q[1])}</b>. Fill it in Chrome yourself, then press Continue. "
+                f"Skip leaves it on the list to fill before you submit.</p>"
+                f"<form method=post action=/apply/fix>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
+                f"<button class=go name=fix value=continue>Continue</button> "
+                f"<button name=fix value=skip>Skip</button></form></section>")
+
+    def apply_fix(f):
+        """Write reply.json once for this failed field: continue or skip. Nothing from the page is echoed."""
+        with panel.lock:
+            q = fix_asked() if panel.session.active() else None
+            if q is None or f.get("ask") != q[0] or applyfiles.read_json(home, applyfiles.REPLY) is not None \
+                    or f.get("fix") not in ("continue", "skip"):
+                tell("That field is no longer waiting.")
+                return "/"
+            audited("apply_fix", {"outcome": f["fix"]},
+                    lambda: applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "fix": f["fix"]}))
+            tell("Job Apply is carrying on." if f["fix"] == "continue" else "Skipped: fill it before you submit.")
+        return "/"
 
     def result_card():
         r = applyfiles.read_json(home, applyfiles.RESULT)
@@ -1166,7 +1202,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         audited("revoke", fields, apply)
         return "/approvals"
 
-    POSTS = {"/apply/answer": apply_answer, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+    POSTS = {"/apply/answer": apply_answer, "/apply/fix": apply_fix, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),

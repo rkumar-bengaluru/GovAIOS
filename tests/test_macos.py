@@ -130,7 +130,7 @@ def test_pin_refused_when_window_no_longer_focused(env):
 
 def test_focused_window_id_requires_target_focus(env):
     env.ax.focus_pid = OTHER
-    with pytest.raises(RuntimeError):
+    with pytest.raises(Stop, match="no window in front"):
         env.d.focused_window_id("chrome")
 
 
@@ -487,3 +487,19 @@ def test_click_uses_centre_when_left_edge_is_covered(env, monkeypatch):
     monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", lambda src, t, pt, b: pts.append(pt) or ("mouse", t))
     env.d.click(Node("text", "SECRET", handle="job_link"))
     assert pts == [(60, 20)] * 3
+
+
+def test_click_retries_when_the_page_moves_after_the_pointer(env, monkeypatch):
+    """Greenhouse 2026-11-08: First Name was under the point, then the page scrolled before the press (Last Name
+    under it). Nothing was pressed yet: settle again and retry instead of stopping."""
+    tries = []
+    def moved_once(el, x, y, _):
+        tries.append((x, y))
+        env.ax.hit_parent = None if len(tries) == 2 else "job_link"   # 2nd look (after the pointer pause): neighbour
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", moved_once)
+    kinds = []
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", lambda src, t, pt, b: kinds.append(t) or ("mouse", t))
+    env.d.click(Node("text_field", "SECRET", handle="job_link"))
+    Q = macos.Q
+    assert kinds == [Q.kCGEventMouseMoved, Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp]

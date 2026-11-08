@@ -110,9 +110,12 @@ class MacDesktop:
         """Opaque token for the target app's focused window (the AXUIElement; compared with CFEqual)."""
         running = self._app(app)
         fpid, win = self._focused()
-        if running is None or fpid != running.processIdentifier() or win is None:
-            raise RuntimeError("no focused window in the target app")
-        return win
+        for _ in range(10):   # Chrome just launched or reopened: its window can take a moment to take focus
+            if running is not None and fpid == running.processIdentifier() and win is not None:
+                return win
+            time.sleep(0.5)
+            running, (fpid, win) = self._app(app), self._focused()
+        raise Stop("the browser has no window in front: click its window, then run again")
 
     def pin_window(self, token):
         """From now on input goes only to this window; it must still have focus right now."""
@@ -251,28 +254,42 @@ class MacDesktop:
 
     def click(self, node):
         self._require_focus()
-        pt = None
         for attempt in range(3):
+            last = attempt == 2
+            pt = None
             # left spot first (link text, not trailing whitespace), then the centre: a page button can sit over
             # an option's left edge (Greenhouse "Locate me" under the Location list)
             for i, p in enumerate(self._settled_points(node)):
-                try:
-                    self._require_point(p, node.handle)
+                if self._point_ok(p, node, last and i == 1):
                     pt = p
                     break
-                except InputRefused as e:   # a scroll still moving can leave a neighbour under a stale point
-                    if "not on the target element" not in str(e) or (attempt == 2 and i == 1):   # other app/window: at once
-                        raise
             if pt is not None:
-                break
-        for t in (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
-            if t != Q.kCGEventLeftMouseUp:   # re-check after the pointer pause; never strand a pressed button
-                self._require_point(pt, node.handle)
-            ev = Q.CGEventCreateMouseEvent(None, t, pt, Q.kCGMouseButtonLeft)
-            Q.CGEventSetFlags(ev, 0)   # else a prior cmd shortcut leaks in: cmd+click = background tab
-            Q.CGEventPost(Q.kCGHIDEventTap, ev)
-            time.sleep(PACE["pointer"] if t == Q.kCGEventMouseMoved else 0.08)
+                self._mouse(Q.kCGEventMouseMoved, pt)
+                time.sleep(PACE["pointer"])
+                # re-check after the pointer pause, before the button goes down (nothing pressed yet: safe to retry)
+                if self._point_ok(pt, node, last):
+                    break
+            time.sleep(0.5)   # a page still scrolling or loading: Chrome's AX bounds can lag the layout ~1 s
+        self._mouse(Q.kCGEventLeftMouseDown, pt)
+        time.sleep(0.08)
+        self._mouse(Q.kCGEventLeftMouseUp, pt)   # never strand a pressed button
         time.sleep(PACE["after_action"])
+
+    def _point_ok(self, pt, node, final):
+        """True if the point is on the target; False to retry when a neighbour is under it (a scroll still moving).
+        Any other refusal (another app or window), or the final try, raises."""
+        try:
+            self._require_point(pt, node.handle)
+            return True
+        except InputRefused as e:
+            if final or "not on the target element" not in str(e):
+                raise
+            return False
+
+    def _mouse(self, kind, pt):
+        ev = Q.CGEventCreateMouseEvent(None, kind, pt, Q.kCGMouseButtonLeft)
+        Q.CGEventSetFlags(ev, 0)   # else a prior cmd shortcut leaks in: cmd+click = background tab
+        Q.CGEventPost(Q.kCGHIDEventTap, ev)
 
     def _require_point(self, pt, target):
         """Focus check, plus: the element under the point is the target element or inside it

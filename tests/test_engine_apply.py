@@ -577,10 +577,16 @@ def test_stop_at_cv_prompt_leaves_cv_on_card(tmp_path, monkeypatch):
 
 # ----- capture on stop (dev mode: unmasked, for debugging a failed web run) -----
 class RefusingDesk(FormDesk):
+    why = "input refused: Chrome is not the frontmost app"   # stops the run (unlike a field's click point)
+
     def click(self, node):
         self.last_refusal = {"target": [{"role": "AXTextField", "name": node.name}],
                              "hit": [{"role": "AXGroup", "name": "overlay"}]}
-        raise InputRefused("input refused: click point is not on the target element")
+        raise InputRefused(self.why)
+
+
+class CoveredDesk(RefusingDesk):
+    why = "input refused: click point is not on the target element (hit AXGroup contains target AXTextField)"
 
 
 def captures(home):
@@ -591,11 +597,11 @@ def captures(home):
 def test_stop_saves_capture_of_the_page(tmp_path):
     d = RefusingDesk(lambda d: form(text_field(d, "notice", "Notice period*")))
     _, e, err = run(tmp_path, d)
-    assert "not on the target element" in str(err)
+    assert "frontmost" in str(err)
     [p] = captures(tmp_path)
     assert p.stat().st_mode & 0o777 == 0o600
     c = json.loads(p.read_text())
-    assert c["step"] == "fill" and "not on the target element" in c["reason"]
+    assert c["step"] == "fill" and "frontmost" in c["reason"]
     assert c["url"] == URL and c["refusal"]["hit"][0]["name"] == "overlay"
     assert any(n.get("name") == "Notice period*" for n in _flat(c["tree"]))
     [a] = [x for x in e if x.get("action") == "capture"]
@@ -641,7 +647,7 @@ def test_failed_capture_never_hides_the_stop(tmp_path):
         def window_title(self, app):
             raise RuntimeError("AX gone")
     _, e, err = run(tmp_path, Broken(lambda d: form(text_field(d, "notice", "Notice period*"))))
-    assert "not on the target element" in str(err)
+    assert "frontmost" in str(err)
     assert [x["outcome"] for x in e if x.get("action") == "capture"] == ["error"]
 
 
@@ -709,3 +715,72 @@ def test_combo_mismatch_closes_its_list(tmp_path):
     _, e, err = run(tmp_path, d, ({"key": "loc", "labels": ["Location"], "answer": "Bengaluru"},))
     assert fills(e)[0]["outcome"] == "mismatch"
     assert d.calls[-3:] == ["select_all", "delete_back", "escape"]
+
+
+# ----- a failed field: the admin fixes it in Chrome, then Continue or Skip on the panel -----
+def fix_when_asked(tmp_path, d, choice, typed=None, seen=None):
+    def go():
+        for _ in range(2000):
+            ask = applyfiles.read_json(tmp_path, applyfiles.ASK)
+            if ask:
+                (seen if seen is not None else []).append(ask)
+                if typed is not None:
+                    d.values["notice"] = typed   # the admin types it in Chrome
+                applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "fix": choice})
+                return
+            threading.Event().wait(0.005)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    return t
+
+
+def test_covered_field_goes_to_yourself_without_stopping(tmp_path):
+    d = CoveredDesk(lambda d: form(text_field(d, "notice", "Notice period")))
+    _, e, err = run(tmp_path, d, run_id=None)   # a CLI run: no card
+    assert err is None
+    assert fills(e)[0]["outcome"] == "mismatch"
+    [p] = captures(tmp_path)
+    c = json.loads(p.read_text())
+    assert "not on the target element" in c["reason"] and c["refusal"]["hit"][0]["name"] == "overlay"
+
+
+def test_fix_by_hand_continue_counts_as_filled(tmp_path, capsys):
+    d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period")), keep=lambda t: t[:5])
+    seen = []
+    t = fix_when_asked(tmp_path, d, "continue", typed="15 days", seen=seen)
+    _, e, err = run(tmp_path, d, allow=ASKED)
+    t.join(1)
+    assert err is None and seen[0]["fix"] == {"key": seen[0]["fix"]["key"], "label": "Notice period"}
+    assert "fields" not in seen[0]
+    assert [(f["source"], f["outcome"]) for f in fills(e)] == [("bank:notice", "mismatch"), ("admin_manual", "done")]
+    assert result(tmp_path)["filled"] == 1 and result(tmp_path)["yourself"] == []
+    assert d.calls.index("delete_back") < d.calls.index("raise_pinned")   # cleared before handing it over
+    assert not (tmp_path / "apply" / "ask.json").exists() and not (tmp_path / "apply" / "reply.json").exists()
+    out = capsys.readouterr()
+    assert "15 days" not in (tmp_path / "audit.jsonl").read_text() + out.out + out.err
+
+
+@pytest.mark.parametrize("choice, typed", [("skip", "15 days"), ("continue", "")])
+def test_fix_by_hand_skip_or_still_empty_is_yourself(tmp_path, choice, typed):
+    d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period")), keep=lambda t: t[:5])
+    t = fix_when_asked(tmp_path, d, choice, typed=typed)
+    _, e, err = run(tmp_path, d, allow=ASKED)
+    t.join(1)
+    assert err is None and "raise_pinned" in d.calls
+    assert result(tmp_path)["yourself"] == ["Notice period"] and result(tmp_path)["filled"] == 0
+
+
+def test_fix_by_hand_bad_reply_stops(tmp_path):
+    d = FormDesk(lambda d: form(text_field(d, "notice", "Notice period")), keep=lambda t: t[:5])
+    t = fix_when_asked(tmp_path, d, "submit")
+    _, e, err = run(tmp_path, d, allow=ASKED)
+    t.join(1)
+    assert str(err) == "bad reply" and "raise_pinned" not in d.calls
+
+
+def test_covered_field_on_panel_run_asks_fix(tmp_path):
+    d = CoveredDesk(lambda d: form(text_field(d, "notice", "Notice period")))
+    t = fix_when_asked(tmp_path, d, "continue", typed="15 days")
+    _, e, err = run(tmp_path, d, allow=ASKED)
+    t.join(1)
+    assert err is None and result(tmp_path)["filled"] == 1
