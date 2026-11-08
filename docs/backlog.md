@@ -9,7 +9,7 @@ Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-task
   job (design `docs/superpowers/specs/2026-11-08-joblens-tasks-design.md`, test plan `docs/joblens-integration-test.md`).
 - **Tailored CV**: attach the CV JobLens Apply downloads to ~/Downloads instead of the bank's `cv_file`.
 - **Mark submitted in JobLens** after Next job (a submit-rated click: needs its own approval).
-- **Jobs that link straight to an employer form** (not through Himalayas): today such a task stops at the Himalayas check.
+- ~~Jobs that link straight to an employer form~~ done 2026-11-08 (`classify_page` `{skip_to: on_form}`).
 - **JobLens page files are from source code**: confirm against the first live capture.
 - **Greenhouse paste-CV mode.** The CV is attached as a file only today.
 - **Workable**, after a terms check. It stops with "unexpected page" for now.
@@ -33,8 +33,10 @@ Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-task
   would mask long Greenhouse question labels and those Lever questions; combo_box, popup_button and radio
   are not in its kept roles. Not yet checked against Gmail/JobLens/Himalayas captures.
 - **Web Sandbox** built 2026-11-08 (`flows/web_sandbox.yaml`): open any https site (Touch ID on first contact), capture
-  the pages the admin chooses, read only. Still open: Studio writing the page/flow YAML from those captures (Claude does
-  it by hand now), masking before non-dev use, the terms gate (Plan 3).
+  the pages the admin chooses, read only. Since night 2 (branch `feat/studio-drafts`) each capture also writes a draft
+  page + a read-only Check app as Drafts (`docs/superpowers/specs/2026-11-08-studio-drafts-design.md`). Still open:
+  composing a bigger flow from draft pages on the panel (Claude writes it by hand now), lowering reviewed button risks,
+  masking before non-dev use, the terms gate (Plan 3).
 - **Capture on stop** — dev version built 2026-11-08 (branch `feat/capture-on-stop`): unmasked, in the run,
   `captures/` keeps the last 10. Still open: masking before non-dev/Studio use, the panel showing the reason,
   non-web flows (screen capture). Original note (admin, 2026-11-08: pick right after `gov-aios capture`): When a run stops on a refused
@@ -59,8 +61,7 @@ Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-task
   (A–E passed) per `docs/codex-integration-test.md`. Still open: Codex network allow-list (`experimental_network`),
   Codex built-in tools beyond Bash/apply_patch/MCP.
 - **JobLens integration** (admin, 2026-11-07): next after Codex is verified.
-- **Inbox brief short app name** (`app:` in `flows/morning_inbox_briefing.yaml`) so the panel
-  accepts "run inbox brief".
+- ~~Inbox brief short app name~~ done 2026-11-08 (`app: Inbox Brief`; approve it once again).
 - **Later: service-account / API connectors** (e.g. Drive API): new action kind, Keychain
   credentials, scopes, network rules. Admin: "leave service account for later".
 

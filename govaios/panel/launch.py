@@ -1,6 +1,7 @@
 """Python port of bin/gov-aios launch(): run, then deliver when the app asks."""
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -17,6 +18,7 @@ class RunLaunch:
         self.done = False
         self.code = None
         self.summary = None
+        self.capture = None   # the page the run saved last (captures/<name>), for the stop message
         self.stopped_reason = None
         self._lines = []
         self._lock = threading.Lock()
@@ -131,3 +133,5 @@ class RunLaunch:
                     self._lines.append(ln)
                     if ln.startswith("deliver joblens:"):
                         self.summary = ln
+                    elif re.fullmatch(r"capture saved: captures/[0-9-]{22}-[a-z0-9_]{1,64}\.json", ln):
+                        self.capture = ln.rsplit("/", 1)[1]

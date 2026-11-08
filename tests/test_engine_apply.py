@@ -750,7 +750,9 @@ def test_fix_by_hand_continue_counts_as_filled(tmp_path, capsys):
     t = fix_when_asked(tmp_path, d, "continue", typed="15 days", seen=seen)
     _, e, err = run(tmp_path, d, allow=ASKED)
     t.join(1)
+    cap = seen[0]["card"].pop("capture")   # the mismatch's saved page, shown on the card
     assert err is None and seen[0]["card"] == {"kind": "fix", "label": "Notice period", "job": "", "item": 0}
+    assert (tmp_path / "captures" / cap).exists()
     assert "fields" not in seen[0]
     assert [(f["source"], f["outcome"]) for f in fills(e)] == [("bank:notice", "mismatch"), ("admin_manual", "done")]
     assert result(tmp_path)["filled"] == 1 and result(tmp_path)["yourself"] == []
@@ -802,3 +804,12 @@ def test_each_ask_is_unique_so_a_stale_reply_never_answers_the_next(tmp_path):
     _, e, err = run(tmp_path, d, rows, allow=ASKED)
     assert err is None and [a["card"]["label"] for a in seen] == ["School", "College"]
     assert seen[0]["seq"] != seen[1]["seq"]   # same-label cards still differ, so their digests do too
+
+
+def test_captures_are_pruned_per_flow(tmp_path):
+    from govaios import capture
+    capture.save(tmp_path, "job_apply", "s", "r", URL, "t", form(), None)
+    for _ in range(31):
+        capture.save(tmp_path, "web_sandbox", "s", "r", URL, "t", form(), None)
+    names = [p.name for p in captures(tmp_path)]
+    assert sum(n.endswith("-job_apply.json") for n in names) == 1 and len(names) == 31

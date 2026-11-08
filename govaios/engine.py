@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 from urllib.parse import urlsplit
 
-from . import auth, capture, runstate
+from . import auth, capture, runstate, studio
 from .agents import user_home
 from .applyfiles import ASK, BANK, CARDS, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
@@ -385,16 +385,26 @@ class Runner:
             return None
         self._audit("action", action="capture", target=name, file_hash=digest, outcome="done")
         print(f"capture saved: {capture.DIR}/{name}", flush=True)
+        self.last_capture = name
         return name
 
     def steps(self, steps):
-        for s in steps:
+        skip = None   # a classify_page {skip_to: <id>}: jump forward to that step of this same list, never back
+        for i, s in enumerate(steps):
+            if skip is not None:
+                if s["id"] != skip:
+                    continue
+                skip = None
             if auth.screen_locked():
                 raise Stop("screen_locked")
             if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
                 raise Stop("emergency stop")
             self.step = s["id"]
-            getattr(self, "do_" + s["action"])(s)
+            out = getattr(self, "do_" + s["action"])(s)
+            if isinstance(out, tuple) and out[0] == "skip_to":
+                if not any(x["id"] == out[1] for x in steps[i + 1:]):
+                    raise Stop(f"skip_to {out[1]}: no such later step")
+                skip = out[1]
 
     def do_launch_application(self, s):
         self.gate("launch_application", "navigate")
@@ -430,6 +440,8 @@ class Runner:
                 self.gate("read_page", "read", destination=url)      # landed origin must be declared
                 self.ctx["page"] = page
                 return
+            if isinstance(what, dict) and "skip_to" in what:   # already further on (a job link straight to its form)
+                return ("skip_to", what["skip_to"])
             if isinstance(what, dict):                   # an interstitial (a popup): click past it once, look again
                 candidates.remove(page)
                 self.do_click({"id": self.step, "target": f"{page}.{what['click']}"})
@@ -456,6 +468,8 @@ class Runner:
             raise Stop(s.get("none", "no items found"))
         # remember identity, not handles: the tree is rebuilt after each navigation
         self.ctx["items"] = [self._fields(it, spec, page_id) for it in items]
+        # two rows can show the same fields (same client and role): the k-th of them stays the k-th
+        self.ctx["item_occ"] = [self.ctx["items"][:i].count(f) for i, f in enumerate(self.ctx["items"])]
         self.ctx["item_spec"] = (page_id, el_id)
 
     def _fields(self, item_node, spec, page_id):
@@ -488,6 +502,10 @@ class Runner:
                 if self._current_task()["status"] != "done":
                     self._task("stopped", reason=reason[:200])
                 if not isinstance(e, Stop) or _ends_run(e):   # an engine or AX error: fail closed, end the run
+                    try:   # in this job's own log too (the run's stop line carries no job number)
+                        self._audit("action", action="task_stop", reason=reason, outcome="run_stopped")
+                    except Exception:
+                        pass
                     raise
                 self._capture(reason)
                 self._audit("action", action="task_stop", reason=reason, outcome="error")
@@ -549,7 +567,15 @@ class Runner:
                         return
                     continue
                 name = self._capture("sandbox", root, {"sandbox": True})
-                pages.append({"title": root.name[:200], "url": url_for_audit(url), "file": name,
+                draft = None
+                if name and "write_draft" in self.flow["permissions"]["allow"]:   # a draft page + its Check app
+                    self.gate("write_draft", "modify", target=name)
+                    try:
+                        draft = self._act("write_draft", studio.write_draft, self.flow_path.parent, self.pages_dir,
+                                          capture.tree(root), url, self.flow["browser"], name, target=name)
+                    except OSError:
+                        draft = None   # audited as an error; the capture itself is kept
+                pages.append({"title": root.name[:200], "url": url_for_audit(url), "file": name, "draft": draft,
                               "fields": sum(n.role in FIELD_ROLES for n in root.walk()),
                               "buttons": sum(n.role == "button" for n in root.walk()),
                               "links": sum(n.role == "link" for n in root.walk())})
@@ -564,10 +590,11 @@ class Runner:
         if not page:
             raise Stop(f"not back on {page_id}")
         spec = self.pages[page_id]["elements"][el_id]
-        for it in find_all(root, spec, self.pages[page_id]):
-            if self._fields(it, spec, page_id) == self.ctx["item"]:
-                fs = spec["fields"][field]
-                return (it if fs.get("self") else find_all(it, fs, self.pages[page_id])[0]), fs
+        same = [it for it in find_all(root, spec, self.pages[page_id]) if self._fields(it, spec, page_id) == self.ctx["item"]]
+        k = self.ctx.get("item_occ", [0] * self.ctx["n"])[self.ctx["n"] - 1]
+        if k < len(same):
+            fs = spec["fields"][field]
+            return (same[k] if fs.get("self") else find_all(same[k], fs, self.pages[page_id])[0]), fs
         raise Stop("selected item no longer on the page")   # identity check
 
     def ref(self, target):
@@ -728,7 +755,8 @@ class Runner:
             return None
         self.gate("ask_admin", "read")
         task = self._current_task()
-        reply = self._ask({"card": {"kind": kind, "label": label[:300],
+        cap, self.last_capture = getattr(self, "last_capture", None), None   # the page saved for this card, if any
+        reply = self._ask({"card": {"kind": kind, "label": label[:300], "capture": cap if kind != "sandbox" else None,
                                     "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}})
         choice = reply.get("card")
         if choice not in CARDS[kind]:

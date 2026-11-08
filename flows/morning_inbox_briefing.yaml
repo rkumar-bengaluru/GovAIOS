@@ -1,5 +1,6 @@
 workflow:
   id: morning_inbox_briefing
+  app: Inbox Brief                   # short name: "run inbox brief" on the panel
   name: "Morning Inbox Briefing (spike: printed, no TTS)"
   version: 1
 

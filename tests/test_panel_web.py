@@ -1749,3 +1749,18 @@ def test_malformed_card_or_tasks_never_break_talk(cc, bad):
     _tasks(cc, rid, [{"n": 1, "title": "t", "status": ["done"]}, {"n": 2, "title": "t", "status": {}}])
     s, page, _ = cc.get("/")
     assert s == 200 and "JobLens jobs" not in page
+
+
+def test_card_and_stop_name_the_saved_page(cc):
+    from govaios import applyfiles
+    rid = _asking(cc, ASKED)
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": rid, "card": {
+        "kind": "stopped", "label": "unexpected page", "job": "A", "item": 1, "capture": "20261108-201918-912751-job_apply.json"}})
+    assert "Saved page: <code>captures/20261108-201918-912751-job_apply.json</code>" in cc.get("/")[1]
+    applyfiles.write_json(cc.home, applyfiles.ASK, {"run": rid, "card": {
+        "kind": "stopped", "label": "x", "job": "A", "item": 1, "capture": "../../etc/passwd<b>"}})
+    assert "Saved page" not in cc.get("/")[1]   # only a capture file name is ever shown
+    r = cc.made[-1]
+    r.done, r.code, r.capture = True, 1, "20261108-201918-912751-job_apply.json"
+    cc.srv.panel.tick()
+    assert _tells(cc)[-1].endswith("Saved page: captures/20261108-201918-912751-job_apply.json")

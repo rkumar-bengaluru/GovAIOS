@@ -509,4 +509,4 @@ def test_real_flows_load(tmp_path):
 
 def test_morning_digest_unchanged():
     assert flow_hash(REPO / "flows" / "morning_inbox_briefing.yaml", REPO / "pages") == \
-        "a1dca44ed9e272377fe86987aca8bece3a1dcd7c4ef797e6ed40d4e8386ff4ae"
+        "f949509d8a962723981d11a16c1aae944a42dc4f73d7441d8eee3d6ff31abc8b"
