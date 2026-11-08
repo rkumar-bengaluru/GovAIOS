@@ -475,3 +475,15 @@ def test_click_refuses_when_the_point_never_settles(env):
     with pytest.raises(RuntimeError, match="not on the target element"):
         env.d.click(Node("text_field", "SECRET", handle="job_link"))
     assert env.posted == []
+
+
+def test_click_uses_centre_when_left_edge_is_covered(env, monkeypatch):
+    """Greenhouse 2026-11-08: "Locate me" sat over the Location option's left edge; its centre was clear."""
+    def covered_left(el, x, y, _):
+        env.ax.hit_parent = "job_link" if x > 30 else None   # bounds (10, 10, 100, 20): left x=30, centre x=60
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", covered_left)
+    pts = []
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", lambda src, t, pt, b: pts.append(pt) or ("mouse", t))
+    env.d.click(Node("text", "SECRET", handle="job_link"))
+    assert pts == [(60, 20)] * 3

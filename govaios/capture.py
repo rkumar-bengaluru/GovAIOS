@@ -1,7 +1,7 @@
 """Capture on stop: the page as it was when a web run stopped, for the admin's debugging.
 
 Dev mode: NOT masked (names and values as on the page). shortcut: unmasked, add spec §5.3 masking before
-this leaves dev or feeds Studio. Files are 0600 under <data home>/captures/, never printed; only the last KEEP stay.
+this leaves dev or feeds Studio. Files are 0600 under <data home>/captures/, never printed; only the last KEEP stay (a run can save several: one per read-back mismatch, then the stop).
 """
 import hashlib
 import json
@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 DIR = "captures"
-KEEP = 10
+KEEP = 30
 
 
 def tree(n):

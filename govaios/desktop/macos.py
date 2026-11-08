@@ -236,7 +236,7 @@ class MacDesktop:
         _, s = AXValueGetValue(size, kAXValueCGSizeType, None)
         return p.x, p.y, s.width, s.height
 
-    def _settled_point(self, node):
+    def _settled_points(self, node):
         # wait for layout to settle (ads, hydration, smooth scroll) so the click hits the element, max ~3s
         x, y, w, h = self._bounds(node)
         for _ in range(10):
@@ -247,18 +247,24 @@ class MacDesktop:
             x, y, w, h = b
         if w <= 0 or h <= 0:
             raise RuntimeError("element not visible")
-        return (x + min(w / 2, 20), y + h / 2)   # near the left edge: link text, not trailing whitespace
+        return (x + min(w / 2, 20), y + h / 2), (x + w / 2, y + h / 2)
 
     def click(self, node):
         self._require_focus()
+        pt = None
         for attempt in range(3):
-            pt = self._settled_point(node)
-            try:
-                self._require_point(pt, node.handle)
+            # left spot first (link text, not trailing whitespace), then the centre: a page button can sit over
+            # an option's left edge (Greenhouse "Locate me" under the Location list)
+            for i, p in enumerate(self._settled_points(node)):
+                try:
+                    self._require_point(p, node.handle)
+                    pt = p
+                    break
+                except InputRefused as e:   # a scroll still moving can leave a neighbour under a stale point
+                    if "not on the target element" not in str(e) or (attempt == 2 and i == 1):   # other app/window: at once
+                        raise
+            if pt is not None:
                 break
-            except InputRefused as e:   # a scroll still moving can leave a neighbour under a stale point
-                if attempt == 2 or "not on the target element" not in str(e):   # other app/window: at once
-                    raise
         for t in (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
             if t != Q.kCGEventLeftMouseUp:   # re-check after the pointer pause; never strand a pressed button
                 self._require_point(pt, node.handle)

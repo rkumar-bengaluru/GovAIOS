@@ -232,7 +232,7 @@ def test_combo_no_or_many_options_escape(tmp_path, n):
     assert err is None
     assert "escape" in d.calls and "enter" not in d.calls and ("click", "Bengaluru") not in d.calls
     assert fills(e)[0]["outcome"] == "mismatch" and result(tmp_path)["yourself"] == ["Location"]
-    assert d.calls[-2:] == ["select_all", "delete_back"]   # field re-found after escape (new handles), then cleared
+    assert d.calls[-3:] == ["select_all", "delete_back", "escape"]   # re-found after escape, cleared, list closed
 
 
 def test_combo_option_click_not_registered_is_mismatch(tmp_path):
@@ -240,7 +240,7 @@ def test_combo_option_click_not_registered_is_mismatch(tmp_path):
     _, e, err = run(tmp_path, d, ({"key": "loc", "labels": ["Location"], "answer": "Bengaluru"},))
     assert err is None and ("click", "Bengaluru") in d.calls and "enter" not in d.calls
     assert fills(e)[0]["outcome"] == "mismatch" and result(tmp_path)["yourself"] == ["Location"]
-    assert d.calls[-2:] == ["select_all", "delete_back"]
+    assert d.calls[-3:] == ["select_all", "delete_back", "escape"]
 
 
 def test_combo_list_outside_form_never_a_candidate(tmp_path):
@@ -629,11 +629,11 @@ def test_no_capture_before_any_step(tmp_path):
     assert captures(tmp_path) == []
 
 
-def test_captures_keep_only_the_last_ten(tmp_path):
+def test_captures_keep_only_the_last_thirty(tmp_path):
     from govaios import capture
-    for _ in range(12):
+    for _ in range(32):
         capture.save(tmp_path, "f", "s", "r", URL, "t", form(), None)
-    assert len(captures(tmp_path)) == 10
+    assert len(captures(tmp_path)) == 30
 
 
 def test_failed_capture_never_hides_the_stop(tmp_path):
@@ -643,3 +643,69 @@ def test_failed_capture_never_hides_the_stop(tmp_path):
     _, e, err = run(tmp_path, Broken(lambda d: form(text_field(d, "notice", "Notice period*"))))
     assert "not on the target element" in str(err)
     assert [x["outcome"] for x in e if x.get("action") == "capture"] == ["error"]
+
+
+def test_combo_showing_tail_of_option_is_filled(tmp_path):
+    """Greenhouse Country: option "India +91" picked, the field then shows "+" "91"."""
+    def build(d):
+        picked = "India +91" in d.values.get("clicked", [])
+        group = [N("combo_box", "Country", value="", dom_id="country")]
+        if picked:
+            group = [N("group", children=[N("text", value="+"), N("text", value="91")])] + group
+        elif d.values.get("country"):
+            group.append(N("list", children=[N("group", "India +91", children=[N("text", "India +91")])]))
+        return N("document", "Job Application for Engineer", children=[N("form", children=[N("group", children=group)])])
+    _, e, err = run(tmp_path, FormDesk(build), ({"key": "c", "labels": ["Country"], "answer": "India +91"},))
+    assert err is None and fills(e)[0]["outcome"] == "done"
+
+
+def test_combo_showing_other_text_is_mismatch(tmp_path):
+    def build(d):
+        picked = "India +91" in d.values.get("clicked", [])
+        group = [N("combo_box", "Country", value="", dom_id="country")]
+        if picked:
+            group = [N("text", value="91")] + group   # not whole trailing words of "India +91"
+        elif d.values.get("country"):
+            group.append(N("list", children=[N("group", "India +91", children=[N("text", "India +91")])]))
+        return N("document", "Job Application for Engineer", children=[N("form", children=[N("group", children=group)])])
+    _, e, err = run(tmp_path, FormDesk(build), ({"key": "c", "labels": ["Country"], "answer": "India +91"},))
+    assert fills(e)[0]["outcome"] == "mismatch"
+
+
+@pytest.mark.parametrize("shown,ok", [("78479 56039", True), ("(784) 795-6039", True), ("+91 78479 56039", False)])
+def test_phone_reformatted_as_typed(tmp_path, shown, ok):
+    d = FormDesk(lambda d: form(text_field(d, "phone", "Phone")), keep=lambda t: shown)
+    _, e, err = run(tmp_path, d, ({"key": "p", "labels": ["Phone"], "answer": "7847956039"},))
+    assert fills(e)[0]["outcome"] == ("done" if ok else "mismatch")
+
+
+def test_mismatch_saves_capture_before_clearing(tmp_path):
+    d = FormDesk(lambda d: form(text_field(d, "phone", "Phone")), keep=lambda t: "+91 78479 56039")
+    _, e, err = run(tmp_path, d, ({"key": "p", "labels": ["Phone"], "answer": "7847956039"},))
+    assert err is None
+    [p] = captures(tmp_path)
+    c = json.loads(p.read_text())
+    assert c["reason"] == "read-back mismatch: Phone"
+    assert c["refusal"] == {"field": "Phone", "kind": "text", "expected": "7847956039", "read_back": "+91 78479 56039"}
+    i = [x.get("action") for x in e].index("capture")
+    assert e[i + 1]["action"] == "press"   # captured, then cleared
+
+
+def test_combo_input_covered_by_placeholder_clicks_its_box(tmp_path):
+    """Greenhouse 2026-11-08: an empty react-select input is 4 px wide under its "Select..." placeholder."""
+    class Covered(FormDesk):
+        def click(self, node):
+            if node.role == "combo_box":
+                raise InputRefused("input refused: click point is not on the target element (hit AXStaticText ...)")
+            super().click(node)
+    d = Covered(combo_form(1))
+    _, e, err = run(tmp_path, d, ({"key": "loc", "labels": ["Location"], "answer": "Bengaluru"},))
+    assert err is None and fills(e)[0]["outcome"] == "done"
+    assert ("click", "Bengaluru") in d.calls
+
+
+def test_combo_mismatch_closes_its_list(tmp_path):
+    d = FormDesk(combo_form(0))   # no option matches
+    _, e, err = run(tmp_path, d, ({"key": "loc", "labels": ["Location"], "answer": "Bengaluru"},))
+    assert fills(e)[0]["outcome"] == "mismatch"
+    assert d.calls[-3:] == ["select_all", "delete_back", "escape"]
