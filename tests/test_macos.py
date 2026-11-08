@@ -286,8 +286,9 @@ def test_input_refused_is_a_readable_stop():
 
 def test_click_refuses_when_something_else_is_under_the_point(env):
     """An ad that slid over the job link after layout settled: same app and window, wrong element."""
-    with pytest.raises(RuntimeError, match="not on the target element"):
+    with pytest.raises(RuntimeError, match="not on the target element") as e:
         env.d.click(Node("link", "SECRET", handle="job_link"))
+    assert "SECRET" not in str(e.value) and "target" in str(e.value).split("(")[1]   # roles only, never names
     assert env.posted == []   # not even the pointer move
     env.ax.hit_parent = "job_link"   # the hit is the link's text, inside the link
     env.d.click(Node("link", "SECRET", handle="job_link"))

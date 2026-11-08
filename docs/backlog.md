@@ -27,6 +27,10 @@ Updated 2026-11-07 with Job Apply (branch `feat/job-apply`); before that 2026-11
   in that text). **Spec §5.3 needs amending for forms:** its 60-character cap and controls-only kept list
   would mask long Greenhouse question labels and those Lever questions; combo_box, popup_button and radio
   are not in its kept roles. Not yet checked against Gmail/JobLens/Himalayas captures.
+- **Capture on stop** (admin, 2026-11-08: pick right after `gov-aios capture`). When a run stops on a refused
+  input or "left the page", save a masked capture (same masking as capture) plus the failed target, the element
+  under the click point and the step, to `studio/<run>/capture/<page>.json` (0600), never stdout. Why: the
+  Greenhouse Country combo took several rebuild-and-run rounds of guessing because nothing showed the live tree.
 - **My apps and Marketplace** panel areas. Each app drives its own setup; upgrades carry apps over.
   Mockup: `docs/superpowers/mockups/2026-11-06-apps-journey.html`.
 - **Claude Code refusals made by its own managed deny rules are not in the audit log** (seen live
