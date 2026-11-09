@@ -489,6 +489,19 @@ def test_click_uses_centre_when_left_edge_is_covered(env, monkeypatch):
     assert pts == [(60, 20)] * 3
 
 
+def test_click_uses_first_line_of_a_wrapped_link(env, monkeypatch):
+    """JobLens 2026-11-09: a two-line job title; its box centre (and left-centre) fell between the lines, on the cell."""
+    env.d._bounds = lambda node: (322, 438, 307, 37)
+    def first_line_only(el, x, y, _):
+        env.ax.hit_parent = "job_link" if y < 456 else None
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", first_line_only)
+    pts = []
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", lambda src, t, pt, b: pts.append(pt) or ("mouse", t))
+    env.d.click(Node("link", "SECRET", handle="job_link"))
+    assert pts == [(342, 447)] * 3
+
+
 def test_click_retries_when_the_page_moves_after_the_pointer(env, monkeypatch):
     """Greenhouse 2026-11-08: First Name was under the point, then the page scrolled before the press (Last Name
     under it). Nothing was pressed yet: settle again and retry instead of stopping."""

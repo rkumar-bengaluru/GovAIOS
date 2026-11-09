@@ -278,7 +278,14 @@ class Runner:
             if root is not None and root.children:
                 return root
             time.sleep(1)
-        raise Stop("web tree not available (renderer accessibility)")
+        try:
+            url = self.d.current_url(self.app) or ""
+        except Exception:
+            url = ""
+        host = urlsplit(url).hostname or ""
+        if host and origin(url) not in {origin(d) for d in self.flow.get("destinations", [])}:
+            raise Stop(f"Chrome went to {host[:100]}, a site this flow does not know")
+        raise Stop("cannot read the page: a Chrome prompt (location, notifications) may be covering it")
 
     def current_page(self, candidates):
         root = self.snapshot()

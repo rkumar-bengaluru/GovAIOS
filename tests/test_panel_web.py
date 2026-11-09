@@ -1766,6 +1766,14 @@ def test_card_and_stop_name_the_saved_page(cc):
     assert _tells(cc)[-1].endswith("Saved page: captures/20261108-201918-912751-job_apply.json")
 
 
+def test_stop_says_the_apps_reason_not_exit_code(cc):
+    _asking(cc, ASKED)
+    r = cc.made[-1]
+    r.done, r.code, r.reason = True, 1, "no Ready jobs in JobLens"
+    cc.srv.panel.tick()
+    assert "stopped: no Ready jobs in JobLens" in _tells(cc)[-1] and "exit 1" not in _tells(cc)[-1]
+
+
 def _studio_drafts(P):
     from govaios import studio
     b = {"application": "chrome", "profile_directory": "Profile 2", "account": "a@example.com"}

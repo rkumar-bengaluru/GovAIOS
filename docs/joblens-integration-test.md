@@ -33,6 +33,8 @@ You need at least one job with Status **Ready** in JobLens (`http://localhost:81
 
 If it stops on the JobLens steps (`on_joblens`, `select_jobs`, `open_job` or `open_apply`), the JobLens page files didn't match the live page. They were written from source code, so this is the most likely first failure. Tell Claude: the newest file in `captures/` has the page.
 
+Before running, set Chrome to never ask for your location: `chrome://settings/content/location` → **Don't allow sites to see your location**. A location prompt covers the page, and the run can't read it (seen 2026-11-09 on eClerx's Oracle careers site).
+
 If a job hits a site the flow doesn't know (Workable, a direct company page), only that job stops. You see the **This job stopped** card: press Next job.
 
 ## B. Web Sandbox

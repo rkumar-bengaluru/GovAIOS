@@ -813,3 +813,15 @@ def test_captures_are_pruned_per_flow(tmp_path):
         capture.save(tmp_path, "web_sandbox", "s", "r", URL, "t", form(), None)
     names = [p.name for p in captures(tmp_path)]
     assert sum(n.endswith("-job_apply.json") for n in names) == 1 and len(names) == 31
+
+
+@pytest.mark.parametrize("url, want", [
+    ("https://fa-ewji.fa.ocs.oraclecloud.com/hcmUI/job/80708?utm=x", "Chrome went to fa-ewji.fa.ocs.oraclecloud.com, a site this flow does not know"),
+    ("https://job-boards.greenhouse.io/x", "cannot read the page: a Chrome prompt (location, notifications) may be covering it")])
+def test_unreadable_page_stop_names_the_site(url, want):
+    from types import SimpleNamespace
+    desk = SimpleNamespace(web_root=lambda app: None, current_url=lambda app: url)
+    r = SimpleNamespace(d=desk, app="chrome", flow={"destinations": ["https://job-boards.greenhouse.io"]})
+    with pytest.raises(engine.Stop) as e:
+        engine.Runner.snapshot(r)
+    assert str(e.value) == want

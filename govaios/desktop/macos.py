@@ -250,17 +250,19 @@ class MacDesktop:
             x, y, w, h = b
         if w <= 0 or h <= 0:
             raise RuntimeError("element not visible")
-        return (x + min(w / 2, 20), y + h / 2), (x + w / 2, y + h / 2)
+        # last: the first line's left spot, for a link that wraps (its box centre falls between the lines)
+        return (x + min(w / 2, 20), y + h / 2), (x + w / 2, y + h / 2), (x + min(w / 2, 20), y + min(h / 2, 9))
 
     def click(self, node):
         self._require_focus()
         for attempt in range(3):
             last = attempt == 2
             pt = None
-            # left spot first (link text, not trailing whitespace), then the centre: a page button can sit over
+            # left spot first (link text, not trailing whitespace), then the centre, then the first line: a page button can sit over
             # an option's left edge (Greenhouse "Locate me" under the Location list)
-            for i, p in enumerate(self._settled_points(node)):
-                if self._point_ok(p, node, last and i == 1):
+            pts = self._settled_points(node)
+            for i, p in enumerate(pts):
+                if self._point_ok(p, node, last and i == len(pts) - 1):
                     pt = p
                     break
             if pt is not None:

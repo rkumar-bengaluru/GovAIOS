@@ -335,7 +335,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 tell(f"{app} finished: {(r.summary or 'done').split(': ', 1)[-1]}")
                 text = f"{panel.name}, the {app} flow is complete, thank you."
             else:
-                why = r.stopped_reason or f"exit {r.code}"
+                why = r.stopped_reason or getattr(r, "reason", None) or f"exit {r.code}"
                 cap = getattr(r, "capture", None)
                 tell(f"{app} stopped: {why}" + (f" Saved page: captures/{cap}" if cap else ""))
                 text = f"{panel.name}, the {app} flow stopped: {why}."

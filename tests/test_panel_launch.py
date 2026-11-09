@@ -171,3 +171,9 @@ def test_last_capture_name_kept(env, monkeypatch, line, want):
     monkeypatch.setenv("FAKE_LINE", line)
     r, _ = run(env)
     assert r.capture == want
+
+
+def test_app_stop_reason_kept(env, monkeypatch):
+    monkeypatch.setenv("FAKE_LINE", "STOPPED: no Ready jobs in JobLens")
+    r, _ = run(env)
+    assert r.reason == "no Ready jobs in JobLens"
