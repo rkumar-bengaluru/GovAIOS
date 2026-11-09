@@ -32,12 +32,21 @@ def describe(el):
     return f"role={attr(el, 'AXRole')} name={str(name)[:40]!r} value_len={len(str(v)) if v is not None else '-'}"
 
 
+_seen = [None]
+
+
 def front_chrome_pid():
+    # the top normal-layer on-screen window's owner (NSWorkspace.frontmostApplication is cached without a run loop)
+    wins = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements,
+                                        Q.kCGNullWindowID) or []
+    top = next((w for w in wins if w.get("kCGWindowLayer") == 0), None)
     err, app = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), "AXFocusedApplication", None)
-    if err != 0 or app is None:
-        return None
-    err, pid = AXUIElementGetPid(app, None)
-    return pid if err == 0 and attr(app, "AXTitle") == "Google Chrome" else None
+    now = (top.get("kCGWindowOwnerName") if top else None, err,
+           attr(app, "AXTitle") if err == 0 and app is not None else None)
+    if now != _seen[0]:   # spike diagnostics: what is front, by the window list and by AX
+        print(f"front app: {now[0]!r}; AX focused app err={now[1]} title={now[2]!r}")
+        _seen[0] = now
+    return int(top["kCGWindowOwnerPID"]) if top and now[0] == "Google Chrome" else None
 
 
 def find(el, role, depth=30):

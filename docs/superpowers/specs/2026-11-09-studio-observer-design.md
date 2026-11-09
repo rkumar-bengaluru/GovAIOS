@@ -146,3 +146,13 @@ Both are open, with defaults to plan on:
 Shipped: the observer, the lesson recorder and Studio's What I learned review with Touch ID approval; `teach` is allowed in JobLens and Web Sandbox (the Web sandbox card has Teach this page, and a lesson there ends back at the card). Live plan: `docs/joblens-integration-test.md` section D.
 
 First-slice limits: a lesson ends if the tab goes to another site; a password field is always "fill yourself"; consent checkboxes can't be filled from the bank yet; type-then-Enter misses the last value; the site's terms are read by the admin, not by the app. See `docs/backlog.md`.
+
+## Spike result (2026-11-09, admin's Mac, Input Monitoring on)
+
+`done. clicks seen 15 (fast 0); typing seen yes; tab switch looked like close no; tab close detected yes`
+
+- Clicks: every click was seen with its position. On links, the element under the point is usually an unnamed `AXGroup` or `AXStaticText` inside the `AXLink`; the observer walks up to the link, as built. The page's radio buttons, the pop-up menu's `AXMenuItem` and a text field were hit directly. Clicks on Chrome's own toolbar (Back) are outside the web area and are not recorded.
+- Typing: the search field's value length was read when focus left it (11 characters).
+- Tab identity: Chrome makes a new `AXWebArea` on each navigation (the spike reported "teach tab hidden" after a search, in the same tab). This confirms the tab-strip id the app uses, not the web area.
+- Front app: Chrome's AX title is "Chrome", not "Google Chrome"; the app compares process ids, so it is unaffected (the spike matched the name and was fixed).
+- Not proven: clicks without Input Monitoring (it was on).
