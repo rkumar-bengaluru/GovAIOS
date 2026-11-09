@@ -2026,6 +2026,16 @@ def test_bad_bank_op_refused_before_touch_id(cc):
     assert _snap(cc) == before
 
 
+@pytest.mark.parametrize("flow", ["job_apply", "web_sandbox"])
+def test_lesson_never_writes_the_shipped_files(cc, monkeypatch, flow):
+    from govaios import engine
+    name, _ = _lesson(cc, flow=flow)
+    p, before, n = _lesson_form(cc, name)[0], _snap(cc), len(cc.asked)
+    monkeypatch.setattr(engine, "REPO", cc.flows.parent)   # as if the panel ran on the repo's own flows/
+    cc.post("/lesson/approve", name=name, p=p)
+    assert "shipped" in _tells(cc)[-1] and _snap(cc) == before and len(cc.asked) == n
+
+
 def test_discard_audits_and_replies(cc):
     from govaios import applyfiles
     name, _ = _lesson(cc)

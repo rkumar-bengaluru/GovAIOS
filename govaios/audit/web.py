@@ -1551,6 +1551,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return None
         fid, sandbox, pages_dir = lesson.get("flow"), lesson.get("flow") in lessons.SANDBOX, flows_dir.parent / "pages"
         raw = None
+        from govaios.engine import REPO
+        if any(Path(x).resolve().is_relative_to(REPO.resolve()) for x in (pages_dir, *([app.path] if app else []))):
+            tell("These are the shipped files inside GOV-AIOS: a lesson never changes them. Start the panel on "
+                 "your apps folder, then teach the page again.")
+            return back
         if not sandbox:
             try:   # these bytes are what is built on and approved: the flow is never read again
                 d, raw = read_bound(app.path, pages_dir) if app is not None else (None, None)
