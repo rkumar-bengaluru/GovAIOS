@@ -690,7 +690,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         ok = "".join(f"<li class=ok>{escape(a.name)}<span class=m>Can run</span></li>" for a in al if a.approved)
         drafts = "".join(f"<li class=draft>{escape(a.name)}<span class=m>Needs approval</span>"
                          f"<form method=post action=/approve>{hidden(csrf)}"
-                         f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form></li>"
+                         f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>"
+                         f"{delete_form(csrf, 'flow', a.id, '/') if DELETABLE.fullmatch(a.id) else ''}</li>"
                          for a in al if not a.approved)
         end = (f"<form method=post action=/end>{hidden(csrf)}<button class=stop>End session</button></form>"
                if s.active() else "")
@@ -1203,15 +1204,31 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"it runs only after you approve it with Touch ID.</p>{nodir}{''.join(cards)}", here="/market")
 
     STEPS = 12   # step rows on the compose form
+    DELETABLE = re.compile(r"(studio|check)_[a-z0-9_]{1,70}")   # flow ids Delete may remove (the file is <id>.yaml)
+    PAGE_ID = re.compile(r"[a-z0-9_]{1,80}")
+
+    def delete_form(csrf, kind, name, back):
+        return (f"<form method=post action=/apps/delete>{hidden(csrf)}<input type=hidden name=kind value={kind}>"
+                f"<input type=hidden name=name value='{escape(name)}'><input type=hidden name=back value='{back}'>"
+                f"<button class=stop>Delete</button></form>")
+
+    def approved_browser():
+        ok = {a.id for a in apps() if a.approved}
+        return studio.find_browser(flows_dir, lambda wf: wf["id"] in ok)
 
     def studio_page(csrf):
         """Draft pages from the Web Sandbox, and composing a bigger app from them (saved as a Draft)."""
-        cat = studio.catalogue(flows_dir, flows_dir.parent / "pages") if flows_dir else {}
-        have = {a.id: a for a in apps()}
+        cat = studio.catalogue(flows_dir, flows_dir.parent / "pages", approved_browser()) if flows_dir else {}
         rows = "".join(
-            f"<li><b>{escape(pid)}</b> \u00b7 {escape(info['title'][:60])} \u00b7 <code>{escape(info['url'][:120])}</code>"
-            f" \u00b7 Check app {'approved' if have.get('check_' + pid) and have['check_' + pid].approved else 'in Drafts'}"
-            "</li>" for pid, info in cat.items())
+            f"<li><b>{escape(pid)}</b> \u00b7 <code>{escape(info['url'][:120])}</code>"
+            f"{delete_form(csrf, 'page', pid, '/studio')}</li>" for pid, info in cat.items())
+        mine = "".join(f"<li><b>{escape(a.name)}</b> \u00b7 {'approved' if a.approved else 'in Drafts'}"
+                       f"{delete_form(csrf, 'flow', a.id, '/studio')}</li>" for a in apps() if DELETABLE.fullmatch(a.id))
+        new = (f"<section class=appcard><h2>New automation</h2><p class=m>An empty app that opens a site and waits on its "
+               f"start page: when it runs, choose Teach on that page and show it the steps. Saved as a Draft.</p>"
+               f"<form method=post action=/studio/new>{hidden(csrf)}<label>App name <input name=app maxlength=40 required>"
+               f"</label><label>Starting link <input name=url type=url required placeholder='https://...'></label>"
+               f"<button class=go>Save as a Draft app</button></form></section>" if flows_dir else "")
         opts = ["<option value=''>\u2014</option>"]
         for pid, info in cat.items():
             opts.append(f"<option value='open:{escape(pid)}'>Open {escape(pid)}</option>")
@@ -1233,9 +1250,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 f"stay yours.</p><form method=post action=/studio/compose>{hidden(csrf)}<label>App name <input name=app "
                 f"maxlength=40 required></label>{sel}<button class=go>Save as a Draft app</button></form></section>"
                 if cat else "<p class=note>No draft pages yet. Capture pages with the Web Sandbox first.</p>")
-        return _page(f"<h1>Studio</h1><p>Pages you captured in the Web Sandbox become draft pages. Run a page's Check app "
-                     f"to confirm it matches the live site, then compose them into an app here.</p>"
-                     f"<ul>{rows}</ul>{form}", here="/studio")
+        return _page(f"<h1>Studio</h1><p>Pages you captured in the Web Sandbox become draft pages. "
+                     f"Compose them into an app here, or start a new automation.</p>"
+                     f"{new}<h2>Studio apps</h2><ul>{mine}</ul><h2>Draft pages</h2><ul>{rows}</ul>{form}", here="/studio")
 
     def studio_compose(f):
         if not flows_dir:
@@ -1250,6 +1267,48 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         log.append("setting", field="studio_compose", flow=fid)
         tell(f"{flow['workflow']['app']} is saved as a draft app. Approve it to let it run.")
         return "/"
+
+    def studio_new(f):
+        if not flows_dir:
+            return None
+        try:
+            path = studio.new_automation(flows_dir, f.get("app", ""), f.get("url", ""), approved_browser())
+        except (ValueError, OSError) as e:
+            tell(f"Studio: {e}.")
+            return "/studio"
+        log.append("setting", field="studio_new", flow=path.stem)
+        tell(f"{f.get('app', '').strip()[:40]} is saved as a draft app. Approve it to let it run.")
+        return "/"
+
+    def apps_delete(f):
+        """Delete a Studio app (studio_*, check_*) or a draft page no flow uses; its approval goes first."""
+        kind, name, back = f.get("kind"), f.get("name", ""), f.get("back")
+        back = back if back in ("/", "/studio") else "/"
+        if not flows_dir:
+            return None
+        pages = flows_dir.parent / "pages"
+        if kind == "flow" and DELETABLE.fullmatch(name):
+            path = flows_dir / f"{name}.yaml"
+            apply = lambda: (Approvals(approvals_path).revoke_flow(name), path.unlink())   # noqa: E731
+        elif kind == "page" and PAGE_ID.fullmatch(name):
+            path = pages / f"{name}.yaml"
+            try:   # any flow, approved or not; one that cannot be read might use it: refuse
+                used = set().union(*(pages_used(yaml.safe_load(p.read_text())["workflow"]) for p in flows_dir.glob("*.yaml")))
+            except Exception:
+                used = {name}
+            if name in used:
+                tell(f"Studio: {name} is used by an app, so it stays.")
+                return back
+            apply = path.unlink
+        else:
+            tell("Studio: only Studio apps and unused draft pages can be deleted.")
+            return back
+        if path.is_symlink() or not path.is_file():
+            tell("Studio: nothing to delete there.")
+            return back
+        audited("setting", {"field": "delete", "target": path.name}, apply)
+        tell(f"{path.name} is deleted.")
+        return back
 
     def market_setup_page(csrf, tid):
         t = _tpl(tid)
@@ -1532,7 +1591,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     POSTS = {"/terms": terms_post, "/lesson/approve": lesson_approve, "/lesson/discard": lesson_discard,
              "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
-             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose}
+             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new,
+             "/apps/delete": apps_delete}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
                       f"/{_ag.slash}/start": start_post(_ag)})

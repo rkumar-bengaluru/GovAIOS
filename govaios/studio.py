@@ -1,8 +1,7 @@
-"""Studio, first piece: a Web Sandbox capture becomes a draft page schema and a read-only "Check" app.
+"""Studio: a Web Sandbox capture becomes a draft page schema (its start link kept in a header comment).
 
 The draft page is the reusable unit: any bigger flow uses it by its page id, and that flow's approval binds the
-page's bytes (approvals.read_bound). The Check app only opens the page and identifies it, so the admin can confirm
-the draft against the live site before linking it into a bigger flow. Both are written as Drafts (never approved).
+page's bytes (approvals.read_bound). It is written as a Draft (never approved).
 Page text is untrusted: it only ever becomes quoted YAML strings (safe_dump) and slugged ids, never code.
 Risks are conservative: every button is submit until the admin or Claude lowers it.
 """
@@ -161,32 +160,8 @@ def _add_items(tree, nodes, elements, add):
         add(f"items_{n}", spec)
 
 
-def draft_check_flow(page_id, url, browser, title):
-    """A read-only app that opens the captured page and identifies it with the draft page."""
-    u = urlsplit(url)
-    site = f"{u.scheme}://{u.netloc}"
-    name = " ".join(re.sub(r"[^A-Za-z0-9 ]+", " ", title).split())[:40] or page_id
-    return {"workflow": {
-        "id": f"check_{page_id}", "app": f"Check {name}",
-        "name": f"Check the draft page {page_id}: open it and identify it",
-        "version": 1,
-        "site_terms": {"reviewed": date.today().isoformat(),
-                       "basis": "Drafted from the Web Sandbox: the admin checked this site's terms before capturing it"},
-        "browser": dict(browser),
-        "permissions": {"allow": ["launch_application", "navigate", "read_page"], "max_element_risk": "read"},
-        "destinations": ["https://www.google.com", site],
-        "steps": [
-            {"id": "launch_chrome", "action": "launch_application"},
-            {"id": "open_google", "action": "navigate", "value": "https://www.google.com"},
-            {"id": "on_google", "action": "classify_page", "on_match": {"google_home": "continue", "unknown": "stop_and_report"}},
-            {"id": "verify_account", "action": "verify_account", "target": "google_home.account_button"},
-            {"id": "open_page", "action": "navigate", "value": site + (u.path or "/")},   # never the query: it can hold tokens
-            {"id": "on_page", "action": "classify_page", "on_match": {page_id: "continue", "unknown": "stop_and_report"}},
-        ]}}
-
-
 def write_draft(flows_dir, pages_dir, tree, url, browser, capture_name):
-    """Write the draft page and its Check app (exclusive, never overwriting). Returns the page id."""
+    """Write the draft page (exclusive, never overwriting). Returns the page id."""
     for d in (flows_dir, pages_dir):
         if d.is_symlink():
             raise OSError("apps folder is a symlink")
@@ -194,19 +169,17 @@ def write_draft(flows_dir, pages_dir, tree, url, browser, capture_name):
     base = f"{host}_{_slug(tree.get('name') or 'page', 30)}".strip("_")[:56]
     for i in range(1, 100):
         pid = base if i == 1 else f"{base}_{i}"
-        if not (pages_dir / f"{pid}.yaml").exists() and not (flows_dir / f"check_{pid}.yaml").exists():
+        if not (pages_dir / f"{pid}.yaml").exists():
             break
     else:
         raise OSError("no free draft name")
     page = draft_page(tree, pid)
+    u = urlsplit(url)
     head = (f"# Draft from the Web Sandbox capture {capture_name} ({date.today().isoformat()}). Review before use:\n"
+            f"# Start link: {_origin(url)}{u.path or '/'}\n"   # never the query: it can hold tokens
             "# every button is rated submit until lowered; names are as the page showed them.\n")
     if not _create(pages_dir / f"{pid}.yaml", (head + yaml.safe_dump(page, sort_keys=False, allow_unicode=True)).encode()):
         raise OSError("draft page exists")
-    flow = draft_check_flow(pid, url, browser, tree.get("name") or "")
-    if not _create(flows_dir / f"check_{pid}.yaml", yaml.safe_dump(flow, sort_keys=False, allow_unicode=True).encode()):
-        (pages_dir / f"{pid}.yaml").unlink()
-        raise OSError("draft flow exists")
     return pid
 
 
@@ -216,18 +189,34 @@ MAX_STEPS = 20
 CLICKABLE = ("read", "navigate", "modify")   # submit-rated elements stay the admin's: never composed into a click
 
 
-def catalogue(flows_dir, pages_dir):
-    """Draft pages ready to compose with: each has its Check app (the start URL and browser). {page id: info}."""
-    out = {}
-    for f in sorted(Path(flows_dir).glob("check_*.yaml")):
+def find_browser(flows_dir, ok=lambda wf: True):
+    """The browser block (application, profile, account) of the first flow in the folder that has a full one and
+    passes ok(workflow): the panel has no other source for it. None if there is none."""
+    for f in sorted(Path(flows_dir).glob("*.yaml")):
         try:
             wf = yaml.safe_load(f.read_text())["workflow"]
-            pid = wf["id"].removeprefix("check_")
-            url = next(s["value"] for s in wf["steps"] if s["id"] == "open_page")
-            page = yaml.safe_load((Path(pages_dir) / f"{pid}.yaml").read_text())["page"]
-        except Exception:   # unreadable or not a Check app: not offered
+            b = wf["browser"]
+            if b["application"] and b["profile_directory"] and b["account"] and ok(wf):
+                return dict(b)
+        except Exception:
             continue
-        out[pid] = {"url": url, "browser": wf["browser"], "title": wf.get("app", pid).removeprefix("Check "),
+    return None
+
+
+def catalogue(flows_dir, pages_dir, browser=...):
+    """Draft pages (those with a Start link header) ready to compose with. {page id: info}. The browser block is
+    copied from an existing flow, as new_automation does."""
+    browser = find_browser(flows_dir) if browser is ... else browser   # an explicit None: no browser to copy
+    out = {}
+    for f in sorted(Path(pages_dir).glob("*.yaml")):
+        try:
+            text = f.read_text()
+            url = re.search(r"^# Start link: (\S+)$", text, re.M)[1]
+            page = yaml.safe_load(text)["page"]
+        except Exception:   # not a Studio draft page, or unreadable: not offered
+            continue
+        pid = f.stem
+        out[pid] = {"url": url, "browser": browser, "title": pid,
                     "elements": {k: (s.get("role"), s.get("name") or s.get("dom_id") or k, s.get("risk"))
                                  for k, s in page["elements"].items() if "fields" not in s},
                     "items": {k: dict(s["fields"]) for k, s in page["elements"].items()
@@ -264,6 +253,8 @@ def compose(app, steps, cat):
         if kind == "open":
             info = cat[pid]
             if i == 1:
+                if not info["browser"]:
+                    raise ValueError("no app with a browser profile to copy: set one up first")
                 browser = info["browser"]
                 out.append({"id": "open_start", "action": "navigate", "value": info["url"]})
             if (o := _origin(info["url"])) not in origins:
@@ -348,3 +339,46 @@ def write_composed(flows_dir, flow):
     if not _create(Path(flows_dir) / f"{flow['workflow']['id']}.yaml", text.encode()):
         raise OSError("an app with that name exists")
     return flow["workflow"]["id"]
+
+
+def new_automation(flows_dir, name, url, browser):
+    """An empty Draft app that opens `url` and stops on its (unknown) start page, where `teach` lets the admin
+    teach it. Written exclusively. ValueError for a bad name, link or missing browser block."""
+    from . import lessons   # imports studio
+    name = " ".join(str(name).split())[:40]
+    fid = "studio_" + _slug(name, 40)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]*", name) or fid == "studio_":
+        raise ValueError("give the app a name (letters, digits, spaces)")
+    if not browser:
+        raise ValueError("no approved app with a browser profile to copy: set one up first")
+    try:
+        u = urlsplit(url.strip())
+        local = u.scheme == "http" and u.hostname in ("localhost", "127.0.0.1") and not (u.username or u.password)
+        site = f"http://{u.hostname}" + (f":{u.port}" if u.port else "") if local else lessons._site(url.strip())
+    except ValueError as e:
+        raise ValueError(f"the starting link must be https (or http://localhost): {e}"[:200]) from None
+    flow = {"workflow": {
+        "id": fid, "app": name, "name": f"{name} (new automation from Studio: teach it from its start page)",
+        "version": 1,
+        "site_terms": {"reviewed": date.today().isoformat(),
+                       "basis": "Started in Studio: the admin checks the site's terms before teaching it"},
+        "browser": dict(browser),
+        "permissions": {"allow": ["launch_application", "navigate", "read_page", "click", "fill_field", "ask_admin",
+                                  "attach_file", "teach"], "max_element_risk": "modify"},
+        "destinations": ["https://www.google.com", site],
+        "steps": [
+            {"id": "launch_chrome", "action": "launch_application"},
+            {"id": "open_google", "action": "navigate", "value": "https://www.google.com"},
+            {"id": "on_google", "action": "classify_page", "on_match": {"google_home": "continue", "unknown": "stop_and_report"}},
+            {"id": "verify_account", "action": "verify_account", "target": "google_home.account_button"},
+            {"id": "open_start", "action": "navigate", "value": site + (u.path or "/")},
+            {"id": "on_start", "action": "classify_page", "on_match": {"unknown": "stop_and_report"}},
+        ]}}
+    if Path(flows_dir).is_symlink():
+        raise OSError("apps folder is a symlink")
+    path = Path(flows_dir) / f"{fid}.yaml"
+    text = (f"# Started in Studio {date.today().isoformat()}. A Draft: it runs only after you approve it.\n"
+            + yaml.safe_dump(flow, sort_keys=False, allow_unicode=True))
+    if not _create(path, text.encode()):
+        raise OSError("an app with that name exists")
+    return path

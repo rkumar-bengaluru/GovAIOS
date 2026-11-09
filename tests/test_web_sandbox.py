@@ -149,7 +149,7 @@ def test_site_typed_with_case_and_default_port_still_matches(tmp_path, monkeypat
     assert p["file"] is not None
 
 
-def test_each_capture_writes_a_draft_page_and_check_app(tmp_path, monkeypatch):
+def test_each_capture_writes_a_draft_page_and_no_check_app(tmp_path, monkeypatch):
     from govaios.panel.apps import list_apps
     d = SiteDesk(pages=[SITE])
     e, err, asked = run_sandbox(tmp_path, d, ["capture", "done"], monkeypatch)
@@ -160,7 +160,6 @@ def test_each_capture_writes_a_draft_page_and_check_app(tmp_path, monkeypatch):
     page = yaml.safe_load((src / "pages" / f"{pid}.yaml").read_text())["page"]
     assert page["elements"]["button_go"] == {"role": "button", "name": "Go", "risk": "submit"}
     apps = {a.id: a for a in list_apps(src / "flows", tmp_path)}
-    check = apps[f"check_{pid}"]
-    assert check.name.startswith("Check ") and not check.approved   # a Draft until the admin approves it
+    assert not any(i.startswith("check_") for i in apps)   # no Check app any more
     assert any(x.get("action") == "write_draft" and x.get("outcome") == "done" for x in e)
     assert any(x.get("action") == "write_draft" and x.get("decision") == "allow" for x in e)

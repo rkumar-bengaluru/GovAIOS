@@ -1786,7 +1786,7 @@ def _studio_drafts(P):
 def test_studio_lists_drafts_and_never_offers_submit_clicks(cc):
     jobs = _studio_drafts(cc)
     s, page, _ = cc.get("/studio")
-    assert s == 200 and jobs in page and "Check app in Drafts" in page and "aria-current=page>Studio" in page
+    assert s == 200 and jobs in page and "Check app" not in page and "New automation" in page and "aria-current=page>Studio" in page
     assert f"value='click:{jobs}.link_lead_i'>Click Lead &lt;i&gt;" in page and "<i>" not in page.split("Studio</h1>")[1]
     assert "Delete account" not in page   # rated submit: never composed into a click
 
@@ -2113,3 +2113,58 @@ def test_lesson_page_warns_about_end_and_other_apps(cc):
         "page:\n  id: jobs_acme_example_review_acme\n  identification: {title_matches: '^Review \\| Acme$'}\n"
         "  elements: {}\n")
     assert "the run does not end there" in _lesson_form(cc, name)[1]
+
+
+def test_studio_new_automation_saves_a_draft_and_refuses_http(cc):
+    s, page, _ = cc.get("/studio")
+    assert "action=/studio/new" in page
+    cc.post("/studio/new", app="Acme", url="https://acme.example/start")
+    _approve_job_apply(cc)
+    cc.post("/studio/new", app="Acme", url="https://acme.example/start")
+    a = next(a for a in list_apps(cc.flows, cc.home) if a.id == "studio_acme")
+    assert not a.approved and _log(cc.home, "setting")[-1]["field"] == "studio_new"
+    cc.post("/studio/new", app="Plain", url="http://acme.example/")
+    assert "https" in _tells(cc)[-1] and not (cc.flows / "studio_plain.yaml").exists()
+    assert "Delete" in cc.get("/studio")[1] and "Delete" in cc.get("/")[1]
+
+
+def _delete(cc, kind, name):
+    return cc.post("/apps/delete", kind=kind, name=name, back="/studio")
+
+
+def test_delete_only_studio_and_check_apps(cc):
+    from govaios import studio
+    studio.new_automation(cc.flows, "Acme", "https://acme.example", {"application": "chrome", "profile_directory": "P", "account": "a@x.y"})
+    (cc.flows / "check_old.yaml").write_text("workflow: {id: check_old, steps: []}")
+    ap = Approvals(cc.home / "approvals.json")
+    ap.approve_flow("studio_acme", "d")
+    for bad in ("job_apply", "himalayas", "web_sandbox", "morning_inbox_briefing", "../job_apply", "studio_acme.yaml", "studio_/../x"):
+        _delete(cc, "flow", bad)
+    assert (cc.flows / "job_apply.yaml").exists() and (cc.flows / "morning_inbox_briefing.yaml").exists()
+    _delete(cc, "flow", "studio_acme")
+    _delete(cc, "flow", "check_old")
+    assert not (cc.flows / "studio_acme.yaml").exists() and not (cc.flows / "check_old.yaml").exists()
+    assert "studio_acme" not in json.loads((cc.home / "approvals.json").read_text())["flows"]   # revoked first
+    assert [e["target"] for e in _log(cc.home, "setting") if e.get("field") == "delete"] == ["studio_acme.yaml", "check_old.yaml"]
+    assert cc.req("/apps/delete", "POST", body={"kind": "flow", "name": "check_x"})[0] == 403   # no session
+
+
+def test_delete_symlink_refused(cc, tmp_path):
+    (cc.home / "t.yaml").write_text("x")
+    (cc.flows / "studio_link.yaml").symlink_to(cc.home / "t.yaml")
+    _delete(cc, "flow", "studio_link")
+    assert (cc.home / "t.yaml").exists() and (cc.flows / "studio_link.yaml").is_symlink()
+
+
+def test_delete_draft_page_used_by_approved_flow_refused(cc):
+    jobs = _studio_drafts(cc)
+    _approve_job_apply(cc)
+    pages = cc.flows.parent / "pages"
+    cc.post("/studio/compose", app="Acme apply", s1=f"open:{jobs}")   # an unapproved flow binds it too
+    _delete(cc, "page", jobs)
+    assert (pages / f"{jobs}.yaml").exists() and "used by an app" in _tells(cc)[-1]
+    _delete(cc, "page", "google_home")   # bound by job_apply
+    assert (pages / "google_home.yaml").exists()
+    _delete(cc, "flow", "studio_acme_apply")
+    _delete(cc, "page", jobs)
+    assert not (pages / f"{jobs}.yaml").exists()
