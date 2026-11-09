@@ -190,7 +190,13 @@ class TeachDesk(ja.ApplyDesk):
         return super().web_root(app)
 
     def observe_sample(self, app):
-        return dict(self.forever) if self.forever else self.samples.pop(0)   # none left: raises, as a closed window
+        s = dict(self.forever) if self.forever else self.samples.pop(0)   # none left: raises, as a closed window
+        if s.pop("flip", None):   # the tab navigates to another site right after this look
+            self.url = "https://elsewhere.example.org/p"
+        return s
+
+    def teach_tab(self, app):
+        return "w1"
 
 
 def answer_cards(tmp_path, choose, seen):
@@ -390,3 +396,26 @@ def test_approving_a_lesson_keeps_the_run_and_a_real_revoke_still_stops(tmp_path
         assert err is None and tasks[1]["status"] == "done"
     else:
         assert str(err) == "revoked"
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_another_tab_on_another_site_does_not_end_the_lesson(tmp_path, monkeypatch):
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")
+    other = {**LOOK, "url": "https://elsewhere.example.org/p", "title": "Elsewhere", "web": "w2"}
+    desk = TeachDesk([LOOK, other, {**LOOK, "down": True, "hit": "b1"}])
+    e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, desk, {"new_page": "teach", "lesson": "approved"})
+    assert tasks[0]["reason"].startswith("page learned")
+    assert live[-1]["lines"] == ["clicked Apply Now"] and desk.samples == []
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_navigation_during_the_snapshot_never_stores_the_other_site(tmp_path, monkeypatch):
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")
+    nxt = {**LOOK, "url": ODD + "/2", "title": "Next", "flip": True}   # checked on ODD, read on elsewhere
+    desk = TeachDesk([LOOK, {**LOOK, "down": True, "hit": "b1"}, nxt, LOOK])
+    e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, desk, {"new_page": "teach", "lesson": "approved"})
+    assert tasks[0]["reason"].startswith("page learned")
+    [name] = lessons_written(tmp_path)
+    text = (tmp_path / "lessons" / name).read_text()
+    assert [p["title"] for p in json.loads(text)["pages"]] == ["Somewhere else"] and "Apply here" not in text
+    assert live[-1]["lines"][-1] == "left elsewhere.example.org: lesson ended" and desk.samples == [LOOK]

@@ -878,23 +878,34 @@ class Runner:
             self.flow["destinations"] = [*before, site]   # the lesson's own approval is where a site joins the flow
         self.gate("read_page", "read", destination=url, keep=False)   # refused: never read (or captured)
         allowed = {origin(d) for d in self.flow["destinations"]}
-        self.d.teach_tab(self.app)
+        tab = self.d.teach_tab(self.app)
         obs = observer.Observer(self.d, self.app, self.d.same)
         lines, last = [], [time.monotonic()]
 
+        class Left(Exception):
+            pass
+
         def snap():
-            return self.d.web_root(self.app)
+            root = self.d.web_root(self.app)
+            url = self.d.current_url(self.app) or ""   # after the read: a navigation in between is never stored
+            if origin(url) not in allowed:
+                raise Left(url)
+            return root
 
         def tick():
             left = []
             try:
                 sample = self.d.observe_sample(self.app)
-                if sample.get("tab") and origin(sample.get("url") or "") not in allowed:
-                    # never snapshot a site not approved for this lesson: end it as if the tab closed.
-                    # shortcut: fails closed on any other site; ask terms + Touch ID there when lessons span sites
-                    left = [f"left {(urlsplit(sample.get('url') or '').hostname or 'the site')[:100]}: lesson ended"]
-                    sample = {"tab": False}
+                # never snapshot a site not approved for this lesson: end it as if the tab closed. Other tabs are
+                # not the lesson (the observer ignores them). shortcut: fails closed on any other site; ask terms +
+                # Touch ID there when lessons span sites
+                if sample.get("tab") and self.d.same(sample.get("web"), tab) and \
+                        origin(sample.get("url") or "") not in allowed:
+                    raise Left(sample.get("url") or "")
                 evs = obs.feed(sample, snap)
+            except Left as e:
+                left = [f"left {(urlsplit(str(e)).hostname or 'the site')[:100]}: lesson ended"]
+                evs = obs.feed({"tab": False}, snap)
             except Exception:   # the window closed mid-look: the teach tab is gone
                 evs = obs.feed({"tab": False}, snap)
             if evs or left:
