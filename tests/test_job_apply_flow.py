@@ -236,6 +236,12 @@ class ApplyDesk(FakeDesktop):
         else:
             self.values[node.dom_id or node.name or "q1"] = text
 
+    def link_url(self, node):   # JobLens's title links carry their address (AXURL), as live
+        if self.url == JL and node.role == "link":
+            self.job = node.name
+            return getattr(self, "link_base", JL) + f"jobs/{node.name.lower().replace(' ', '-')}"
+        return None
+
     def click(self, node):
         assert not any(engine.matches(node, spec) for spec in SUBMIT_SPECS), f"clicked {node.name}"
         self.calls.append(("click", node.dom_id or node.name))
@@ -356,12 +362,22 @@ def test_end_to_end_fake_greenhouse(tmp_path, monkeypatch, capsys):
         ("review", "Acme Test \u2014 Staff Engineer", 1), ("review", "Beta Test \u2014 Lead", 2)]
     clicks = [c[1] for c in d.calls if isinstance(c, tuple) and c[0] == "click"]
     assert "Engineer" not in clicks and clicks.count("Apply") == 2
+    assert "Staff Engineer" not in clicks and "Lead" not in clicks   # opened by address: no click on the title
     assert d.calls.count("new_tab") == 2   # each job in its own tab
     assert {x.get("item") for x in e if x.get("step") == "fill"} == {1, 2}
     assert not any(x.get("decision") == "deny" for x in e)
     out = capsys.readouterr()
     for blob in ((tmp_path / "audit.jsonl").read_text(), out.out, out.err, json.dumps(tasks)):
         assert SECRET not in blob and str(tmp_path / CV) not in blob
+
+
+@pytest.mark.usefixtures("env")
+def test_a_link_to_another_site_is_clicked_not_typed(tmp_path, monkeypatch):
+    d = ApplyDesk(GH)
+    d.link_base = "https://elsewhere.example/"   # open_link never types an address on another site
+    e, tasks, err = run_apply(tmp_path, d)
+    clicks = [c[1] for c in d.calls if isinstance(c, tuple) and c[0] == "click"]
+    assert "Staff Engineer" in clicks and "elsewhere" not in d.typed
 
 
 @pytest.mark.usefixtures("env")
@@ -495,13 +511,13 @@ def test_two_jobs_with_the_same_client_and_role_are_both_done(tmp_path, monkeypa
     def web_root(app):
         d.last = root_of(app)
         return d.last
-    orig = d.click
-    def click(node):
-        if d.url == JL and node.role == "link":   # which of the two equal rows was clicked (0 is the header)
+    orig = d.link_url
+    def link_url(node):
+        if d.url == JL and node.role == "link":   # which of the two equal rows was opened (0 is the header)
             table = next(n for n in d.last.walk() if n.role == "table")
             rows.append(next(i for i, r in enumerate(table.children) if any(x is node for x in r.walk())))
-        orig(node)
-    d.web_root, d.click = web_root, click
+        return orig(node)
+    d.web_root, d.link_url = web_root, link_url
     e, tasks, err = run_apply(tmp_path, d)
     assert err is None and [t["status"] for t in tasks] == ["done", "done"] and rows == [1, 2]
 

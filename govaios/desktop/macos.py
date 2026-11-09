@@ -257,6 +257,11 @@ class MacDesktop:
         # last: the first line's left spot, for a link that wraps (its box centre falls between the lines)
         return (x + min(w / 2, 20), y + h / 2), (x + w / 2, y + h / 2), (x + min(w / 2, 20), y + min(h / 2, 9))
 
+    def link_url(self, node):
+        """The link's own address (AXURL), or None."""
+        u = _attr(node.handle, "AXURL") if node.handle is not None else None
+        return str(u.absoluteString()) if hasattr(u, "absoluteString") else (str(u) if u else None)
+
     def click(self, node):
         self._require_focus()
         # 6 tries (~5 s): Chrome answers a hit on a fresh or just-hovered wrapped link with its cell for a few

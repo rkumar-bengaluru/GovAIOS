@@ -190,6 +190,9 @@ class FakeDesktop:
     def choose_file(self, path):
         self.calls.append(("choose_file",))
 
+    def link_url(self, node):
+        return None   # no address: open_link falls back to the click
+
     def click(self, node):
         self.calls.append("click")
         self.url = "https://himalayas.app/jobs/secret-title"

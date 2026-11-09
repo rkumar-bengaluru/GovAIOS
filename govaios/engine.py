@@ -487,9 +487,12 @@ class Runner:
 
     def do_navigate(self, s):
         value = self.inputs[s["value_from"].removeprefix("input.")] if "value_from" in s else s["value"]
-        self.gate("navigate", "navigate", destination=value)
+        self._go(value)
+
+    def _go(self, url):
+        self.gate("navigate", "navigate", destination=url)
         self._act("press", self.d.press, "focus_address_bar")
-        self._act("type_text", self.d.type_text, value)
+        self._act("type_text", self.d.type_text, url)
         self._act("press", self.d.press, "enter")
         time.sleep(2)
 
@@ -699,11 +702,19 @@ class Runner:
             ref = tgt
         self.gate("click", spec["risk"], target=ref)
         before = self.d.current_url(self.app)
+        # open_link: go to the link's own address instead of clicking it (JobLens's two-line titles defeat the
+        # click-point check); same site only, so it never reaches a destination the click could not
+        url = self.d.link_url(node) if s.get("open_link") else None
+        if url and origin(url) != origin(before):
+            url = None
         for attempt in range(2):                         # one bounded retry (Rule 10)
-            self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
-            node, spec = (self._current_item_node(tgt.split(".", 1)[1]) if tgt.startswith("current_item.")
-                          else self.page_element(tgt))   # positions changed after scrolling
-            self._act("click", self.d.click, node, target=ref)
+            if url:
+                self._go(url)
+            else:
+                self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
+                node, spec = (self._current_item_node(tgt.split(".", 1)[1]) if tgt.startswith("current_item.")
+                              else self.page_element(tgt))   # positions changed after scrolling
+                self._act("click", self.d.click, node, target=ref)
             if "verify_page" not in s:
                 return
             page, _ = self.wait_for_page([s["verify_page"]], s.get("timeout_seconds", 15))

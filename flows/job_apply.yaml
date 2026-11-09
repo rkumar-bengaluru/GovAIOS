@@ -29,7 +29,7 @@ workflow:
       steps:
         - { id: job_tab, action: new_tab }   # each job in its own tab: an earlier job's form stays as you left it
         - { id: open_list, action: navigate, value: "http://localhost:8100/" }
-        - { id: open_job, action: click, target: current_item.role, verify_page: joblens_job }
+        - { id: open_job, action: click, open_link: true, target: current_item.role, verify_page: joblens_job }   # by its address: two-line titles defeat the click check
         - { id: open_apply, action: click, target: joblens_job.apply_button }
         - id: authentication_guard
           action: classify_page
