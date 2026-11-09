@@ -29,6 +29,8 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 
 
 NO_DEST = object()
+LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over")   # what a taught page may do (Studio lessons)
+MAX_LEARNED = 10   # learned pages run within one classify_page call
 FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
 
@@ -107,6 +109,36 @@ def identify(page, root):
         if find_all(root, page["elements"][anchor], page):
             return False
     return True
+
+
+def check_learned(steps):
+    """A learned page case {do: [steps], then: again|end}: only the allowed actions, each with its own id."""
+    ids = []
+
+    def walk(steps):
+        for s in steps:
+            ids.append(s.get("id"))
+            walk(s.get("steps", []))
+            for page, v in s.get("on_match", {}).items():
+                if not (isinstance(v, dict) and "do" in v):
+                    continue
+                if not isinstance(v["do"], list) or not v["do"]:
+                    raise Stop(f"learned steps: {page} has no steps")
+                if v.get("then") not in ("again", "end"):
+                    raise Stop("learned steps: then must be again or end")
+                for d in v["do"]:
+                    if not isinstance(d, dict) or not d.get("id"):
+                        raise Stop("learned steps: a step without an id")
+                    if d.get("action") not in LEARNED_ACTIONS:
+                        raise Stop(f"learned steps: {d.get('action')} not allowed")
+                    ids.append(d["id"])
+                    learned.add(d["id"])
+
+    learned = set()
+    walk(steps)
+    for i in sorted(learned):
+        if ids.count(i) > 1:
+            raise Stop(f"duplicate step id: {i}")
 
 
 def approval_question(f, deliver):
@@ -188,6 +220,7 @@ class Runner:
         self.flow = yaml.safe_load(raw[self.flow_path])["workflow"]
         if not re.fullmatch(r"[a-z0-9_]+", str(self.flow.get("id"))):   # it becomes part of a report filename
             raise Stop("invalid flow id")
+        check_learned(self.flow["steps"])
         try:
             self.deliver = check_block(self.flow)
         except ValueError as e:
@@ -411,6 +444,8 @@ class Runner:
                 raise Stop("emergency stop")
             self.step = s["id"]
             out = getattr(self, "do_" + s["action"])(s)
+            if out == ("end",):   # a learned page ended this list (the job is done)
+                return
             if isinstance(out, tuple) and out[0] == "skip_to":
                 if not any(x["id"] == out[1] for x in steps[i + 1:]):
                     raise Stop(f"skip_to {out[1]}: no such later step")
@@ -442,9 +477,22 @@ class Runner:
     def do_classify_page(self, s):
         cases = s["on_match"]
         candidates = [p for p in cases if p != "unknown"]
-        for attempt in range(3):                         # bounded resumes (Rule 10)
+        attempts = learned = 0
+        while attempts < 3:                              # bounded resumes (Rule 10)
             page, root = self.wait_for_page(candidates, s.get("timeout_seconds", 20))
             what = cases.get(page or "unknown", "stop_and_report")
+            if isinstance(what, dict) and "do" in what:  # a page the admin taught: its steps, then look again or end
+                learned += 1
+                if learned > MAX_LEARNED:
+                    raise Stop("too many learned pages in a row")
+                self.gate("read_page", "read", destination=self.d.current_url(self.app))
+                self.ctx["page"] = page
+                self.steps(what["do"])                   # each step through its own gate (click: risk ceiling)
+                self.step = s["id"]
+                if what["then"] == "end":
+                    return ("end",)
+                continue
+            attempts += 1
             if what == "continue":
                 url = self.d.current_url(self.app)
                 self.gate("read_page", "read", destination=url)      # landed origin must be declared
