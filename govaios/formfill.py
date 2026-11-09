@@ -136,6 +136,16 @@ def stage_text(path: Path, text: str) -> Path:
     return tmp
 
 
+def new_key(label: str, taken) -> str:
+    """A bank key named from the label (snake case, at most 40), not in taken."""
+    base = normalize(label).replace(" ", "_")[:40] or "answer"
+    key, n = base, 1
+    while key in taken:
+        n += 1
+        key = f"{base[:40 - len(str(n)) - 1]}_{n}"
+    return key
+
+
 def add_answer(path: Path, label: str, answer: str) -> str:
     if not ok_value(answer, "textarea") or len(answer) > 2000:
         raise BankError("answer refused")
@@ -143,12 +153,7 @@ def add_answer(path: Path, label: str, answer: str) -> str:
     bank = load_bank(path, path.parent)
     if len(label) > 300 or len(bank.entries) >= 300:
         raise BankError("label too long or bank full")
-    base = normalize(label).replace(" ", "_")[:40] or "answer"
-    key, n = base, 1
-    taken = {e.key for e in bank.entries}
-    while key in taken:
-        n += 1
-        key = f"{base[:40 - len(str(n)) - 1]}_{n}"
+    key = new_key(label, {e.key for e in bank.entries})
     doc = {"answers": [{"key": e.key, "labels": list(e.labels), "answer": e.answer} for e in bank.entries]
            + [{"key": key, "labels": [label], "answer": answer}]}
     if bank.cv_file:
