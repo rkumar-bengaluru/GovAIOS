@@ -2247,3 +2247,63 @@ def test_known_draft_page_keeps_its_header_when_a_lesson_adds_to_it(cc):
     text = (pages / f"{pid}.yaml").read_text()
     assert text.startswith("# Draft from the Web Sandbox capture c.json\n# Start link: https://shop.example/home\n")
     assert "Cart" in text and pid in studio.catalogue(cc.flows, pages)
+
+
+def test_teach_approve_then_the_next_run_uses_the_learned_page(cc, monkeypatch):
+    """End to end: a run teaches an unknown page, the panel approves the lesson with Touch ID, a new run of the same
+    flow on that page clicks what was taught, with no new_page card."""
+    import test_job_apply_flow as jaf
+    import test_teach as tt
+    from govaios import engine, terms
+    from conftest import ACCT, N
+    import itertools
+    import types
+    clock = itertools.count(0, 30)   # page waits time out at once (jaf.fast_clock); the panel keeps real time
+    monkeypatch.setattr(engine, "time", types.SimpleNamespace(sleep=lambda s: None, time=lambda: next(clock),
+                                                             monotonic=time.monotonic))
+    monkeypatch.setattr(engine, "user_home", lambda: cc.home)
+    (cc.home / "apply").mkdir(mode=0o700, exist_ok=True)
+    (cc.home / "apply" / "answers.yaml").write_text(json.dumps({"answers": jaf.BANK, "cv_file": "~/" + jaf.CV}))
+    (cc.home / jaf.CV).write_bytes(b"%PDF")
+    wf = yaml.safe_load((REPO / "flows" / "job_apply.yaml").read_text())
+    wf["workflow"]["browser"]["account"] = ACCT
+    flow = cc.flows / "job_apply.yaml"
+    flow.write_text(yaml.safe_dump(wf))
+    terms.record(cc.home, tt.ODD, "allowed", "https://example.invalid/terms", "ok")
+
+    class Desk(tt.TeachDesk):
+        def web_root(self, app):
+            if self.url == tt.ODD:
+                return N("document", "Somewhere else", children=[N("heading", "Before you apply"),
+                                                                 N("link", "Continue", handle="l1")])
+            return super().web_root(app)
+
+    def run(desk, answers):
+        r = engine.Runner(flow, desk, cc.home)
+        r.approvals.approve_flow("job_apply", r.digest)
+        for o in jaf.DESTS:
+            r.approvals.approve_destination("job_apply", o)
+        r.run_id, seen = "r1", []
+        done = tt.answer_cards(cc.home, lambda c: (lambda a: a(c) if callable(a) else a)(answers.get(c["kind"], "next")),
+                               seen)
+        try:
+            r.run()
+        finally:
+            done.set()
+        return seen
+
+    def approve(card):   # the admin opens What I learned and approves it with Touch ID (auth.prove: True)
+        p = _lesson_form(cc, card["label"])[0]
+        cc.post("/lesson/approve", name=card["label"], p=p)
+        return "approved"
+    look = {**tt.LOOK, "title": "Somewhere else"}
+    seen = run(Desk([look, {**look, "down": True, "hit": "l1"}]), {"new_page": "teach", "teaching": None, "lesson": approve})
+    kinds = [c["kind"] for c in seen if c["kind"] != "teaching"]   # the teaching card may end before it is seen
+    assert kinds == ["new_page", "lesson", "stopped", "review"]   # approving kept the run: job 2 ran
+    assert _log(cc.home, "lesson")[-1]["outcome"] == "approved"
+    learned = yaml.safe_load(flow.read_text())["workflow"]
+    assert "https://apply.example.invalid" in learned["destinations"]
+    desk = Desk()
+    seen = run(desk, {})
+    assert ("click", "Continue") in desk.calls and "new_page" not in [c["kind"] for c in seen]
+    assert [c["kind"] for c in seen] == ["review", "review"]
