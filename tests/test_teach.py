@@ -118,9 +118,13 @@ def test_learned_do_rejects_navigate(tmp_path, bad, why):
     ({"do": [{"id": "where", "action": "click", "target": "page_a.next"}], "then": "again"}, "duplicate step id: where"),
     ({"do": [], "then": "again"}, "learned steps: page_a has no steps"),
     ({"do": [{"id": "x", "action": "click", "target": "page_a.next"}], "then": "later"}, "learned steps: then must be"),
+    ({"unknown": True, "do": [{"id": "x", "action": "hand_over"}], "then": "end"},
+     "learned steps: unknown cannot be taught"),
 ])
 def test_learned_case_shape_checked_at_load(tmp_path, case, why):
-    f, _ = make(tmp_path, [{"id": "where", "action": "classify_page", "on_match": {"page_a": case}}])
+    case = dict(case)
+    key = "unknown" if case.pop("unknown", False) else "page_a"
+    f, _ = make(tmp_path, [{"id": "where", "action": "classify_page", "on_match": {key: case}}])
     with pytest.raises(Stop, match=why):
         Runner(f, Desk(), tmp_path)
 
@@ -153,3 +157,12 @@ def test_learned_click_on_a_submit_element_is_refused(tmp_path, monkeypatch):
     with pytest.raises(Stop, match=r"denied click \(risk submit\)"):
         run(tmp_path, monkeypatch, steps, risk="modify")
     assert ("click", "Send") not in FakeDesktop.current.calls
+
+
+def test_learned_case_on_an_undeclared_origin_is_denied(tmp_path, monkeypatch):
+    monkeypatch.setattr(Desk, "current_url", lambda self, app: "https://elsewhere.example/a")
+    steps = [{"id": "where", "action": "classify_page", "timeout_seconds": 0,
+              "on_match": {"page_a": learned({"action": "click", "target": "page_a.next"})}}]
+    with pytest.raises(Stop, match="denied read_page"):
+        run(tmp_path, monkeypatch, steps)
+    assert not any(isinstance(c, tuple) and c[0] == "click" for c in FakeDesktop.current.calls)

@@ -122,6 +122,8 @@ def check_learned(steps):
             for page, v in s.get("on_match", {}).items():
                 if not (isinstance(v, dict) and "do" in v):
                     continue
+                if page == "unknown":   # its steps would run on a page the engine never identified
+                    raise Stop("learned steps: unknown cannot be taught")
                 if not isinstance(v["do"], list) or not v["do"]:
                     raise Stop(f"learned steps: {page} has no steps")
                 if v.get("then") not in ("again", "end"):
