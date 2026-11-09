@@ -20,6 +20,7 @@ class RunLaunch:
         self.summary = None
         self.capture = None   # the page the run saved last (captures/<name>), for the stop message
         self.stopped_reason = None
+        self.reason = None    # the app's own "STOPPED: <why>" line, for the stop message
         self._lines = []
         self._lock = threading.Lock()
         self._proc = None
@@ -133,5 +134,7 @@ class RunLaunch:
                     self._lines.append(ln)
                     if ln.startswith("deliver joblens:"):
                         self.summary = ln
+                    elif ln.startswith("STOPPED: "):
+                        self.reason = ln[len("STOPPED: "):][:300]
                     elif re.fullmatch(r"capture saved: captures/[0-9-]{22}-[a-z0-9_]{1,64}\.json", ln):
                         self.capture = ln.rsplit("/", 1)[1]
