@@ -46,7 +46,7 @@ def make(tmp_path, steps, risk="navigate"):
     f = flows / "teach.yaml"
     f.write_text(yaml.safe_dump({"workflow": {
         "id": "teach", "app": "Teach", "version": 1, "browser": {"application": "chrome", "account": "x"},
-        "permissions": {"allow": ["click", "read_page", "ask_admin"], "max_element_risk": risk},
+        "permissions": {"allow": ["click", "read_page", "ask_admin", "attach_file"], "max_element_risk": risk},
         "destinations": [SITE], "steps": steps}}))
     return f, pages
 
@@ -440,3 +440,19 @@ def test_lesson_and_terms_cards_wait_past_the_ask_timeout(tmp_path, monkeypatch,
     else:
         with pytest.raises(Stop, match="no answer from admin"):
             r.card(kind, "x")
+
+
+def test_learned_attach_runs_without_a_fill_before_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "user_home", lambda: tmp_path)
+    monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (True, "biometric"))
+    (tmp_path / "apply").mkdir(mode=0o700)
+    (tmp_path / "apply" / "answers.yaml").write_text(json.dumps({"answers": [], "cv_file": "~/cv.pdf"}))
+    (tmp_path / "cv.pdf").write_bytes(b"%PDF")
+    monkeypatch.setitem(PAGES["page_a"]["elements"], "file",
+                        {"role": "button", "name_matches": "^Choose\\ File\\ ", "risk": "modify"})
+    monkeypatch.setattr(Desk, "web_root", lambda self, app: N("document", "Step A", children=[
+        N("button", "Next"), N("button", "Choose File No file chosen")]))
+    steps = [{"id": "where", "action": "classify_page", "timeout_seconds": 0, "on_match": {"page_a": learned(
+        {"action": "attach_file", "target": "page_a.file", "check": "page_a.file"}, then="end")}}]
+    r, d = run(tmp_path, monkeypatch, steps, risk="modify")
+    assert ("choose_file",) in d.calls and r.audit_lines[-1]["kind"] == "flow_end"

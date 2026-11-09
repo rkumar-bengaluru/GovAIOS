@@ -203,3 +203,39 @@ def test_failed_write_leaves_no_lesson(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         lessons.save(tmp_path, "job_apply", "d", "s", [page(tree(), [])])
     assert list((tmp_path / "lessons").iterdir()) == []
+
+
+def test_attach_replays_with_the_chooser_button_and_the_file_input(tmp_path):
+    t = tree(Node("button", "Attach"), Node("button", "Attach: No file chosen", dom_id="resume"))
+    att = ev("attach", "button", "Attach: No file chosen")
+    att["spec"] = {"role": "button", "dom_id": "resume"}
+    les = lesson(tmp_path, page(t, [ev("click", "button", "Attach"), att]))
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    pid, els = p["id"], p["yaml"]["page"]["elements"]
+    [line] = [s for s in p["steps"] if s["kind"] == "attach_file"]
+    assert line["keep"] and line["target"] == f"{pid}.button_attach" and line["check"].startswith(pid + ".")
+    chk = line["check"].split(".")[1]
+    assert els["button_attach"]["risk"] == "modify" and els[chk] == {"role": "button", "dom_id": "resume", "risk": "read"}
+    assert lessons._do(line, p) == {"action": "attach_file", "target": line["target"], "check": line["check"]}
+
+
+def test_attach_on_chromes_own_file_input_checks_its_name_prefix(tmp_path):
+    t = tree(Node("button", "Choose File No file chosen"))
+    les = lesson(tmp_path, page(t, [ev("click", "button", "Choose File No file chosen"),
+                                    ev("attach", "button", "Choose File No file chosen")]))
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    [line] = [s for s in p["steps"] if s["kind"] == "attach_file"]
+    k = line["target"].split(".")[1]
+    assert line["keep"] and line["check"] == line["target"]
+    assert p["yaml"]["page"]["elements"][k] == {"role": "button", "name_matches": "^Choose\\ File\\ ", "risk": "modify"}
+
+
+def test_attach_without_a_usable_input_is_not_replayed(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    t = tree(Node("button", "No file chosen"))
+    les = lesson(tmp_path, page(t, [ev("attach", "button", "No file chosen")]))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    [p] = prop["pages"]
+    assert p["steps"][0]["kind"] == "attach_file" and not p["steps"][0]["keep"]
+    assert lessons._do(p["steps"][0], p) is None
+    assert "Attach your CV: No file chosen (not replayed)" in lesson_ui.page("n", les, prop, set(), {}, "")

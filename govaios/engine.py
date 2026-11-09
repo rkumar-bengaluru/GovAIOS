@@ -983,12 +983,16 @@ class Runner:
             self._act("click", self.d.click, node, target=label)
         return True
 
-    def do_fill_form(self, s):
+    def _new_apply(self):
         try:
             bank = load_bank(self.home / BANK, user_home())
         except BankError as e:
             raise Stop(f"answer bank: {e}") from None
-        a = self.ctx["apply"] = {"bank": bank, "filled": 0, "total": 0, "yourself": [], "check": [], "pending": []}
+        self.ctx["apply"] = {"bank": bank, "filled": 0, "total": 0, "yourself": [], "check": [], "pending": []}
+        return self.ctx["apply"]
+
+    def do_fill_form(self, s):
+        a = self._new_apply()
         done = set()
         for _ in range(FORM_PASSES):   # a fill can reveal conditional fields
             fields = read_form(self._form()[1])
@@ -998,7 +1002,7 @@ class Runner:
             for f in new:
                 done.add(f.key)
                 a["total"] += 1
-                hit = answer_for(f, bank, fields)
+                hit = answer_for(f, a["bank"], fields)
                 if f.filled:
                     a["check"].append(f.label)
                 elif hit:
@@ -1013,7 +1017,7 @@ class Runner:
     def do_attach_file(self, s):
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
         from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
-        a, ref = self.ctx["apply"], self.ref(s["target"])
+        a, ref = self.ctx.get("apply") or self._new_apply(), self.ref(s["target"])   # a learned attach: no fill before
         a["yourself"].append("Resume/CV")   # until attached: a stop from here on leaves it on the result card
         self.write_result()
         p = cv_path(a["bank"], user_home())

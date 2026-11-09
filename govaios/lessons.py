@@ -16,7 +16,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from .policy import origin
+from .observer import NO_FILE
+from .policy import RISK_ORDER, origin
 from . import capture, engine, formfill, studio
 from .approvals import pages_used, read_bound
 from .formfill import FIELD_ROLES, Field, new_key, normalize, restricted
@@ -90,9 +91,9 @@ def _known(pages_dir):
     return out
 
 
-def _key_for(page, root, spec, label):
+def _key_for(page, root, spec, label, exact=False):
     """(key, sure): the element key in page that locates spec's node (adding it, risk by role, when none does);
-    sure is False when spec does not find exactly one node in the stored tree."""
+    sure is False when spec does not find exactly one node in the stored tree. exact: only a key with this spec."""
     els = page["elements"]
     want = [id(n) for n in engine.find_all(root, spec, {"elements": {}})]   # Node is a dataclass: compare identity
     sure = len(want) == 1
@@ -101,7 +102,7 @@ def _key_for(page, root, spec, label):
             continue
         if {a: b for a, b in s.items() if a != "risk"} == spec:
             return k, sure
-        if sure and [id(n) for n in engine.find_all(root, s, page)] == want:
+        if sure and not exact and [id(n) for n in engine.find_all(root, s, page)] == want:
             return k, sure
     base = studio._slug(label) or spec["role"]
     k, i = base, 2
@@ -109,6 +110,36 @@ def _key_for(page, root, spec, label):
         k, i = f"{base}_{i}", i + 1
     els[k] = {**spec, "risk": _risk(spec["role"])}
     return k, sure
+
+
+def _file_input(spec):
+    """The attach check's locator: as observed, but by its name's part before "No file chosen" (the file's name
+    replaces it once attached); None when nothing else locates it."""
+    if not spec or "name" not in spec:
+        return dict(spec) if spec else None   # a stable dom_id
+    head = spec["name"].split(NO_FILE)[0]
+    if not head.strip() or "index" in spec:
+        return None
+    return {"role": spec["role"], "name_matches": "^" + re.escape(head)}
+
+
+def _attach(look, page, root, evs, i, new):
+    """(target key, check key, sure) for an attach event, as job_apply's attach step: target opens the file chooser
+    (the click just before, or the file input itself), check is the file input. (None, None, False): not replayable."""
+    ev = evs[i]
+    chk = _file_input(ev.get("spec"))
+    if chk is None:
+        return None, None, False
+    prev = evs[i - 1].get("spec") if i and evs[i - 1]["kind"] == "click" else None
+    kc, sure = _key_for(look, root, chk, ev.get("label") or "", exact=True)
+    kt, st = (_key_for(look, root, prev, evs[i - 1].get("label") or "") if prev and prev != ev.get("spec")
+              else (kc, sure))
+    for k, risk in ((kc, "read"), (kt, "modify")):   # the target last: when it is the input too, it is clicked
+        if new or k not in page["elements"]:   # a draft's own rating (buttons submit) is lowered; a known page's kept
+            look["elements"][k]["risk"] = risk
+        elif RISK_ORDER.index(page["elements"][k]["risk"]) > RISK_ORDER.index("modify"):
+            sure = False   # the engine would refuse it at run time
+    return kt, kc, sure and st
 
 
 def _new_id(lp, taken):
@@ -149,7 +180,11 @@ def propose(lesson, pages_dir, bank) -> dict:
             kind, label, spec = ev["kind"], ev.get("label") or "", ev.get("spec")
             if kind == "click" and i + 1 < len(evs) and evs[i + 1]["kind"] == "attach":
                 continue   # the file chooser's own button: the attach covers it
-            k, sure = _key_for(look, root, spec, label) if kind in ("click", "attach") and spec else (None, False)
+            chk = None
+            if kind == "attach":
+                k, chk, sure = _attach(look, page, root, evs, i, new)
+            else:
+                k, sure = _key_for(look, root, spec, label) if kind == "click" and spec else (None, False)
             target = f"{pid}.{k}" if k else None
             line, keep = None, sure and not (kind == "click" and any(s["kind"] == "hand_over" for s in steps))
             text = label + ("" if sure else " (check this target)")   # off until the admin checks it
@@ -157,15 +192,18 @@ def propose(lesson, pages_dir, bank) -> dict:
                 line = {"kind": "click", "label": "not sure what this was", "target": None, "keep": False}
             elif kind == "click" and look["elements"][k].get("risk") == "submit":
                 line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
-            elif kind in ("click", "attach"):
-                line = {"kind": "click" if kind == "click" else "attach_file", "label": text, "target": target,
+            elif kind == "click":
+                line = {"kind": "click", "label": text, "target": target,
                         "keep": keep}   # a click after the hand over is dead: replay stops there
+            elif kind == "attach":
+                line = {"kind": "attach_file", "label": label if chk is None else text, "target": target,
+                        "check": f"{pid}.{chk}" if chk else None, "keep": keep}
             if line:
                 steps.append(line)
-                if k:
-                    if not new and k not in page["elements"]:
-                        added.append(k)
-                    page["elements"][k] = look["elements"][k]
+                for key in dict.fromkeys(x for x in (k, chk) if x):
+                    if not new and key not in page["elements"]:
+                        added.append(key)
+                    page["elements"][key] = look["elements"][key]
             elif kind in ("click", "attach"):
                 continue
             elif kind in ("fill", "choose", "tick") and ev.get("secure"):
@@ -236,12 +274,9 @@ def _find(steps, sid):
 def _do(line, page):
     """The flow step for one kept line, or None (hand_fill: fill_form leaves it for the admin)."""
     kind = line["kind"]
-    if kind == "attach_file":   # the engine's CV attach, as job_apply's attach step: only where the page has both
-        els = page["yaml"]["page"]["elements"]
-        if "resume_attach" in els and "resume_input" in els:
-            return {"action": "attach_file", "target": f"{page['id']}.resume_attach",
-                    "check": f"{page['id']}.resume_input"}
-        return None
+    if kind == "attach_file":   # the engine's CV attach, as job_apply's attach step
+        return ({"action": "attach_file", "target": line["target"], "check": line["check"]}
+                if line.get("target") and line.get("check") else None)
     if kind == "click":
         return {"action": "click", "target": line["target"]} if line.get("target") else None
     return {"action": _DO[kind]} if kind in _DO else None
