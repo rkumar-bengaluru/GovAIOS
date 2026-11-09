@@ -40,12 +40,13 @@ LIVE_LINES = 50
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
              "the browser has no window in front")
-TEACH_ENDS = ("lesson ", "page learned", "unexpected page", "site terms do not allow")
-
-
 def _ends_run(e):
     m = str(e)
     return m.startswith(RUN_STOPS) or m.startswith("input refused") and "not on the target element" not in m
+
+
+class TeachEnded(Stop):
+    """A lesson's own outcome (cancelled, discarded, learned, skipped, terms refused): the job ends, the run goes on."""
 
 
 class Denied(Stop):
@@ -247,6 +248,7 @@ class Runner:
         self.approvals = Approvals(self.home / "approvals.json")
         self.audit = AuditLog(self.home)
         self.step = None
+        self.file_destinations = list(self.flow.get("destinations", []))   # before a typed site joins: terms-exempt
         self.pages = {}
         for pid in sorted(pages_used(self.flow)):
             self.pages[pid] = yaml.safe_load(raw[self.pages_dir / f"{pid}.yaml"])["page"]
@@ -629,10 +631,9 @@ class Runner:
                 return
             if choice == "teach":
                 try:
-                    self.teach(self.step)
-                except Stop as e:   # a teach outcome ends the lesson, not the sandbox; safety stops go on
-                    if not str(e).startswith(TEACH_ENDS):
-                        raise
+                    self.teach(self.step, offered=True)
+                except (TeachEnded, Denied):   # the lesson ends, not the sandbox; safety stops go on
+                    pass
                 continue
             url = self.d.current_url(self.app)
             try:
@@ -850,28 +851,31 @@ class Runner:
         self._act("raise_pinned", self.d.raise_pinned)
         return choice
 
-    def teach(self, step_id):
+    def teach(self, step_id, offered=False):
         """Studio: the admin does an unknown page in Chrome while the read-only observer records it as a lesson.
         Always ends this job with a Stop; a lesson is used only once approved, from the next run."""
-        from . import lessons, observer   # lessons imports engine
         if not getattr(self, "pinned", False):
             raise Stop("teach needs the pinned browser window")
-        if self.card("new_page", "A page this flow does not know") != "teach":
-            raise Stop("unexpected page")
+        before = self.flow["destinations"]
+        try:
+            self._teach(step_id, offered)
+        finally:
+            self.flow["destinations"] = before   # a taught site is allowed for the lesson only
+
+    def _teach(self, step_id, offered):
+        from . import lessons, observer   # lessons imports engine
+        if not offered and self.card("new_page", "A page this flow does not know") != "teach":
+            raise TeachEnded("unexpected page")
         url = self.d.current_url(self.app) or ""
         site = origin(url)
-        declared = {origin(d) for d in self.flow.get("destinations", [])}
+        declared = {origin(d) for d in self.file_destinations}
         if terms.verdict(self.home, url, declared) != "allowed" and (
                 self.card("terms", site) != "checked" or terms.verdict(self.home, url, declared) != "allowed"):
-            raise Stop("site terms do not allow a personal agent")
+            raise TeachEnded("site terms do not allow a personal agent")
         before = self.flow["destinations"]
-        if site not in declared:   # in memory, this run only; Touch ID each time, never remembered: the
-            self.flow["destinations"] = [*before, site]   # lesson's own approval is where a site joins the flow
-        try:
-            self.gate("read_page", "read", destination=url, keep=False)
-        except BaseException:
-            self.flow["destinations"] = before   # refused: never read (or captured) after all
-            raise
+        if site not in {origin(d) for d in before}:   # in memory, this run only; Touch ID each time, never remembered:
+            self.flow["destinations"] = [*before, site]   # the lesson's own approval is where a site joins the flow
+        self.gate("read_page", "read", destination=url, keep=False)   # refused: never read (or captured)
         allowed = {origin(d) for d in self.flow["destinations"]}
         self.d.teach_tab(self.app)
         obs = observer.Observer(self.d, self.app, self.d.same)
@@ -905,12 +909,12 @@ class Runner:
         finally:
             remove(self.home, LESSON_LIVE)
         if choice != "done" or not any(p["events"] for p in obs.pages):
-            raise Stop("lesson cancelled")
+            raise TeachEnded("lesson cancelled")
         name = lessons.save(self.home, self.flow["id"], self.digest, step_id, obs.pages)
         self._audit("lesson", outcome="recorded", target=name)
         if self.card("lesson", name) == "approved":
-            raise Stop("page learned: it is used from the next run")
-        raise Stop("lesson discarded")
+            raise TeachEnded("page learned: it is used from the next run")
+        raise TeachEnded("lesson discarded")
 
     def fix_by_hand(self, f, shown0):
         """Panel run only: the admin fills the failed field in Chrome, then Continue (or Skip). Re-read after."""
