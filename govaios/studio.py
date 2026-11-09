@@ -39,6 +39,32 @@ def _walk(n):
         yield from _walk(c)
 
 
+def _ident(n):
+    return ("dom_id", _id(n)) if _id(n) else ("name", n.get("name") or "")
+
+
+def _spec(nodes, n, **extra):
+    """The locator for capture-tree node n: its stable id, else its name; `index` (its rank among the nodes with
+    the same role and ident) when that attribute alone matches more than once."""
+    ident = _ident(n)
+    s = {"role": n["role"], ident[0]: ident[1], **extra}
+    if sum(1 for m in nodes if m["role"] == n["role"] and (m.get(ident[0]) or "") == ident[1]) > 1:
+        same = [m for m in nodes if m["role"] == n["role"] and _ident(m) == ident]
+        s["index"] = next(i for i, m in enumerate(same) if m is n)   # by identity: equal sibling dicts are distinct
+    return s
+
+
+def element_spec(tree, node):
+    """draft_page's locator for one node of a capture tree, or None unless it finds exactly that node."""
+    from . import engine   # engine imports studio
+    if not (_id(node) or node.get("name")):
+        return None   # nothing stable to find it by
+    spec = _spec(list(_walk(tree)), node)
+    root, made = _as_nodes(tree)
+    found = engine.find_all(root, spec, {"elements": {}})
+    return spec if len(found) == 1 and found[0] is made[id(node)] else None
+
+
 def draft_page(tree, page_id):
     """Page schema dict for a capture tree (capture.tree form): identification + headings, fields, buttons, links.
     An element whose spec matches more than once gets its index, so each resolves to exactly one node."""
@@ -55,17 +81,8 @@ def draft_page(tree, page_id):
         elements[k] = spec
         return k
 
-    seen = {}
-
     def spec_for(n, **extra):
-        ident = ("dom_id", _id(n)) if _id(n) else ("name", n.get("name") or "")
-        sig = (n["role"], ident)
-        seen[sig] = seen.get(sig, -1) + 1
-        s = {"role": n["role"], ident[0]: ident[1], **extra}
-        total = sum(1 for m in nodes if m["role"] == n["role"] and (m.get(ident[0]) or "") == ident[1])
-        if total > 1:
-            s["index"] = seen[sig]
-        return s
+        return _spec(nodes, n, **extra)
 
     headings = [n for n in nodes if n["role"] == "heading" and n.get("name")][:5]
     anchors = [add("heading " + n["name"], spec_for(n, risk="read")) for n in headings]
@@ -103,9 +120,8 @@ def _repeats(nodes):
     return sorted(out, key=lambda g: -len(g[1]))[:3]
 
 
-def _add_items(tree, nodes, elements, add):
-    """A repeated-item element for each group, only when its spec finds exactly that group's items."""
-    from . import engine   # engine imports studio
+def _as_nodes(tree):
+    """The Node tree for a capture tree, and {id(dict): its Node}."""
     from .desktop import Node
     made = {}
 
@@ -114,7 +130,13 @@ def _add_items(tree, nodes, elements, add):
                  [node(c) for c in d.get("children", [])])
         made[id(d)] = n
         return n
-    root = node(tree)
+    return node(tree), made
+
+
+def _add_items(tree, nodes, elements, add):
+    """A repeated-item element for each group, only when its spec finds exactly that group's items."""
+    from . import engine   # engine imports studio
+    root, made = _as_nodes(tree)
     for n, (parent, items) in enumerate(_repeats(nodes), 1):
         same = [m for m in nodes if m["role"] == parent["role"] and _id(m) == _id(parent)
                 and (_id(parent) or (m.get("name") or "") == (parent.get("name") or ""))]
