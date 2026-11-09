@@ -2,8 +2,8 @@
 
 Pure (no OS calls): the caller samples the desktop and passes a snapshot function. A sample is
 {"down", "pt", "hit", "focus", "url", "title", "tab", "web"}: hit/focus/web are opaque OS handles, compared only
-through `same`; web is the front tab's web area (the teach tab is the first one seen); tab False = the teach tab
-is gone. Values are read only from fields the admin left; a secure field's value is never read.
+through `same`; web is the front tab's stable identity across navigation (from the tab strip, not the AXWebArea,
+which Chrome makes anew per document; the teach tab is the first one seen); tab False = the teach tab is gone. Values are read only from fields the admin left; a secure field's value is never read.
 """
 from . import capture
 from .formfill import FIELD_ROLES
@@ -21,6 +21,9 @@ class _Snap:
     def __init__(self, root, same):
         self.root, self.same = root, same
         self.nodes = list(root.walk())
+        for n in self.nodes:
+            if n.role == SECURE:
+                n.value = ""   # before the tree is kept in .pages or converted: a secure value never reaches storage
         self.up = {id(c): p for p in self.nodes for c in p.children}
         self._dicts = None
 
@@ -90,7 +93,6 @@ class Observer:
         moved = snap is not None or not self._is(focus, self._focus)   # a new page: look at the focus afresh
         if click or moved:
             snap = snap or _Snap(snapshot(), self.same)
-            self._diff(snap, out)
             if self._field:   # the field's value as of now
                 n = snap.find(self._field["handle"])
                 if n:
@@ -105,6 +107,8 @@ class Observer:
                     self._field = {"handle": focus, "start": v, "now": v, "ev": _event("fill", snap, n, v)}
             if click:
                 self._flush(out)   # typed before this click (e.g. Next), even if focus hasn't left yet
+            self._diff(snap, out)   # after the fill that ended in this look, before the click: the order they happened
+            if click:
                 self._click(snap, hit, out)
         return out
 

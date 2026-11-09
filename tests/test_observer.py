@@ -1,4 +1,5 @@
 """Studio observer: scripted desktop samples become lesson events (no OS: handles are plain strings)."""
+from govaios import capture
 from govaios.desktop import Node
 from govaios.observer import Observer
 
@@ -51,6 +52,7 @@ def test_secure_field_value_never_read():
     o.feed(s(focus="f"), lambda: tree)
     [ev] = o.feed(s(focus=None), lambda: tree)
     assert ev["kind"] == "fill" and ev["value"] == "" and ev["secure"] is True
+    assert "hunter2" not in str(capture.tree(o.pages[0]["tree"]))
 
 
 def test_url_change_starts_new_page():
@@ -97,3 +99,21 @@ def test_choice_tick_and_attach_seen_on_next_look():
     evs = click(o, "h", lambda: tree("India", "1", "cv.pdf"))
     assert [(e["kind"], e["value"]) for e in evs] == [("choose", "India"), ("tick", "1"), ("attach", ""), ("click", "")]
     assert evs[2]["spec"] == {"role": "button", "name": "Resume: No file chosen"}   # as it was before the file
+
+
+def test_navigation_keeps_the_same_tab():
+    o = Observer(None, None, same)
+    o.feed(s(), lambda: page(Node("link", "Apply", handle="a1")))
+    tree = Node("document", "Step 2", handle="root2", children=[Node("button", "Next", handle="n2")])
+    o.feed(s(url=URL + "/2", title="Step 2"), lambda: tree)   # new document, fresh handles, same tab identity
+    [ev] = click(o, "n2", lambda: tree, url=URL + "/2", title="Step 2")
+    assert len(o.pages) == 2 and o.pages[1]["events"] == [ev] and ev["label"] == "Next"
+
+
+def test_fill_comes_before_a_tick_seen_in_the_same_look():
+    def tree(email, agree):
+        return page(Node("text_field", "Email", email, handle="f"), Node("checkbox", "I agree", agree, handle="k"))
+    o = Observer(None, None, same)
+    o.feed(s(focus="f"), lambda: tree("", "0"))
+    evs = o.feed(s(focus="k"), lambda: tree("rupak@x", "1"))
+    assert [e["kind"] for e in evs] == ["fill", "tick"]
