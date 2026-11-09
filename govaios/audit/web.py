@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import yaml
 
-from govaios import agents, applyfiles, auth, runstate
+from govaios import agents, applyfiles, auth, runstate, studio
 import os
 from govaios.formfill import BankError, add_answer, load_bank, ok_value, read_bank, stage_text
 from govaios.approvals import Approvals
@@ -200,7 +200,7 @@ def _td(v):
 
 def _page(body, head="", rail="", here=None):
     nav = "".join(f"<a href='{h}'{' aria-current=page' if h == here else ''}>{t}</a>"
-                  for h, t in (("/", "Talk"), ("/market", "Marketplace"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
+                  for h, t in (("/", "Talk"), ("/market", "Marketplace"), ("/studio", "Studio"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
     return (f"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,"
             f"initial-scale=1'>{head}<title>GOV-AIOS</title><style>{CSS}</style><div class=app>"
             f"<nav class=rail aria-label='GOV-AIOS'>{BRAND}{nav}{rail}</nav><main>{body}</main></div>")
@@ -245,7 +245,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/claude|/codex")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/studio|/claude|/codex")
 DOES = {"claude_code": "Every command Claude Code runs is checked by GOV-AIOS first and written to the audit log.",
         "codex": "Shell commands, file edits and plugin calls are checked by GOV-AIOS first and written to the audit "
                  "log. Plugins stay on; each new plugin tool asks you once."}
@@ -1139,6 +1139,55 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return _page(f"<h1>Marketplace</h1><p>Templates that ship with GOV-AIOS. Setting one up makes a draft app; "
                      f"it runs only after you approve it with Touch ID.</p>{nodir}{''.join(cards)}", here="/market")
 
+    STEPS = 12   # step rows on the compose form
+
+    def studio_page(csrf):
+        """Draft pages from the Web Sandbox, and composing a bigger app from them (saved as a Draft)."""
+        cat = studio.catalogue(flows_dir, flows_dir.parent / "pages") if flows_dir else {}
+        have = {a.id: a for a in apps()}
+        rows = "".join(
+            f"<li><b>{escape(pid)}</b> \u00b7 {escape(info['title'][:60])} \u00b7 <code>{escape(info['url'][:120])}</code>"
+            f" \u00b7 Check app {'approved' if have.get('check_' + pid) and have['check_' + pid].approved else 'in Drafts'}"
+            "</li>" for pid, info in cat.items())
+        opts = ["<option value=''>\u2014</option>"]
+        for pid, info in cat.items():
+            opts.append(f"<option value='open:{escape(pid)}'>Open {escape(pid)}</option>")
+            opts.append(f"<option value='fill:{escape(pid)}'>Fill the form on {escape(pid)}</option>")
+            for el in info.get("items", {}):
+                opts.append(f"<option value='each:{escape(pid)}.{escape(el)}'>For each item in {escape(el)} on "
+                            f"{escape(pid)}</option>")
+            for el, (role, label, risk) in info["elements"].items():
+                if role in ("button", "link") and risk in studio.CLICKABLE:
+                    opts.append(f"<option value='click:{escape(pid)}.{escape(el)}'>Click {escape(str(label)[:60])} "
+                                f"on {escape(pid)}</option>")
+        opts.append("<option value=click_item>Click the item (inside a for each)</option>")
+        opts.append("<option value=end_each>End of for each</option>")
+        opts.append("<option value=review>Hand over: you check and submit in Chrome</option>")
+        sel = "".join(f"<label>Step {i}<select name=s{i}>{''.join(opts)}</select></label>" for i in range(1, STEPS + 1))
+        form = (f"<section class=appcard><h2>Compose an app</h2><p class=m>Steps run in order. Step 1 opens a page; "
+                f"later Opens wait for the page a click led to. For each runs the steps up to End of for each once per "
+                f"item (up to 10), each its own task and tab. Buttons rated submit are never offered: those clicks "
+                f"stay yours.</p><form method=post action=/studio/compose>{hidden(csrf)}<label>App name <input name=app "
+                f"maxlength=40 required></label>{sel}<button class=go>Save as a Draft app</button></form></section>"
+                if cat else "<p class=note>No draft pages yet. Capture pages with the Web Sandbox first.</p>")
+        return _page(f"<h1>Studio</h1><p>Pages you captured in the Web Sandbox become draft pages. Run a page's Check app "
+                     f"to confirm it matches the live site, then compose them into an app here.</p>"
+                     f"<ul>{rows}</ul>{form}", here="/studio")
+
+    def studio_compose(f):
+        if not flows_dir:
+            return None
+        cat = studio.catalogue(flows_dir, flows_dir.parent / "pages")
+        try:
+            flow = studio.compose(f.get("app", ""), [f.get(f"s{i}", "") for i in range(1, STEPS + 1)], cat)
+            fid = studio.write_composed(flows_dir, flow)
+        except (ValueError, OSError) as e:
+            tell(f"Studio: {e}.")
+            return "/studio"
+        log.append("setting", field="studio_compose", flow=fid)
+        tell(f"{flow['workflow']['app']} is saved as a draft app. Approve it to let it run.")
+        return "/"
+
     def market_setup_page(csrf, tid):
         t = _tpl(tid)
         if t is None or not flows_dir:
@@ -1285,7 +1334,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/approvals"
 
     POSTS = {"/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
-             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup}
+             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
                       f"/{_ag.slash}/start": start_post(_ag)})
@@ -1464,7 +1513,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
                         else bank_page(sess[1]) if u.path == "/apply/bank"
                         else task_page(int(tk[1]), sess[1]) if tk
-                        else market_page() if u.path == "/market" else agent_page(ap, sess[1]) if ap
+                        else market_page() if u.path == "/market" else studio_page(sess[1]) if u.path == "/studio" else agent_page(ap, sess[1]) if ap
                         else market_setup_page(sess[1], mk[1]) if mk
                         else cc_session_page(by_slash(cs[1]), cs[2]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed

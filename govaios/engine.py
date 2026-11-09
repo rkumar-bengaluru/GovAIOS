@@ -66,6 +66,8 @@ def matches(node, spec):
         return False
     if node.name in spec.get("exclude_names", []):
         return False
+    if "has" in spec and not any(d is not node and matches(d, spec["has"]) for d in node.walk()):
+        return False   # e.g. a repeated card that holds a link (a header row of the same role holds none)
     if "has_text" in spec and not any(d.role == "text" and (d.value or d.name) == spec["has_text"]
                                       for d in node.walk()):
         return False   # e.g. a JobLens row whose Status cell shows "Ready"
@@ -79,7 +81,8 @@ def find_all(root, spec, page):
         if not found:
             return []
         scope = found[0]
-    hits = [n for n in scope.walk() if n is not scope and matches(n, spec)]
+    pool = scope.children if spec.get("direct") else (n for n in scope.walk() if n is not scope)
+    hits = [n for n in pool if matches(n, spec)]   # direct: only the scope's own children (cards holding cards)
     if "index" in spec:
         return hits[spec["index"]:spec["index"] + 1]
     return hits
@@ -689,6 +692,8 @@ class Runner:
         root = self.snapshot()
         if not identify(self.pages[page], root):
             raise Stop("left the form page")
+        if "form_region" not in self.pages[page]["elements"]:   # a Studio draft page: the whole page is the form
+            return root, root
         return root, self.element(f"{page}.form_region", root)[0]
 
     def _node(self, region, f, value):

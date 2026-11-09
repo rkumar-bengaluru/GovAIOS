@@ -1764,3 +1764,39 @@ def test_card_and_stop_name_the_saved_page(cc):
     r.done, r.code, r.capture = True, 1, "20261108-201918-912751-job_apply.json"
     cc.srv.panel.tick()
     assert _tells(cc)[-1].endswith("Saved page: captures/20261108-201918-912751-job_apply.json")
+
+
+def _studio_drafts(P):
+    from govaios import studio
+    b = {"application": "chrome", "profile_directory": "Profile 2", "account": "a@example.com"}
+    jobs = studio.write_draft(P.flows, P.flows.parent / "pages", {"role": "document", "name": "Jobs <b>", "children": [
+        {"role": "heading", "name": "Roles"}, {"role": "link", "name": "Lead <i>"},
+        {"role": "button", "name": "Delete account"}]}, "https://acme.example/jobs", b, "c.json")
+    return jobs
+
+
+def test_studio_lists_drafts_and_never_offers_submit_clicks(cc):
+    jobs = _studio_drafts(cc)
+    s, page, _ = cc.get("/studio")
+    assert s == 200 and jobs in page and "Check app in Drafts" in page and "aria-current=page>Studio" in page
+    assert f"value='click:{jobs}.link_lead_i'>Click Lead &lt;i&gt;" in page and "<i>" not in page.split("Studio</h1>")[1]
+    assert "Delete account" not in page   # rated submit: never composed into a click
+
+
+def test_studio_compose_saves_a_draft_app(cc):
+    jobs = _studio_drafts(cc)
+    s, _, r = cc.post("/studio/compose", app="Acme apply", s1=f"open:{jobs}", s2=f"click:{jobs}.link_lead_i", s3="review")
+    assert r.getheader("Location") == "/" and _tells(cc)[-1] == "GOV-AIOS -> Acme apply is saved as a draft app. Approve it to let it run."
+    a = next(a for a in list_apps(cc.flows, cc.home) if a.id == "studio_acme_apply")
+    assert a.name == "Acme apply" and not a.approved
+    assert _log(cc.home, "setting")[-1]["field"] == "studio_compose"
+    cc.post("/studio/compose", app="Acme apply", s1=f"open:{jobs}")   # never replaces an app
+    assert _tells(cc)[-1] == "GOV-AIOS -> Studio: an app with that name exists."
+
+
+def test_studio_compose_refuses_a_submit_click(cc):
+    jobs = _studio_drafts(cc)
+    s, _, r = cc.post("/studio/compose", app="Bad", s1=f"open:{jobs}", s2=f"click:{jobs}.button_delete_account")
+    assert r.getheader("Location") == "/studio" and "that click stays yours" in _tells(cc)[-1]
+    assert not (cc.flows / "studio_bad.yaml").exists()
+    assert cc.req("/studio/compose", "POST", body={"app": "x", "s1": f"open:{jobs}"})[0] == 403   # no session

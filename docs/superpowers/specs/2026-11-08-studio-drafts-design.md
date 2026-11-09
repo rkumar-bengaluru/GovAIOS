@@ -18,9 +18,33 @@ then later build a bigger flow (an app) by linking those draft pages.
 
 Checked on the admin's four real captures (Greenhouse ×3, Google): each draft identified its own capture, and every element resolved to exactly one node.
 
+## Composing a bigger app (built 2026-11-09, branch `feat/studio-compose`)
+
+The panel has a **Studio** page (rail link). It lists the draft pages that have a Check app, each with its start URL and whether its Check app is approved. Below the list, **Compose an app** takes a name and up to 10 steps, each picked from a list:
+- **Open `<page>`**: step 1 opens the page's URL; a later Open waits for the page a click led to;
+- **Click `<element>` on `<page>`**: only links and buttons rated read, navigate or modify are offered. A submit-rated click is never offered, and the core refuses it too;
+- **Fill the form on `<page>`**: from the answer bank, with fix cards for failed fields. A draft page has no `form_region`, so the whole page is the form;
+- **Hand over**: you check and submit in Chrome, then press Next.
+
+**Save as a Draft app** writes `apps/flows/studio_<name>.yaml` (exclusive, never replacing an app) and audits a `setting` / `studio_compose` entry. The flow's permissions are only what its steps need; its destinations are Google plus each opened page's site; its element ceiling is the highest-rated click. It runs only after you approve it, and that approval binds every draft page it uses.
+
+The core, `studio.catalogue()` + `studio.compose()` + `studio.write_composed()`, is UI-free, so a CLI or an LLM writer can use it later and get the same checks.
+
+## Repeated items: "for each" (built 2026-11-09)
+
+- **Detection** (`studio._repeats`, `_add_items`): 3 or more sibling nodes with the same shape (their role, and the set of roles inside them) that each hold a named link, such as cards, table rows or result items. The draft page gets a `list_<n>` container and an `items_<n>` element: `{role, has: {role: link}, within: list_<n>, direct: true, fields: {link, label}}`.
+  - The element is kept only if it finds exactly those items: no header row, no nav links, no inner groups.
+  - The engine gained `has` (a descendant matching a spec) and `direct` (only the scope's own children).
+- **Compose** steps:
+  - `For each item in <items> on <page>`: up to 10 items, each its own panel task in its own new tab, as JobLens jobs are;
+  - `Click the item`: its link;
+  - `End of for each`.
+  The steps in between run once per item: typically Click the item, Open the next page, Fill, Hand over. One loop at a time.
+- Checked on the admin's 8 real captures (Greenhouse forms, Google): no list was invented. Detection on a real list page (Himalayas matches, JobLens) is not yet checked live.
+
 ## Not built yet (next steps)
 
-- **Composing a bigger flow from the panel**: pick draft pages in order, choose a step for each (fill this form, click this button, wait for this page), and preview the flow YAML. Today Claude writes the bigger flow by hand from the draft pages.
+- **A preview** of the composed YAML before saving, and editing a composed app in Studio.
 - **Lowering button risks** where it's safe: a reviewed Next or Continue becomes navigate.
 - **Masking captures** (spec §5.3, with the form amendment) before Studio leaves dev mode.
 - Page `fields:` for repeated items (job cards, rows) are not drafted. Claude adds them when a list page is linked.

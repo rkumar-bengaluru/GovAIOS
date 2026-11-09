@@ -8,6 +8,7 @@ Risks are conservative: every button is submit until the admin or Claude lowers 
 """
 import re
 from datetime import date
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml
@@ -76,12 +77,66 @@ def draft_page(tree, page_id):
             add("button " + n["name"], spec_for(n, risk="submit"))
     for n in [n for n in nodes if n["role"] == "link" and n.get("name") and len(n["name"]) <= 120][:MAX_LINKS]:
         add("link " + n["name"], spec_for(n, risk="navigate"))
+    _add_items(tree, nodes, elements, add)
     title = tree.get("name") or ""
     ident = {"title_matches": f"^{re.escape(title)}$" if title else "."}
-    anchors = [a for a in anchors if a][:2] or list(elements)[:1]
+    anchors = [a for a in anchors if a and "fields" not in elements[a]][:2] or [
+        k for k in elements if "fields" not in elements[k]][:1]
     if anchors:
         ident["anchors"] = anchors
     return {"page": {"id": page_id, "identification": ident, "elements": elements}}
+
+
+def _repeats(nodes):
+    """(parent, items): 3+ sibling nodes with the same shape (role and the roles inside) that each hold a named
+    link: job cards, table rows, result items. Largest first, at most 3 groups."""
+    out = []
+    for p in nodes:
+        groups = {}
+        for c in p.get("children", []):
+            inside = list(_walk(c))
+            if any(d["role"] == "link" and d.get("name") for d in inside[1:]):
+                groups.setdefault((c["role"], frozenset(d["role"] for d in inside[1:])), []).append(c)
+        best = max(groups.values(), key=len, default=[])
+        if len(best) >= 3:
+            out.append((p, best))
+    return sorted(out, key=lambda g: -len(g[1]))[:3]
+
+
+def _add_items(tree, nodes, elements, add):
+    """A repeated-item element for each group, only when its spec finds exactly that group's items."""
+    from . import engine   # engine imports studio
+    from .desktop import Node
+    made = {}
+
+    def node(d):
+        n = Node(d["role"], d.get("name", ""), d.get("value", ""), d.get("dom_id", ""), tuple(d.get("dom_class", [])),
+                 [node(c) for c in d.get("children", [])])
+        made[id(d)] = n
+        return n
+    root = node(tree)
+    for n, (parent, items) in enumerate(_repeats(nodes), 1):
+        same = [m for m in nodes if m["role"] == parent["role"] and _id(m) == _id(parent)
+                and (_id(parent) or (m.get("name") or "") == (parent.get("name") or ""))]
+        cont = {"role": parent["role"], **({"dom_id": _id(parent)} if _id(parent) else {"name": parent.get("name") or ""}),
+                "risk": "read"}
+        if len(same) > 1:
+            cont["index"] = next(i for i, m in enumerate(same) if m is parent)
+        fields = {"link": {"role": "link", "index": 0, "risk": "navigate"}}
+        if all(any(d["role"] == "text" and (d.get("value") or d.get("name")) for d in _walk(c)) for c in items):
+            fields["label"] = {"role": "text", "index": 0, "risk": "read"}
+        trial = dict(elements)
+        ck = f"list_{n}"
+        trial[ck] = cont
+        if ck in elements:
+            continue
+        spec = {"role": items[0]["role"], "has": {"role": "link"}, "within": ck, "direct": True, "risk": "read",
+                "fields": fields}
+        found = engine.find_all(root, spec, {"elements": trial})
+        if [id(x) for x in found] != [id(made[id(c)]) for c in items]:
+            continue   # the spec would also catch other nodes (or miss some): not offered
+        add(ck, cont)
+        add(f"items_{n}", spec)
 
 
 def draft_check_flow(page_id, url, browser, title):
@@ -131,3 +186,143 @@ def write_draft(flows_dir, pages_dir, tree, url, browser, capture_name):
         (pages_dir / f"{pid}.yaml").unlink()
         raise OSError("draft flow exists")
     return pid
+
+
+# ---------- composing a bigger flow from draft pages ----------
+
+MAX_STEPS = 20
+CLICKABLE = ("read", "navigate", "modify")   # submit-rated elements stay the admin's: never composed into a click
+
+
+def catalogue(flows_dir, pages_dir):
+    """Draft pages ready to compose with: each has its Check app (the start URL and browser). {page id: info}."""
+    out = {}
+    for f in sorted(Path(flows_dir).glob("check_*.yaml")):
+        try:
+            wf = yaml.safe_load(f.read_text())["workflow"]
+            pid = wf["id"].removeprefix("check_")
+            url = next(s["value"] for s in wf["steps"] if s["id"] == "open_page")
+            page = yaml.safe_load((Path(pages_dir) / f"{pid}.yaml").read_text())["page"]
+        except Exception:   # unreadable or not a Check app: not offered
+            continue
+        out[pid] = {"url": url, "browser": wf["browser"], "title": wf.get("app", pid).removeprefix("Check "),
+                    "elements": {k: (s.get("role"), s.get("name") or s.get("dom_id") or k, s.get("risk"))
+                                 for k, s in page["elements"].items() if "fields" not in s},
+                    "items": {k: dict(s["fields"]) for k, s in page["elements"].items()
+                              if isinstance(s.get("fields"), dict) and "link" in s["fields"]}}
+    return out
+
+
+def compose(app, steps, cat):
+    """A draft flow from steps over draft pages, or ValueError naming what is wrong. Steps:
+    open:<page>  (the first opens its URL; later ones wait for a page a click led to)
+    click:<page>.<element>  (on the page last opened; never a submit-rated element)
+    fill:<page>  (fill its form from the answer bank, fix cards on failures)
+    review  (hand over: the admin checks and submits in Chrome, then Next)
+    each:<page>.<items>  (for each repeated item on the page last opened, up to 10: one panel task per item,
+                          each in its own tab; the steps up to end_each run per item)
+    click_item  (inside each: click the item's link)
+    end_each"""
+    name = " ".join(str(app).split())[:40]
+    fid = "studio_" + _slug(name, 40)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]*", name) or fid == "studio_":
+        raise ValueError("give the app a name (letters, digits, spaces)")
+    steps = [s for s in steps if s]
+    if not steps or not 1 <= len(steps) <= MAX_STEPS:
+        raise ValueError(f"between 1 and {MAX_STEPS} steps")
+    out, here, allow, risks, origins, browser = [], None, {"launch_application", "navigate", "read_page"}, [], [], None
+    top, loop = out, None
+    for i, s in enumerate(steps, 1):
+        kind, _, arg = s.partition(":")
+        pid, _, el = arg.partition(".")
+        if kind in ("open", "click", "fill", "each") and pid not in cat:
+            raise ValueError(f"step {i}: no draft page {pid!r}")
+        if kind in ("click_item", "end_each", "review") and arg:
+            raise ValueError(f"step {i}: unknown step {s!r}")
+        if kind == "open":
+            info = cat[pid]
+            if i == 1:
+                browser = info["browser"]
+                out.append({"id": "open_start", "action": "navigate", "value": info["url"]})
+            if (o := _origin(info["url"])) not in origins:
+                origins.append(o)
+            out.append({"id": f"s{i}_on_{pid}"[:64], "action": "classify_page",
+                        "on_match": {pid: "continue", "unknown": "stop_and_report"}})
+            here = pid
+        elif i == 1:
+            raise ValueError("step 1 must open a page")
+        elif kind in ("click", "fill") and pid != here:
+            raise ValueError(f"step {i}: open {pid} first (the run is on {here})")
+        elif kind == "click":
+            spec = cat[pid]["elements"].get(el)
+            if spec is None:
+                raise ValueError(f"step {i}: {pid} has no element {el!r}")
+            if spec[2] not in CLICKABLE:
+                raise ValueError(f"step {i}: {el} is rated {spec[2]}: that click stays yours")
+            out.append({"id": f"s{i}_click_{el}"[:64], "action": "click", "target": f"{pid}.{el}"})
+            allow.add("click")
+            risks.append(spec[2])
+        elif kind == "fill":
+            out.append({"id": f"s{i}_fill"[:64], "action": "fill_form"})
+            allow |= {"fill_field", "ask_admin"}
+        elif kind == "review":
+            out.append({"id": f"s{i}_review", "action": "hand_over"})
+            allow.add("ask_admin")
+        elif kind == "each":
+            if loop is not None:
+                raise ValueError(f"step {i}: end the first for each before another")
+            if pid != here:
+                raise ValueError(f"step {i}: open {pid} first (the run is on {here})")
+            if el not in cat[pid]["items"]:
+                raise ValueError(f"step {i}: {pid} has no repeated items {el!r}")
+            inner = [{"id": f"s{i}_tab", "action": "new_tab"},   # each item in its own tab, its form kept as left
+                     {"id": f"s{i}_list", "action": "navigate", "value": cat[pid]["url"]},
+                     {"id": f"s{i}_on_list", "action": "classify_page",
+                      "on_match": {pid: "continue", "unknown": "stop_and_report"}}]
+            out.append({"id": f"s{i}_pick", "action": "select_items", "target": f"{pid}.{el}", "count": 10,
+                        "none": "no items on the page"})
+            out.append({"id": f"s{i}_each", "action": "for_each_item", "task_title": ["link"], "steps": inner})
+            out, loop = inner, pid
+        elif kind == "click_item":
+            if loop is None or here != loop:
+                raise ValueError(f"step {i}: click the item only inside a for each, on its list page")
+            out.append({"id": f"s{i}_click_item", "action": "click", "target": "current_item.link"})
+            allow.add("click")
+            risks.append("navigate")
+            here = None   # until the next Open says where the click led
+        elif kind == "end_each":
+            if loop is None:
+                raise ValueError(f"step {i}: no for each to end")
+            out, loop, here = top, None, None
+        else:
+            raise ValueError(f"step {i}: unknown step {s!r}")
+    order = ["read", "navigate", "modify"]
+    return {"workflow": {
+        "id": fid, "app": name, "name": f"{name} (composed in Studio from draft pages)", "version": 1,
+        "site_terms": {"reviewed": date.today().isoformat(),
+                       "basis": "Composed in Studio from Web Sandbox drafts: the admin checked each site's terms"},
+        "browser": dict(browser),
+        "permissions": {"allow": sorted(allow), "max_element_risk": max(risks or ["navigate"], key=order.index)},
+        "destinations": ["https://www.google.com", *origins],
+        "steps": [
+            {"id": "launch_chrome", "action": "launch_application"},
+            {"id": "open_google", "action": "navigate", "value": "https://www.google.com"},
+            {"id": "on_google", "action": "classify_page", "on_match": {"google_home": "continue", "unknown": "stop_and_report"}},
+            {"id": "verify_account", "action": "verify_account", "target": "google_home.account_button"},
+            *out]}}
+
+
+def _origin(url):
+    u = urlsplit(url)
+    return f"{u.scheme}://{u.netloc}"
+
+
+def write_composed(flows_dir, flow):
+    """Save a composed flow as a Draft app (exclusive: an existing app of that name is never replaced)."""
+    if Path(flows_dir).is_symlink():
+        raise OSError("apps folder is a symlink")
+    text = (f"# Composed in Studio {date.today().isoformat()}. A Draft: it runs only after you approve it.\n"
+            + yaml.safe_dump(flow, sort_keys=False, allow_unicode=True))
+    if not _create(Path(flows_dir) / f"{flow['workflow']['id']}.yaml", text.encode()):
+        raise OSError("an app with that name exists")
+    return flow["workflow"]["id"]
