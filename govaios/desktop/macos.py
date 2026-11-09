@@ -69,6 +69,8 @@ def _s(v):
 class InputRefused(Stop, RuntimeError):
     """A safety refusal with fixed text (never page content), so the run prints and audits it as a stop."""
 
+CLICK_TRIES = 6
+
 class MacDesktop:
     platform = "macos"
 
@@ -257,8 +259,10 @@ class MacDesktop:
 
     def click(self, node):
         self._require_focus()
-        for attempt in range(3):
-            last = attempt == 2
+        # 6 tries (~5 s): Chrome answers a hit on a fresh or just-hovered wrapped link with its cell for a few
+        # seconds before its text (JobLens EVERSANA, 2026-11-09); the check stays strict, it just waits
+        for attempt in range(CLICK_TRIES):
+            last = attempt == CLICK_TRIES - 1
             pt = None
             # left spot first (link text, not trailing whitespace), then the centre, then the first line: a page button can sit over
             # an option's left edge (Greenhouse "Locate me" under the Location list)

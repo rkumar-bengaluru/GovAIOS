@@ -539,6 +539,22 @@ def test_click_tries_the_next_spot_when_hover_moves_a_wrapped_link(env, monkeypa
     Q = macos.Q
     assert pts[-2:] == [(Q.kCGEventLeftMouseDown, (342, 447)), (Q.kCGEventLeftMouseUp, (342, 447))]
 
+
+def test_click_waits_out_chromes_coarse_hit_on_a_wrapped_link(env, monkeypatch):
+    """JobLens 2026-11-09 21:55: for ~2 s after the scroll every spot on the two-line title hit the cell; the admin's
+    probe a few seconds later hit the title's text on the whole first line. Wait longer; never accept the cell."""
+    env.d._bounds = lambda node: (322, 438, 307, 37)
+    looks = []
+    def coarse_then_text(el, x, y, _):
+        looks.append((x, y))
+        env.ax.hit_parent = "job_link" if len(looks) > 12 else None   # 3 old tries x 3 spots + rechecks: all cell
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", coarse_then_text)
+    kinds = []
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", lambda src, t, pt, b: kinds.append(t) or ("mouse", t))
+    env.d.click(Node("link", "SECRET", handle="job_link"))
+    assert kinds[-2:] == [macos.Q.kCGEventLeftMouseDown, macos.Q.kCGEventLeftMouseUp]
+
 # --- observation (Studio lessons) ---
 def _observe_env(env, monkeypatch, attrs, down=False, counts=(0,)):
     """attrs: {(el, name): value} on top of the AX fake; mouse at (5, 6)."""
