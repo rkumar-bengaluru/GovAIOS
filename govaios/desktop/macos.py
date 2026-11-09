@@ -264,15 +264,17 @@ class MacDesktop:
             # an option's left edge (Greenhouse "Locate me" under the Location list)
             pts = self._settled_points(node)
             for i, p in enumerate(pts):
-                if self._point_ok(p, node, last and i == len(pts) - 1):
-                    pt = p
-                    break
+                final = last and i == len(pts) - 1
+                if self._point_ok(p, node, final):
+                    self._mouse(Q.kCGEventMouseMoved, p)
+                    time.sleep(PACE["pointer"])
+                    # re-check after the pointer pause, before the button goes down (nothing pressed yet: safe to
+                    # retry); a hover restyle can move a wrapped link's line break, so a failed spot tries the next
+                    if self._point_ok(p, node, final):
+                        pt = p
+                        break
             if pt is not None:
-                self._mouse(Q.kCGEventMouseMoved, pt)
-                time.sleep(PACE["pointer"])
-                # re-check after the pointer pause, before the button goes down (nothing pressed yet: safe to retry)
-                if self._point_ok(pt, node, last):
-                    break
+                break
             time.sleep(0.5)   # a page still scrolling or loading: Chrome's AX bounds can lag the layout ~1 s
         self._mouse(Q.kCGEventLeftMouseDown, pt)
         time.sleep(0.08)

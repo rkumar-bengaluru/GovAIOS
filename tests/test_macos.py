@@ -518,6 +518,27 @@ def test_click_retries_when_the_page_moves_after_the_pointer(env, monkeypatch):
     assert kinds == [Q.kCGEventMouseMoved, Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp]
 
 
+
+def test_click_tries_the_next_spot_when_hover_moves_a_wrapped_link(env, monkeypatch):
+    """JobLens 2026-11-09 21:46: the left-centre spot was on the link until the pointer hovered there, then on the
+    cell (the hover restyle moved the line break), three times over; the first-line spot was clear all along."""
+    env.d._bounds = lambda node: (322, 438, 307, 37)
+    hovered = [False]
+    def hover_shifts(el, x, y, _):   # the look right after the pointer lands on the line break sees the cell
+        env.ax.hit_parent = None if hovered[0] and y >= 456 else "job_link"
+        hovered[0] = False
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", hover_shifts)
+    pts = []
+    def mouse(src, t, pt, b):
+        hovered[0] = t == macos.Q.kCGEventMouseMoved
+        pts.append((t, pt))
+        return ("mouse", t)
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", mouse)
+    env.d.click(Node("link", "SECRET", handle="job_link"))
+    Q = macos.Q
+    assert pts[-2:] == [(Q.kCGEventLeftMouseDown, (342, 447)), (Q.kCGEventLeftMouseUp, (342, 447))]
+
 # --- observation (Studio lessons) ---
 def _observe_env(env, monkeypatch, attrs, down=False, counts=(0,)):
     """attrs: {(el, name): value} on top of the AX fake; mouse at (5, 6)."""
