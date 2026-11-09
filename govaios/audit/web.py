@@ -1214,7 +1214,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     def approved_browser():
         ok = {a.id for a in apps() if a.approved}
-        return studio.find_browser(flows_dir, lambda wf: wf["id"] in ok)
+        return flows_dir and studio.find_browser(flows_dir, lambda wf: wf["id"] in ok)
 
     def studio_page(csrf):
         """Draft pages from the Web Sandbox, and composing a bigger app from them (saved as a Draft)."""
@@ -1224,7 +1224,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             f"{delete_form(csrf, 'page', pid, '/studio')}</li>" for pid, info in cat.items())
         mine = "".join(f"<li><b>{escape(a.name)}</b> \u00b7 {'approved' if a.approved else 'in Drafts'}"
                        f"{delete_form(csrf, 'flow', a.id, '/studio')}</li>" for a in apps() if DELETABLE.fullmatch(a.id))
-        new = (f"<section class=appcard><h2>New automation</h2><p class=m>An empty app that opens a site and waits on its "
+        b = approved_browser() or {}
+        runs = (f"Runs in {escape(str(b['profile_directory']))} as {escape(str(b['account']))}." if b
+                else "No approved app has a browser profile to copy yet.")
+        new = (f"<section class=appcard><h2>New automation</h2><p class=m>{runs} An empty app that opens a site and waits on its "
                f"start page: when it runs, choose Teach on that page and show it the steps. Saved as a Draft.</p>"
                f"<form method=post action=/studio/new>{hidden(csrf)}<label>App name <input name=app maxlength=40 required>"
                f"</label><label>Starting link <input name=url type=url required placeholder='https://...'></label>"
@@ -1289,7 +1292,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         pages = flows_dir.parent / "pages"
         if kind == "flow" and DELETABLE.fullmatch(name):
             path = flows_dir / f"{name}.yaml"
-            apply = lambda: (Approvals(approvals_path).revoke_flow(name), path.unlink())   # noqa: E731
+            try:   # approvals are keyed by the workflow id inside the file
+                wid = yaml.safe_load(path.read_text())["workflow"]["id"]
+            except Exception:
+                wid = name
+            apply = lambda: (Approvals(approvals_path).revoke_flow(wid), path.unlink())   # noqa: E731
         elif kind == "page" and PAGE_ID.fullmatch(name):
             path = pages / f"{name}.yaml"
             try:   # any flow, approved or not; one that cannot be read might use it: refuse
@@ -1298,6 +1305,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 used = {name}
             if name in used:
                 tell(f"Studio: {name} is used by an app, so it stays.")
+                return back
+            try:   # drafts only: the Web Sandbox header
+                draft = path.read_text().startswith("# Draft from the Web Sandbox")
+            except OSError:
+                draft = False
+            if not draft:
+                tell("Studio: only draft pages can be deleted.")
                 return back
             apply = path.unlink
         else:

@@ -361,3 +361,20 @@ def test_new_automation_is_teachable_from_its_start_page(tmp_path):
         done.set()
     assert seen[0]["kind"] == "new_page"
 
+
+
+def test_old_draft_without_header_takes_its_link_from_its_check_app(tmp_path):
+    flows, pages, jobs, form = studio_dirs(tmp_path)
+    old = (pages / f"{jobs}.yaml").read_text().replace("# Start link: https://acme.example/jobs\n", "")
+    (pages / f"{jobs}.yaml").write_text(old)
+    assert jobs not in studio.catalogue(flows, pages)
+    (flows / f"check_{jobs}.yaml").write_text(yaml.safe_dump({"workflow": {"id": f"check_{jobs}", "steps": [
+        {"id": "open_page", "action": "navigate", "value": "https://acme.example/jobs"}]}}))
+    assert studio.catalogue(flows, pages)[jobs]["url"] == "https://acme.example/jobs"
+
+
+def test_start_link_header_has_no_userinfo(tmp_path):
+    flows, pages = tmp_path / "f", tmp_path / "p"
+    flows.mkdir(), pages.mkdir()
+    pid = studio.write_draft(flows, pages, TREE, "https://Bob:pw@Acme.example:8443/a?q=1#f", BROWSER, "c.json")
+    assert "# Start link: https://acme.example:8443/a\n" in (pages / f"{pid}.yaml").read_text()

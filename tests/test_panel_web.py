@@ -2116,10 +2116,13 @@ def test_lesson_page_warns_about_end_and_other_apps(cc):
 
 
 def test_studio_new_automation_saves_a_draft_and_refuses_http(cc):
+    Approvals(cc.home / "approvals.json").revoke_all()   # nothing approved: no browser block to copy
     s, page, _ = cc.get("/studio")
-    assert "action=/studio/new" in page
+    assert "action=/studio/new" in page and "No approved app has a browser profile" in page
     cc.post("/studio/new", app="Acme", url="https://acme.example/start")
+    assert "browser profile" in _tells(cc)[-1] and not (cc.flows / "studio_acme.yaml").exists()
     _approve_job_apply(cc)
+    assert "Runs in Profile" in cc.get("/studio")[1]
     cc.post("/studio/new", app="Acme", url="https://acme.example/start")
     a = next(a for a in list_apps(cc.flows, cc.home) if a.id == "studio_acme")
     assert not a.approved and _log(cc.home, "setting")[-1]["field"] == "studio_new"
@@ -2168,3 +2171,10 @@ def test_delete_draft_page_used_by_approved_flow_refused(cc):
     _delete(cc, "flow", "studio_acme_apply")
     _delete(cc, "page", jobs)
     assert not (pages / f"{jobs}.yaml").exists()
+
+
+def test_delete_refuses_an_unbound_page_that_is_not_a_draft(cc):
+    pages = cc.flows.parent / "pages"
+    (pages / "plain.yaml").write_text("page: {id: plain, identification: {title_matches: x}, elements: {}}")
+    _delete(cc, "page", "plain")
+    assert (pages / "plain.yaml").exists() and "only draft pages" in _tells(cc)[-1]

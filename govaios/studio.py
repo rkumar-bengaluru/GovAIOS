@@ -176,7 +176,7 @@ def write_draft(flows_dir, pages_dir, tree, url, browser, capture_name):
     page = draft_page(tree, pid)
     u = urlsplit(url)
     head = (f"# Draft from the Web Sandbox capture {capture_name} ({date.today().isoformat()}). Review before use:\n"
-            f"# Start link: {_origin(url)}{u.path or '/'}\n"   # never the query: it can hold tokens
+            f"# Start link: {u.scheme}://{(u.hostname or '').lower()}{f':{u.port}' if u.port else ''}{u.path or '/'}\n"   # no userinfo, query or fragment: they can hold secrets
             "# every button is rated submit until lowered; names are as the page showed them.\n")
     if not _create(pages_dir / f"{pid}.yaml", (head + yaml.safe_dump(page, sort_keys=False, allow_unicode=True)).encode()):
         raise OSError("draft page exists")
@@ -204,14 +204,19 @@ def find_browser(flows_dir, ok=lambda wf: True):
 
 
 def catalogue(flows_dir, pages_dir, browser=...):
-    """Draft pages (those with a Start link header) ready to compose with. {page id: info}. The browser block is
+    """Draft pages (with a Start link header, or an old Check app) ready to compose with. {page id: info}. The browser block is
     copied from an existing flow, as new_automation does."""
     browser = find_browser(flows_dir) if browser is ... else browser   # an explicit None: no browser to copy
     out = {}
     for f in sorted(Path(pages_dir).glob("*.yaml")):
         try:
             text = f.read_text()
-            url = re.search(r"^# Start link: (\S+)$", text, re.M)[1]
+            m = re.search(r"^# Start link: (\S+)$", text, re.M)
+            if m:
+                url = m[1]
+            else:   # a draft from before Check apps went: its start link is in its Check app
+                chk = yaml.safe_load((Path(flows_dir) / f"check_{f.stem}.yaml").read_text())["workflow"]
+                url = next(x["value"] for x in chk["steps"] if x["id"] == "open_page")
             page = yaml.safe_load(text)["page"]
         except Exception:   # not a Studio draft page, or unreadable: not offered
             continue
