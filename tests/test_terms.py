@@ -35,3 +35,42 @@ def test_record_refuses_bad_input(tmp_path):
     for args in (("maybe", "https://y.com/t", ""), ("allowed", "http://y.com/t", ""), ("allowed", "https://y.com/t", "x" * 2001)):
         with pytest.raises(ValueError):
             terms.record(tmp_path, "https://y.com", *args)
+
+
+def _age(tmp_path, monkeypatch, days):
+    monkeypatch.setattr(terms, "_today", date.today)
+    terms.record(tmp_path, "https://x.com", "allowed", "https://x.com/t", "")
+    monkeypatch.setattr(terms, "_today", lambda: date.today() + timedelta(days=days))
+    return terms.verdict(tmp_path, "https://x.com", [])
+
+
+def test_expiry_boundaries(tmp_path, monkeypatch):
+    assert _age(tmp_path, monkeypatch, 89) == "allowed"
+    assert _age(tmp_path, monkeypatch, 90) is None
+    assert _age(tmp_path, monkeypatch, -1) is None   # future-dated record
+
+
+def test_domain_edges():
+    assert terms.domain("https://x.com./a") == "x.com"
+    assert terms.domain("http://10.1.2.3/") == "10.1.2.3"
+    assert terms.domain("http://10.9.2.3/") != terms.domain("http://10.1.2.3/")
+    assert terms.domain("/nohost") == ""
+
+
+def test_non_dict_store_and_bad_entry(tmp_path):
+    (tmp_path / "terms.json").write_text("[1]")
+    assert terms.verdict(tmp_path, "https://x.com", []) is None
+    terms.record(tmp_path, "https://x.com", "forbidden", "https://x.com/t", "")
+    assert terms.verdict(tmp_path, "https://x.com", []) == "forbidden"
+    (tmp_path / "terms.json").write_text('{"x.com": 5}')
+    assert terms.verdict(tmp_path, "https://x.com", []) is None
+
+
+def test_record_refuses_bad_url_and_link(tmp_path):
+    for url, link in (("ftp://x.com", "https://x.com/t"), ("/nohost", "https://x.com/t"), (5, "https://x.com/t"), ("https://x.com", "https:"), ("https://x.com", None)):
+        with pytest.raises(ValueError):
+            terms.record(tmp_path, url, "allowed", link, "")
+
+
+def test_localhost_lookalike_is_not_local(tmp_path):
+    assert terms.verdict(tmp_path, "http://localhost.evil.com", []) is None
