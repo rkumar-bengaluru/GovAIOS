@@ -2009,6 +2009,23 @@ def test_sandbox_lesson_page_has_no_bank_section(cc):
     assert "Answer bank" in _lesson_form(cc, _lesson(cc)[0])[1]
 
 
+def test_bad_bank_op_refused_before_touch_id(cc):
+    from govaios import lessons
+    from govaios.desktop import Node
+    ja = _approve_job_apply(cc)
+    (cc.home / "apply").mkdir(mode=0o700, exist_ok=True)
+    (cc.home / "apply" / "answers.yaml").write_text("answers:\n  - {key: phone, labels: [Phone], answer: '99'}\n")
+    label = "Q" * 301   # longer than a bank label may be
+    t = Node("document", "Apply | Acme", children=[Node("heading", "Apply"), Node("text_field", label)])
+    name = lessons.save(cc.home, "job_apply", ja.digest, "on_form", [{"url": "https://jobs.acme.example/a", "title": t.name,
+        "tree": t, "events": [{"kind": "fill", "spec": {"role": "text_field", "name": label}, "label": label,
+                               "value": "x", "secure": False}]}])
+    before, n = _snap(cc), len(cc.asked)
+    cc.post("/lesson/approve", name=name, p=_lesson_form(cc, name)[0])
+    assert _tells(cc)[-1].startswith("GOV-AIOS -> Not approved: op add") and len(cc.asked) == n
+    assert _snap(cc) == before
+
+
 def test_discard_audits_and_replies(cc):
     from govaios import applyfiles
     name, _ = _lesson(cc)
@@ -2094,7 +2111,8 @@ def test_bank_failure_midway_leaves_flow_unapproved(cc, monkeypatch):
     from govaios import formfill
     name, _ = _lesson(cc)
     p = _lesson_form(cc, name)[0]
-    monkeypatch.setattr(formfill, "apply_ops", lambda *a: (_ for _ in ()).throw(formfill.BankError("bank full")))
+    monkeypatch.setattr(formfill, "apply_ops",   # the dry run passes; the bank changes before the real write
+                        lambda p, o, dry=False: None if dry else (_ for _ in ()).throw(formfill.BankError("bank full")))
     cc.post("/lesson/approve", name=name, p=p)
     assert not _approved_now(cc) and _log(cc.home, "lesson")[-1]["outcome"] == "error"
     assert _log(cc.home, "lesson")[-1]["reason"] == "BankError"

@@ -1566,7 +1566,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             tell("This lesson changed since you opened it. Look at it again.")
             return back
         try:
-            plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir)
+            plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir,
+                                 home / applyfiles.BANK)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back

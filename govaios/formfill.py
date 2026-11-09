@@ -170,8 +170,9 @@ def _dump(entries, cv_file) -> str:
     return yaml.safe_dump(doc, allow_unicode=True)
 
 
-def apply_ops(path: Path, ops: list[dict]) -> None:
-    """Apply approved (keep == "bank") lesson ops all-or-nothing: backup the bank, then replace it."""
+def apply_ops(path: Path, ops: list[dict], dry: bool = False) -> None:
+    """Apply approved (keep == "bank") lesson ops all-or-nothing: backup the bank, then replace it.
+    dry: only check them against the bank as it is now (BankError), writing nothing."""
     ops = [o for o in ops if o.get("keep") == "bank"]
     if not ops:
         return
@@ -198,6 +199,8 @@ def apply_ops(path: Path, ops: list[dict]) -> None:
             by[key] = Entry(key, labels, value if kind == "change" else e.answer, True)
         if len(by) > 300:
             raise BankError("bank full")
+    if dry:
+        return
     raw = read_bank(path)
     if raw is not None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

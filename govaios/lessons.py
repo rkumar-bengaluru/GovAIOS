@@ -294,11 +294,12 @@ def _site(url):
     return f"https://{u.hostname.lower()}" + (f":{port}" if port not in (None, 443) else "")
 
 
-def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir) -> dict:
+def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path) -> dict:
     """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
     "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
     raw: read_bound's {path: bytes} from the digest check: the flow is built from those bytes, never re-read.
-    deleted: {(page index, line index)}; keeps: {bank line index: keep}. ValueError when it cannot be written."""
+    deleted: {(page index, line index)}; keeps: {bank line index: keep}. ValueError when it cannot be written
+    (the bank ops are tried against bank_path's bank as it is now, writing nothing)."""
     pages_dir = Path(pages_dir)
     pages, fresh = {}, set()
     for p, lp in zip(proposal["pages"], lesson["pages"]):
@@ -360,6 +361,7 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir) -> dict:
         except FileNotFoundError:
             raise ValueError(f"page {pid} is missing") from None
     ops = [{**o, "keep": keeps.get(i, o["keep"])} for i, o in enumerate(proposal["bank"])]
+    formfill.apply_ops(Path(bank_path), ops, dry=True)   # a bad op is refused here, before Touch ID and any write
     kept = sum(1 for o in ops if o["keep"] == "bank")
     return {"pages": pages, "new": fresh, "flow": (flow_path, data), "digest": h.hexdigest(), "ops": ops,
             "counts": f"pages {len(pages)} ({new} new), steps {n}, bank {kept}"}
