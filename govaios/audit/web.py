@@ -21,14 +21,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import yaml
 
-from govaios import agents, applyfiles, auth, runstate, studio
+from govaios import agents, applyfiles, auth, lessons, runstate, studio, terms
 import os
 from govaios.formfill import BankError, add_answer, load_bank, ok_value, read_bank, stage_text
-from govaios.approvals import Approvals
+from govaios.approvals import Approvals, read_bound
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
 from govaios.audit.verify import verify
-from govaios.panel import market, settings, tickets, totp
+from govaios.panel import lesson as lesson_ui, market, settings, tickets, totp
 from govaios.panel.apps import list_apps, match
 from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
@@ -245,7 +245,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/studio|/claude|/codex")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/studio|/claude|/codex|/lesson/[^/]{1,200}")
 DOES = {"claude_code": "Every command Claude Code runs is checked by GOV-AIOS first and written to the audit log.",
         "codex": "Shell commands, file edits and plugin calls are checked by GOV-AIOS first and written to the audit "
                  "log. Plugins stay on; each new plugin tool asks you once."}
@@ -260,6 +260,15 @@ def _say(text):
         subprocess.run(["/usr/bin/say", text], timeout=60)
     except Exception:
         pass   # a missing voice must not break the panel
+
+
+def _notify(text):
+    """A macOS notification; the text is an argument to the script, never part of it."""
+    try:
+        subprocess.run(["/usr/bin/osascript", "-e", "on run argv", "-e",
+                        'display notification (item 1 of argv) with title "GOV-AIOS"', "-e", "end run", text], timeout=10)
+    except Exception:
+        pass   # a refused notification must not break the panel
 
 
 NO_SESSION = "Enter the 6-digit code from your authenticator."
@@ -290,7 +299,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
                             speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
-                            told=None, voice=None, card=None, run_id=None, fix_spoken=None)
+                            told=None, voice=None, card=None, run_id=None, fix_spoken=None, notify=_notify)
 
     def tell(line):
         panel.convo.append(f"GOV-AIOS -> {line}")
@@ -704,7 +713,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp or ans else ' autofocus'} "
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
                      f"<button class=go>Send</button></form>",
-                     '<meta http-equiv="refresh" content="2">' if live() and not ans else "",
+                     '<meta http-equiv="refresh" content="2">' if live() and (not ans or teaching()) else "",
                      f"<h2>Approved</h2><ul>{ok}{cc_li}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
 
     def setup(csrf, bad):
@@ -770,7 +779,22 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     "{name}, {job} stopped: {label}."),
         "sandbox": ("Web sandbox", "Go to the page you want in Chrome, then press Capture this page. Done ends the "
                     "sandbox.", (("capture", "Capture this page"), ("done", "Done")), None),
+        "new_page": ("This page is new", "{app} can't go on: this page is new. Teach it?",
+                     (("teach", "Teach this page"), ("skip", "Next job")),
+                     "{name}, {app} can't go on: this page is new. Teach it?"),
+        "terms": ("Check this site's terms", "Before I learn <b>{label}</b>, check that its terms allow a personal "
+                  "agent. Open the site, find its terms, then record what they say.", (("cancel", "Cancel"),),
+                  "{name}, please check the terms of {label}."),
+        "teaching": ("Teaching", "Do the page in Chrome. Close the tab when you're done.",
+                     (("done", "Done"), ("cancel", "Cancel lesson")), None),
+        "lesson": ("What I learned", "Review what I learned, then approve it with Touch ID or discard it.", (),
+                   "{name}, the lesson is ready. Please review what I learned."),
     }
+    TOLD = {"continue": "Carrying on.", "skip": "Skipped: fill it before you submit.", "next": "On to the next job.",
+            "end": "Ending the run.", "capture": "Capturing this page.", "done": "Sandbox done.",
+            "teach": "Teaching: do the page in Chrome, then close the tab.", "checked": "Terms recorded.",
+            ("new_page", "skip"): "On to the next job.", ("teaching", "done"): "Lesson done: see what I learned.",
+            ("teaching", "cancel"): "Lesson cancelled.", ("terms", "cancel"): "Terms not checked: the lesson stops."}
 
     def card_asked():
         """The live run's card as (digest, card); None when there is none for this run."""
@@ -788,10 +812,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return ""
         c = q[1]
         title, text, buttons, say = CARD_TEXT[c["kind"]]
+        app = panel.app.name if panel.app else "The app"
         if say and panel.fix_spoken != q[0]:   # once per card, on its own thread (say blocks)
             panel.fix_spoken = q[0]
-            threading.Thread(target=panel.speak, daemon=True, args=(say.format(
-                name=panel.name, label=c["label"][:120], job=c["job"][:120] or "the job"),)).start()
+            words = say.format(name=panel.name, label=c["label"][:120], job=c["job"][:120] or "the job", app=app)
+            threading.Thread(target=panel.speak, daemon=True, args=(words,)).start()
+            if c["kind"] == "new_page":
+                threading.Thread(target=panel.notify, daemon=True, args=(words,)).start()
         job = (f"<p class=m><a href='/apply/task/{c['item']}'>Job {c['item']}: {escape(c['job'][:200])}</a></p>"
                if c["job"] else "")
         cap = c.get("capture")
@@ -799,24 +826,59 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             job += f"<p class=m>Saved page: <code>captures/{cap}</code></p>"
         btns = " ".join(f"<button{' class=go' if i == 0 else ''} name=choice value={v}>{t}</button>"
                         for i, (v, t) in enumerate(buttons))
-        return (f"<section class=appcard><h2>{title}</h2>{job}<p>{text.format(label=escape(c['label'][:300]))}</p>"
-                f"{sandbox_pages() if c['kind'] == 'sandbox' else ''}"
-                f"<form method=post action=/apply/card>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
-                f"{btns}</form></section>")
+        extra = {"sandbox": sandbox_pages, "teaching": live_lines, "terms": lambda: terms_form(csrf, q),
+                 "lesson": lambda: lesson_link(c["label"])}.get(c["kind"], str)()
+        form = (f"<form method=post action=/apply/card>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
+                f"{btns}</form>" if buttons else "")
+        return (f"<section class=appcard><h2>{title}</h2>{job}"
+                f"<p>{text.format(label=escape(c['label'][:300]), app=escape(app))}</p>{extra}{form}</section>")
+
+    def live_lines():
+        """The teaching card's lines: labels and lengths only, as the engine writes them."""
+        lv = applyfiles.read_json(home, applyfiles.LESSON_LIVE)
+        if not lv or lv.get("run") != panel.run_id or not isinstance(lv.get("lines"), list):
+            return "<p class=m>Nothing seen yet.</p>"
+        return "<ul>" + "".join(f"<li>{escape(x[:200])}</li>" for x in lv["lines"][-50:] if isinstance(x, str)) + "</ul>"
+
+    def terms_form(csrf, q):
+        site = q[1]["label"]
+        link = (f"<p><a href='{escape(site)}' target=_blank rel=noopener>Open {escape(site[:200])}</a></p>"
+                if urlsplit(site).scheme in ("http", "https") else "")
+        radios = "".join(f"<label><input type=radio name=verdict value={v} required> {t}</label>" for v, t in
+                         (("allowed", "Allowed"), ("forbidden", "Forbidden"), ("unclear", "Unclear")))
+        return (f"{link}<form method=post action=/terms>{hidden(csrf)}<input type=hidden name=ask value='{q[0]}'>"
+                f"<fieldset><legend>The terms say a personal agent is</legend>{radios}</fieldset>"
+                f"<label>Terms link <input name=link type=url maxlength=500 required placeholder='https://'></label>"
+                f"<label>The clause it rests on <textarea name=clause maxlength=2000></textarea></label>"
+                f"<button class=go>Record</button></form>")
+
+    def lesson_link(name):
+        ok = re.fullmatch(r"[0-9-]{22}-[a-z0-9_]{1,64}\.json", name)
+        return f"<p><a class=go href='/lesson/{name}'>See what I learned</a></p>" if ok else ""
+
+    def teaching():
+        q = card_asked()
+        return q is not None and q[1]["kind"] == "teaching"
+
+    def reply_card(q, choice):
+        """Write reply.json for this card (audited first) and say what happens next. Caller holds panel.lock."""
+        audited("apply_card", {"outcome": choice, "item": q[1]["item"]},
+                lambda: applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "card": choice}))
+        told = TOLD.get((q[1]["kind"], choice), TOLD.get(choice))
+        if told:
+            tell(told)
 
     def apply_card(f):
         """Write reply.json once for this card, with one of its own choices. Nothing from the page is echoed."""
         with panel.lock:
             q = card_asked() if panel.session.active() else None
+            # a lesson is answered only by its own page (approve needs Touch ID); terms only after they are recorded
             if q is None or f.get("ask") != q[0] or applyfiles.read_json(home, applyfiles.REPLY) is not None \
-                    or f.get("choice") not in applyfiles.CARDS[q[1]["kind"]]:
+                    or f.get("choice") not in applyfiles.CARDS[q[1]["kind"]] or q[1]["kind"] == "lesson" \
+                    or f.get("choice") == "checked":
                 tell("That card is no longer waiting.")
                 return "/"
-            audited("apply_card", {"outcome": f["choice"], "item": q[1]["item"]},
-                    lambda: applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "card": f["choice"]}))
-            tell({"continue": "Carrying on.", "skip": "Skipped: fill it before you submit.",
-                  "next": "On to the next job.", "end": "Ending the run.", "capture": "Capturing this page.",
-                  "done": "Sandbox done."}[f["choice"]])
+            reply_card(q, f["choice"])
         return "/" if q[1]["kind"] == "sandbox" or not q[1]["item"] else f"/apply/task/{q[1]['item']}"
 
     TASK_WORDS = {"waiting": "Not started", "working": "Working", "needs_you": "Needs you", "review": "Ready to submit",
@@ -857,7 +919,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      + (f"<p>Check:</p>{lst('check')}" if lst("check") else "")
                      + f"<h2>Log</h2><table><tr><th>time</th>{''.join(f'<th>{c}</th>' for c in cols)}</tr>{rows}</table>"
                      + "<p><a href='/'>Talk</a></p>",
-                     '<meta http-equiv="refresh" content="3">' if live() and not task_card(csrf, n) else "", here="/")
+                     f'<meta http-equiv="refresh" content="{2 if teaching() else 3}">'
+                     if live() and (teaching() or not task_card(csrf, n)) else "", here="/")
 
     def sandbox_pages():
         sb = applyfiles.read_json(home, applyfiles.SANDBOX)
@@ -1333,7 +1396,132 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         audited("revoke", fields, apply)
         return "/approvals"
 
-    POSTS = {"/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+    def terms_post(f):
+        """Record the admin's verdict for the terms card's site (terms.record checks it), then reply checked."""
+        with panel.lock:
+            q = card_asked() if panel.session.active() else None
+            if q is None or q[1]["kind"] != "terms" or f.get("ask") != q[0] \
+                    or applyfiles.read_json(home, applyfiles.REPLY) is not None:
+                tell("That card is no longer waiting.")
+                return "/"
+            site, verdict = q[1]["label"], f.get("verdict", "")
+            try:
+                audited("setting", {"field": "terms", "target": site[:200], "outcome": verdict[:20]},
+                        lambda: terms.record(home, site, verdict, f.get("link", "").strip(),
+                                             f.get("clause", "").replace("\r\n", "\n")))
+            except ValueError as e:   # terms.record's own fixed messages
+                tell(f"Terms not recorded: {e}.")
+                return "/"
+            reply_card(q, "checked")
+        return "/"
+
+    LESSON = re.compile(r"/lesson/([0-9-]{22}-[a-z0-9_]{1,64}\.json)")
+    lesson_lock = threading.Lock()   # one lesson approval (and its Touch ID) at a time
+
+    def lesson_ctx(name):
+        """(lesson, proposal, app or None, the stuck step's case ids). ValueError/OSError for a bad or missing one."""
+        if not flows_dir:
+            raise ValueError("no apps folder")
+        lesson = lessons.load(home, name)
+        proposal = lessons.propose(lesson, flows_dir.parent / "pages",
+                                   load_bank(home / applyfiles.BANK, agents.user_home()))
+        app = next((a for a in apps() if a.id == lesson.get("flow")), None)
+        cases = set()
+        if app is not None and lesson.get("flow") not in lessons.SANDBOX:
+            st = lessons._find(yaml.safe_load(app.path.read_bytes())["workflow"]["steps"], lesson.get("step"))
+            cases = set((st or {}).get("on_match", {}))
+        return lesson, proposal, app, cases
+
+    def lesson_page(name, csrf):
+        try:
+            lesson, proposal, _, cases = lesson_ctx(name)
+        except BankError as e:
+            return _page(f"<h1>What I learned</h1><p class=fail>Your answer bank has an error: {escape(str(e))}. "
+                         f"<a href='/apply/bank'>Fix it</a> first.</p>", here="/")
+        except (ValueError, OSError, KeyError, TypeError):
+            return None
+        return _page(lesson_ui.page(name, lesson, proposal, cases, hidden(csrf)), here="/")
+
+    def lesson_reply(name, choice):
+        """Answer the engine's lesson card for this lesson, if it is still waiting."""
+        with panel.lock:
+            q = card_asked()
+            if q is not None and q[1]["kind"] == "lesson" and q[1]["label"] == name \
+                    and applyfiles.read_json(home, applyfiles.REPLY) is None:
+                applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "card": choice})
+
+    def lesson_approve(f):
+        if not lesson_lock.acquire(blocking=False):
+            tell("Another lesson is being approved.")
+            return "/"
+        try:
+            return approve_lesson(f)
+        finally:
+            lesson_lock.release()
+
+    def approve_lesson(f):
+        """The only place a lesson changes a flow, page files or the bank: checked, then Touch ID, then written."""
+        name = f.get("name", "")
+        if not LESSON.fullmatch(f"/lesson/{name}"):
+            return None
+        back = f"/lesson/{name}"
+        try:
+            lesson, proposal, app, _ = lesson_ctx(name)
+            deleted, keeps = lesson_ui.edits(proposal, f)
+        except (ValueError, OSError, KeyError, TypeError):
+            return None
+        fid, sandbox, pages_dir = lesson.get("flow"), lesson.get("flow") in lessons.SANDBOX, flows_dir.parent / "pages"
+        if not sandbox:
+            try:
+                same = app is not None and read_bound(app.path, pages_dir)[0] == lesson.get("digest")
+            except (OSError, KeyError, ValueError, yaml.YAMLError):
+                same = False
+            if not same:
+                tell(f"{app.name if app else fid} changed since this lesson; teach it again")
+                return back
+        if f.get("p") != lesson_ui.digest(proposal):
+            tell("This lesson changed since you opened it. Look at it again.")
+            return back
+        try:
+            plan = lessons.build(lesson, proposal, deleted, keeps, None if sandbox else app.path, pages_dir)
+        except (ValueError, KeyError, TypeError) as e:
+            tell(f"Not approved: {str(e)[:200]}.")
+            return back
+        ok, how = auth.prove(f"Add what GOV-AIOS learned to {app.name if app else 'Studio'}", home)
+        who = {"flow": fid, "target": name, "approver": "admin", "channel": "touch_id", "auth": how}
+        if not ok:
+            log.append("lesson", decision="deny", **who)
+            tell("Touch ID is busy. Try again." if how in ("busy", "none") else "Not approved: nothing was written.")
+            return back
+        try:
+            with panel.lock:   # bank_post and saved answers write the bank under it too
+                digest = lessons.apply(plan, pages_dir, home / applyfiles.BANK)
+                if not sandbox:   # only once every file is written: never approved with a mismatched digest
+                    Approvals(approvals_path).approve_flow(app.id, digest)
+        except Exception as e:
+            log.append("lesson", decision="allow", outcome="error", reason=type(e).__name__, **who)
+            tell("Writing what I learned failed, so nothing was approved. Teach the page again.")
+            return back
+        log.append("lesson", decision="allow", outcome="approved", flow_hash=digest, reason=plan["counts"], **who)
+        lesson_reply(name, "approved")
+        tell(f"Learned: {app.name} uses it from the next run." if not sandbox else "Saved the pages to Studio.")
+        return "/"
+
+    def lesson_discard(f):
+        name = f.get("name", "")
+        if not LESSON.fullmatch(f"/lesson/{name}"):
+            return None
+        try:
+            fid = lessons.load(home, name).get("flow")
+        except (ValueError, OSError):
+            return None
+        audited("lesson", {"flow": fid if isinstance(fid, str) else None, "target": name, "outcome": "discarded"},
+                lambda: lesson_reply(name, "discarded"))
+        tell("Lesson discarded.")
+        return "/"
+
+    POSTS = {"/terms": terms_post, "/lesson/approve": lesson_approve, "/lesson/discard": lesson_discard,
+             "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
@@ -1507,12 +1695,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 mk = re.fullmatch(r"/market/setup/([a-z0-9_]{1,64})", u.path)
                 cs = re.fullmatch(r"/audit/(claude|codex)/([A-Za-z0-9-]{1,64})", u.path)
                 tk = re.fullmatch(r"/apply/task/([0-9]{1,2})", u.path)
+                ls = LESSON.fullmatch(u.path)
                 ap = by_slash(u.path[1:])
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
                         else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
                         else bank_page(sess[1]) if u.path == "/apply/bank"
                         else task_page(int(tk[1]), sess[1]) if tk
+                        else lesson_page(ls[1], sess[1]) if ls
                         else market_page() if u.path == "/market" else studio_page(sess[1]) if u.path == "/studio" else agent_page(ap, sess[1]) if ap
                         else market_setup_page(sess[1], mk[1]) if mk
                         else cc_session_page(by_slash(cs[1]), cs[2]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)

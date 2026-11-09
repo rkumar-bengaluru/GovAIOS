@@ -1,5 +1,5 @@
 """Studio lessons: what the admin did in Chrome, saved, then turned into a PROPOSED change (page files, steps per
-page, bank ops) for the admin to review. Nothing here writes flows, pages or the bank.
+page, bank ops) for the admin to review. Only apply() writes, and only the panel calls it, after Touch ID.
 
 Dev mode: lessons are NOT masked (values as typed; secure fields are already blank from the observer).
 shortcut: unmasked, add masking before this leaves dev. Files are 0600 under <data home>/lessons/, last KEEP per flow.
@@ -14,7 +14,9 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from . import capture, engine, studio
+from .policy import origin
+from . import capture, engine, formfill, studio
+from .approvals import read_bound
 from .formfill import FIELD_ROLES, Field, new_key, normalize, restricted
 
 DIR = "lessons"
@@ -202,3 +204,123 @@ def _bank_op(label, value, bank, keys, ops):
     key = new_key(label, keys)
     keys.add(key)
     return {"op": "add", "key": key, **base}
+
+
+SANDBOX = (None, "web_sandbox")   # a lesson with no flow: its pages go to Studio, nothing else changes
+_DO = {"click": "click", "fill_form": "fill_form", "attach_file": "attach_file", "hand_over": "hand_over"}
+
+
+def _ids(steps):
+    out = []
+    for s in steps:
+        out.append(s.get("id"))
+        out += _ids(s.get("steps", []))
+        for v in s.get("on_match", {}).values():
+            if isinstance(v, dict) and isinstance(v.get("do"), list):
+                out += [d.get("id") for d in v["do"] if isinstance(d, dict)]
+    return out
+
+
+def _find(steps, sid):
+    for s in steps:
+        if s.get("id") == sid:
+            return s
+        hit = _find(s.get("steps", []), sid)
+        if hit:
+            return hit
+    return None
+
+
+def _do(line, page):
+    """The flow step for one kept line, or None (hand_fill: fill_form leaves it for the admin)."""
+    kind = line["kind"]
+    if kind == "attach_file":   # the engine's CV attach, as job_apply's attach step: only where the page has both
+        els = page["yaml"]["page"]["elements"]
+        if "resume_attach" in els and "resume_input" in els:
+            return {"action": "attach_file", "target": f"{page['id']}.resume_attach",
+                    "check": f"{page['id']}.resume_input"}
+        return None
+    if kind == "click":
+        return {"action": "click", "target": line["target"]} if line.get("target") else None
+    return {"action": _DO[kind]} if kind in _DO else None
+
+
+def build(lesson, proposal, deleted, keeps, flow_path, pages_dir) -> dict:
+    """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "flow": (path, bytes) | None,
+    "ops": bank ops, "counts": str}. deleted: {(page index, line index)}; keeps: {bank line index: keep}.
+    Raises ValueError when it cannot be written as approved."""
+    pages_dir = Path(pages_dir)
+    pages = {}
+    for p in proposal["pages"]:
+        if p["new"] or p["added"]:   # a known page gaining nothing is not rewritten
+            path = pages_dir / f"{p['id']}.yaml"
+            if p["new"] and os.path.lexists(path):
+                raise ValueError(f"page {p['id']} exists now; teach it again")
+            pages[path] = yaml.safe_dump(p["yaml"], sort_keys=False, allow_unicode=True).encode()
+    new = sum(1 for p in proposal["pages"] if p["new"])
+    if lesson.get("flow") in SANDBOX:
+        return {"pages": pages, "flow": None, "ops": [], "counts": f"pages {len(pages)} ({new} new), steps 0, bank 0"}
+    doc = yaml.safe_load(Path(flow_path).read_bytes())
+    wf = doc["workflow"]
+    step = _find(wf["steps"], lesson.get("step"))
+    if step is None or step.get("action") != "classify_page":
+        raise ValueError("the step this lesson belongs to is gone; teach it again")
+    on, ids, last, n = step.setdefault("on_match", {}), set(_ids(wf["steps"])), len(proposal["pages"]) - 1, 0
+    for i, p in enumerate(proposal["pages"]):
+        if p["id"] in on:   # the flow already handles this page: its own case stays
+            continue
+        do = []
+        for j, line in enumerate(p["steps"]):
+            s = _do(line, p) if line["keep"] and (i, j) not in deleted else None
+            if s:
+                k = len(do) + 1
+                while f"learned_{p['id']}_{k}" in ids:
+                    k += 1
+                ids.add(f"learned_{p['id']}_{k}")
+                do.append({"id": f"learned_{p['id']}_{k}", **s})
+        if do:
+            on[p["id"]] = {"do": do, "then": "end" if i == last else "again"}
+            n += len(do)
+    if "unknown" in on:
+        on["unknown"] = on.pop("unknown")   # stays the last case, as written by hand
+    dests = wf.setdefault("destinations", [])
+    for lp in lesson["pages"]:
+        o = origin(lp["url"])
+        if o not in dests:
+            dests.append(o)
+    try:
+        engine.check_learned(wf["steps"])
+    except engine.Stop as e:
+        raise ValueError(str(e)) from None
+    data = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True).encode()
+    if yaml.safe_load(data) != doc:
+        raise ValueError("the new flow does not read back the same")
+    ops = [{**o, "keep": keeps.get(i, o["keep"])} for i, o in enumerate(proposal["bank"])]
+    kept = sum(1 for o in ops if o["keep"] == "bank")
+    return {"pages": pages, "flow": (Path(flow_path), data), "ops": ops,
+            "counts": f"pages {len(pages)} ({new} new), steps {n}, bank {kept}"}
+
+
+def _put(path, data):
+    """Exclusive temp file beside path, then os.replace: a crash leaves the old file whole."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def apply(plan, pages_dir, bank_path) -> str | None:
+    """Write what build() made: pages, then the flow, then the bank ops. Returns the new flow digest, read back
+    from the files as written (None for a sandbox lesson)."""
+    for path, data in plan["pages"].items():
+        _put(path, data)
+    if plan["flow"] is None:
+        return None
+    _put(*plan["flow"])
+    formfill.apply_ops(Path(bank_path), plan["ops"])
+    return read_bound(plan["flow"][0], pages_dir)[0]

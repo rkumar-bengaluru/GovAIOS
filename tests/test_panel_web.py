@@ -1808,3 +1808,209 @@ def test_studio_compose_refuses_a_submit_click(cc):
     assert r.getheader("Location") == "/studio" and "that click stays yours" in _tells(cc)[-1]
     assert not (cc.flows / "studio_bad.yaml").exists()
     assert cc.req("/studio/compose", "POST", body={"app": "x", "s1": f"open:{jobs}"})[0] == 403   # no session
+
+
+# --- Studio lessons: the teach cards, the terms form, What I learned and its Touch ID approval ---
+
+def _lesson(P, flow="job_apply", digest=None):
+    """A saved lesson of two pages on a new site, stuck at job_apply's on_form step; returns its name."""
+    from govaios import lessons
+    from govaios.desktop import Node
+    ja = _approve_job_apply(P)
+    (P.home / "apply").mkdir(mode=0o700, exist_ok=True)
+    (P.home / "apply" / "answers.yaml").write_text("answers:\n  - {key: phone, labels: [Phone], answer: '99'}\n")
+
+    def ev(kind, role, name, value=""):
+        return {"kind": kind, "spec": {"role": role, "name": name}, "label": name, "value": value, "secure": False}
+    a = Node("document", "Apply | Acme", children=[Node("heading", "Apply <b>here</b>"), Node("link", "Next"),
+                                                   Node("text_field", "Email"), Node("text_field", "Passport number")])
+    b = Node("document", "Review | Acme", children=[Node("heading", "Review"), Node("button", "Submit")])
+    pages = [{"url": "https://jobs.acme.example/apply?t=1", "title": a.name, "tree": a,
+              "events": [ev("fill", "text_field", "Email", "a@x.example"),
+                         ev("fill", "text_field", "Passport number", "P<script>1"), ev("click", "link", "Next")]},
+             {"url": "https://jobs.acme.example/review", "title": b.name, "tree": b,
+              "events": [ev("click", "button", "Submit")]}]
+    return lessons.save(P.home, flow, digest or ja.digest, "on_form", pages), ja
+
+
+def _lesson_form(P, name):
+    page = P.get(f"/lesson/{name}")[1]
+    return re.search(r"name=p value='([0-9a-f]+)'", page)[1], page
+
+
+def _snap(P):
+    files = [*P.flows.glob("*.yaml"), *(P.flows.parent / "pages").glob("*.yaml"), *(P.home / "apply").glob("answers*")]
+    return {f: f.read_bytes() for f in files}
+
+
+def test_new_page_card_notifies_once(cc):
+    notes = []
+    cc.srv.panel.notify = notes.append
+    _carding(cc, "new_page", "A page this flow does not know", "Acme — Lead", 1)
+    page = cc.get("/")[1]
+    assert "Job Apply can't go on: this page is new. Teach it?" in page
+    assert "value=teach>Teach this page</button>" in page and "value=skip>Next job</button>" in page
+    cc.get("/")
+    _spoken_soon(cc, 1)
+    for _ in range(200):
+        if notes:
+            break
+        time.sleep(0.01)
+    time.sleep(0.05)
+    assert notes == ["Rupak, Job Apply can't go on: this page is new. Teach it?"] == cc.spoken
+
+
+def test_notify_passes_text_as_an_argument(monkeypatch):
+    from govaios.audit import web
+    calls = []
+    monkeypatch.setattr(web.subprocess, "run", lambda argv, **k: calls.append(argv))
+    web._notify('x" & do shell script "rm')
+    assert calls[0][0] == "/usr/bin/osascript" and calls[0][-1] == 'x" & do shell script "rm'
+    assert not any("rm" in a for a in calls[0][:-1])
+
+
+def test_teaching_card_shows_live_lines(cc):
+    from govaios import applyfiles
+    rid = _carding(cc, "teaching", "Do this page in Chrome")
+    applyfiles.write_json(cc.home, applyfiles.LESSON_LIVE, {"run": rid, "lines": ["clicked <b>Apply</b>", "Email ← 17 chars"]})
+    page = cc.get("/")[1]
+    assert "Close the tab when you're done." in page and "clicked &lt;b&gt;Apply&lt;/b&gt;" in page
+    assert "Email ← 17 chars" in page and '<meta http-equiv="refresh" content="2">' in page
+    assert "value=done>Done</button>" in page and "value=cancel>Cancel lesson</button>" in page
+    cc.post("/apply/card", ask=_ask_digest(cc), choice="done")
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY)["card"] == "done"
+    assert _tells(cc)[-1] == "GOV-AIOS -> Lesson done: see what I learned."
+
+
+def test_lesson_card_links_and_cannot_be_approved_by_the_card(cc):
+    from govaios import applyfiles
+    name, _ = _lesson(cc)
+    _carding(cc, "lesson", name)
+    page = cc.get("/")[1]
+    assert f"<a class=go href='/lesson/{name}'>See what I learned</a>" in page and "name=choice" not in page
+    from hashlib import sha256   # the card's own digest, as a forged form would send it
+    d = sha256(json.dumps(applyfiles.read_json(cc.home, applyfiles.ASK), sort_keys=True).encode()).hexdigest()[:16]
+    cc.post("/apply/card", ask=d, choice="approved")
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None and not _log(cc.home, "apply_card")
+
+
+def test_lesson_page_lists_pages_steps_and_bank(cc):
+    name, _ = _lesson(cc)
+    s, page = cc.get(f"/lesson/{name}")[0], _lesson_form(cc, name)[1]
+    assert s == 200 and "What I learned" in page
+    assert page.count(" · new</h2>") == 2 and "jobs_acme_example_apply_acme" in page
+    assert "name='del:0:0'" in page and "name='del:1:0'" in page   # a delete box per step line
+    assert "Hand over: you check and submit" in page and "Click: Next" in page
+    assert "New key <code>email</code> = “a@x.example”" in page
+    assert "P&lt;script&gt;1" in page and "<script>" not in page   # the admin's own values, escaped
+    assert re.search(r"Passport number”\) <b>sensitive</b>", page)
+    assert "<option value=bank selected>Keep in bank</option>" in page and "value=job>This job only" in page
+    assert "Approve with Touch ID" in page and "action=/lesson/discard" in page
+
+
+def test_lesson_name_traversal_refused(cc):
+    assert cc.get("/lesson/..%2Fx")[0] == 404
+    assert cc.get("/lesson/20261109-000000-000000-job_apply.json")[0] == 404   # no such lesson
+    assert cc.req("/lesson/x")[0] in (302, 303)   # signed out: the Locked page
+
+
+def test_approve_writes_flow_pages_bank_and_approves(cc):
+    from govaios import applyfiles
+    from govaios.engine import Runner
+    from govaios.formfill import load_bank
+    name, ja = _lesson(cc)
+    rid = _carding(cc, "lesson", name)
+    p = _lesson_form(cc, name)[0]
+    # keep the passport out of the bank; delete page 1's fill line (index 0)
+    s, _, r = cc.post("/lesson/approve", name=name, p=p, **{"keep:1": "drop", "del:0:0": "1"})
+    assert r.getheader("Location") == "/" and cc.asked[-1] == "Add what GOV-AIOS learned to Job Apply"
+    wf = yaml.safe_load(ja.path.read_text())["workflow"]
+    on = next(s for s in wf["steps"] if s["id"] == "on_form")["on_match"]
+    assert on["jobs_acme_example_apply_acme"] == {
+        "do": [{"id": "learned_jobs_acme_example_apply_acme_1", "action": "click",
+                "target": "jobs_acme_example_apply_acme.link_next"}], "then": "again"}
+    assert on["jobs_acme_example_review_acme"] == {
+        "do": [{"id": "learned_jobs_acme_example_review_acme_1", "action": "hand_over"}], "then": "end"}
+    assert list(on)[-1] == "unknown" and "https://jobs.acme.example" in wf["destinations"]
+    pages = cc.flows.parent / "pages"
+    assert (pages / "jobs_acme_example_apply_acme.yaml").exists() and (pages / "jobs_acme_example_review_acme.yaml").exists()
+    new = next(a for a in list_apps(cc.flows, cc.home) if a.id == "job_apply")
+    assert new.approved and new.digest != ja.digest
+    Runner(ja.path, None, cc.home, "gov_runner_dev")   # loads: learned cases checked, every page bound
+    bank = load_bank(cc.home / "apply" / "answers.yaml", cc.home)
+    assert {e.key: (e.answer, e.learned) for e in bank.entries} == {"phone": ("99", False), "email": ("a@x.example", True)}
+    assert list((cc.home / "apply").glob("answers.yaml.bak-*"))
+    [e] = _log(cc.home, "lesson")
+    assert e["outcome"] == "approved" and e["flow_hash"] == new.digest and e["target"] == name
+    assert e["reason"] == "pages 2 (2 new), steps 2, bank 1" and "a@x" not in json.dumps(e)
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": "approved"}
+    cc.post("/lesson/approve", name=name, p=p)   # twice: the flow changed since this lesson
+    assert _tells(cc)[-1] == "GOV-AIOS -> Job Apply changed since this lesson; teach it again"
+
+
+@pytest.mark.parametrize("how", ["denied", "busy"])
+def test_approve_refused_writes_nothing(cc, monkeypatch, how):
+    from govaios import auth
+    name, ja = _lesson(cc)
+    p, before = _lesson_form(cc, name)[0], _snap(cc)
+    monkeypatch.setattr(auth, "prove", lambda r, h, **k: (False, how))
+    cc.post("/lesson/approve", name=name, p=p)
+    assert _snap(cc) == before and not list((cc.home / "apply").glob("*.bak-*"))
+    assert next(a for a in list_apps(cc.flows, cc.home) if a.id == "job_apply").digest == ja.digest
+    assert [e["decision"] for e in _log(cc.home, "lesson")] == ["deny"]
+
+
+def test_flow_changed_since_lesson_refused(cc):
+    name, ja = _lesson(cc, digest="0" * 64)
+    p, before = _lesson_form(cc, name)[0], _snap(cc)
+    n = len(cc.asked)
+    cc.post("/lesson/approve", name=name, p=p)
+    assert _tells(cc)[-1] == "GOV-AIOS -> Job Apply changed since this lesson; teach it again"
+    assert _snap(cc) == before and len(cc.asked) == n   # never asked for Touch ID
+
+
+@pytest.mark.parametrize("bad", [{"keep:0": "all"}, {"keep:9": "bank"}, {"del:7:0": "1"}, {"x": "1"}, {"p": "0"}])
+def test_approve_refuses_forged_edits(cc, bad):
+    name, _ = _lesson(cc)
+    before = _snap(cc)
+    n = len(cc.asked)
+    cc.post("/lesson/approve", **{"name": name, "p": _lesson_form(cc, name)[0], **bad})
+    assert _snap(cc) == before and len(cc.asked) == n
+
+
+def test_sandbox_lesson_writes_only_pages(cc):
+    name, ja = _lesson(cc, flow="web_sandbox")
+    before = _snap(cc)
+    cc.post("/lesson/approve", name=name, p=_lesson_form(cc, name)[0])
+    after = _snap(cc)
+    assert {f.name for f in set(after) - set(before)} == {"jobs_acme_example_apply_acme.yaml",
+                                                          "jobs_acme_example_review_acme.yaml"}
+    assert all(after[f] == b for f, b in before.items())   # no flow, no bank change
+    assert cc.asked[-1] == "Add what GOV-AIOS learned to Studio" and _log(cc.home, "lesson")[-1]["outcome"] == "approved"
+
+
+def test_discard_audits_and_replies(cc):
+    from govaios import applyfiles
+    name, _ = _lesson(cc)
+    rid = _carding(cc, "lesson", name)
+    cc.post("/lesson/discard", name=name)
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": "discarded"}
+    assert [e["outcome"] for e in _log(cc.home, "lesson")] == ["discarded"]
+
+
+def test_terms_post_validates_and_records(cc):
+    from govaios import applyfiles, terms
+    rid = _carding(cc, "terms", "https://apply.example.invalid")
+    page = cc.get("/")[1]
+    assert "action=/terms" in page and "href='https://apply.example.invalid'" in page
+    ask = _ask_digest(cc)
+    cc.post("/terms", ask=ask, verdict="maybe", link="https://apply.example.invalid/terms", clause="")
+    assert _tells(cc)[-1].startswith("GOV-AIOS -> Terms not recorded: verdict must be")
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+    cc.post("/terms", ask=ask, verdict="allowed", link="http://x.example/terms", clause="")   # not https
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) is None
+    cc.post("/terms", ask=ask, verdict="allowed", link="https://apply.example.invalid/terms", clause="Personal use ok")
+    assert terms.verdict(cc.home, "https://apply.example.invalid", []) == "allowed"
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": "checked"}
+    cc.post("/apply/card", ask="x", choice="checked")   # checked only through the form
+    assert _log(cc.home, "apply_card")[-1]["outcome"] == "checked" and len(_log(cc.home, "apply_card")) == 1
