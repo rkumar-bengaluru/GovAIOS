@@ -134,8 +134,9 @@ def detail():
 class FakeDesktop:
     """Canned trees; records instead of sending input. Never touches the OS."""
 
-    def __init__(self, answers):
+    def __init__(self, answers=(), samples=()):
         self.answers, self.calls, self.url, self.typed = list(answers), [], "about:blank", ""
+        self.samples = list(samples)
         FakeDesktop.current = self
 
     def activate(self, app):
@@ -175,6 +176,16 @@ class FakeDesktop:
 
     def menu_open(self):
         return False
+
+    # Studio observation: canned samples, one per call.
+    def observe_sample(self, app):
+        return self.samples.pop(0)
+
+    def same(self, a, b):
+        return a is b or a == b
+
+    def teach_tab(self, app):
+        return "tab1"
 
     def choose_file(self, path):
         self.calls.append(("choose_file",))
