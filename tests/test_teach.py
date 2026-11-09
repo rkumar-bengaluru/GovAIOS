@@ -166,3 +166,165 @@ def test_learned_case_on_an_undeclared_origin_is_denied(tmp_path, monkeypatch):
     with pytest.raises(Stop, match="denied read_page"):
         run(tmp_path, monkeypatch, steps)
     assert not any(isinstance(c, tuple) and c[0] == "click" for c in FakeDesktop.current.calls)
+
+
+# ---------- Task 5: teach this page (an unknown page in a JobLens panel run) ----------
+
+import test_job_apply_flow as ja
+from test_job_apply_flow import env, fast_clock  # noqa: F401  (fixtures)
+from govaios import applyfiles, terms
+
+ODD = "https://apply.example.invalid/x"   # Acme's job link: a site the flow doesn't know
+LOOK = {"down": False, "pt": (0, 0), "hit": None, "focus": None, "url": ODD, "title": "Somewhere else", "tab": True,
+        "web": "w1"}
+
+
+class TeachDesk(ja.ApplyDesk):
+    def __init__(self, samples=(), forever=None):
+        super().__init__(ja.GH, links={"Staff Engineer": ODD})
+        self.samples, self.forever = list(samples), forever
+
+    def web_root(self, app):
+        if self.url == ODD:
+            return N("document", "Somewhere else", children=[N("button", "Apply Now", handle="b1")])
+        return super().web_root(app)
+
+    def observe_sample(self, app):
+        return dict(self.forever) if self.forever else self.samples.pop(0)   # none left: raises, as a closed window
+
+
+def answer_cards(tmp_path, choose, seen):
+    """ja.answer_cards, but a None choice leaves the card unanswered (the teaching card ends by itself)."""
+    import threading
+    import time
+    done = threading.Event()
+
+    def go():
+        while not done.is_set():
+            ask = applyfiles.read_json(tmp_path, applyfiles.ASK)
+            if ask and "card" in ask and applyfiles.read_json(tmp_path, applyfiles.REPLY) is None:
+                seen.append(ask["card"])
+                c = choose(ask["card"])
+                if c is not None:
+                    applyfiles.write_json(tmp_path, applyfiles.REPLY, {"run": ask["run"], "card": c})
+                while applyfiles.read_json(tmp_path, applyfiles.ASK) == ask and not done.is_set():
+                    time.sleep(0.002)
+            time.sleep(0.002)
+    threading.Thread(target=go, daemon=True).start()
+    return done
+
+
+def teach_run(tmp_path, monkeypatch, desk, answers, allow_teach=True, run_id="r1"):
+    """job_apply with `teach` allowed (a copy); answers: card kind -> reply (a callable gets the card); the teaching
+    card is left to end by itself unless answered."""
+    wf = yaml.safe_load(ja.FLOW.read_text())
+    if allow_teach:
+        wf["workflow"]["permissions"]["allow"].append("teach")
+    flow = tmp_path / "job_apply.yaml"
+    flow.write_text(yaml.safe_dump(wf))
+    monkeypatch.setattr(ja, "FLOW", flow)
+    monkeypatch.setattr(ja, "answer_cards", answer_cards)
+    answers = {"teaching": None, **answers}
+    live = []
+    write = engine.write_json
+    monkeypatch.setattr(engine, "write_json", lambda h, n, o: (live.append(o) if n == applyfiles.LESSON_LIVE else None,
+                                                               write(h, n, o))[1])
+    seen = []
+    choose = lambda c: (lambda a: a(c) if callable(a) else a)(answers.get(c["kind"], "next"))  # noqa: E731
+    e, tasks, err = ja.run_apply(tmp_path, desk, choose=choose, seen=seen, run_id=run_id)
+    return e, tasks, err, seen, live
+
+
+def lessons_written(tmp_path):
+    d = tmp_path / "lessons"
+    return sorted(p.name for p in d.iterdir()) if d.exists() else []
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_unknown_page_offers_teach_and_skip_keeps_old_stop(tmp_path, monkeypatch):
+    e, tasks, err, seen, _ = teach_run(tmp_path, monkeypatch, TeachDesk(), {"new_page": "skip"})
+    assert err is None and [(t["status"], t.get("reason")) for t in tasks] == [("stopped", "unexpected page"), ("done", None)]
+    assert [c["kind"] for c in seen] == ["new_page", "stopped", "review"]
+    assert seen[0]["label"] == "A page this flow does not know" and not lessons_written(tmp_path)
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_teach_records_lesson_and_stops_task(tmp_path, monkeypatch):
+    def terms_ok(card):
+        assert card["label"] == "https://apply.example.invalid"
+        terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "personal use is fine")
+        return "checked"
+    desk = TeachDesk([LOOK, {**LOOK, "down": True, "hit": "b1"}])   # then the samples run out: the tab is gone
+    e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, desk,
+                                          {"new_page": "teach", "terms": terms_ok, "lesson": "approved"})
+    assert err is None and e[-1]["kind"] == "flow_end"
+    assert tasks[0]["status"] == "stopped" and tasks[0]["reason"].startswith("page learned")
+    assert tasks[1]["status"] == "done"   # the next job ran
+    assert [c["kind"] for c in seen] == ["new_page", "terms", "teaching", "lesson", "stopped", "review"]
+    [name] = lessons_written(tmp_path)
+    assert seen[3]["label"] == name
+    lesson = json.loads((tmp_path / "lessons" / name).read_text())
+    assert [ev["kind"] for p in lesson["pages"] for ev in p["events"]] == ["click"]
+    [rec] = [x for x in e if x["kind"] == "lesson"]
+    assert (rec["outcome"], rec["target"], rec["item"]) == ("recorded", name, 1)
+    # first contact with the new site went through Touch ID
+    assert any(x.get("action") == "read_page" and x.get("approver") == "admin" and "example.invalid" in x["destination"]
+               for x in e)
+    assert live == [{"run": "r1", "lines": ["clicked Apply Now"]}]
+    assert not (tmp_path / applyfiles.LESSON_LIVE).exists()
+
+
+def test_fill_line_shows_length_never_the_value():
+    assert engine._lesson_line({"kind": "fill", "label": "Email", "value": "a@example.invalid", "secure": False}) \
+        == "Email ← 17 chars"
+    assert engine._lesson_line({"kind": "fill", "label": "Password", "value": "", "secure": True}) == "Password ← hidden"
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_forbidden_terms_never_reads_the_page(tmp_path, monkeypatch):
+    def terms_no(card):
+        terms.record(tmp_path, ODD, "forbidden", "https://example.invalid/terms", "no bots")
+        return "checked"
+    desk = TeachDesk([LOOK])
+    e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, desk, {"new_page": "teach", "terms": terms_no})
+    assert tasks[0]["reason"] == "site terms do not allow a personal agent" and tasks[1]["status"] == "done"
+    assert not any(x.get("action") == "read_page" and "example.invalid" in (x.get("destination") or "") for x in e)
+    assert desk.samples == [LOOK] and not lessons_written(tmp_path) and not live
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_cancel_writes_no_lesson(tmp_path, monkeypatch):
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")   # checked before: no terms card
+    desk = TeachDesk(forever={**LOOK, "down": True, "hit": "b1"})   # never ends by itself
+    e, tasks, err, seen, _ = teach_run(tmp_path, monkeypatch, desk, {"new_page": "teach", "teaching": "cancel"})
+    assert tasks[0]["reason"] == "lesson cancelled" and [c["kind"] for c in seen][:2] == ["new_page", "teaching"]
+    assert not lessons_written(tmp_path) and not any(x["kind"] == "lesson" for x in e)
+    assert not (tmp_path / applyfiles.LESSON_LIVE).exists()
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_flow_without_teach_permission_stops_as_before(tmp_path, monkeypatch):
+    e, tasks, err, seen, _ = teach_run(tmp_path, monkeypatch, TeachDesk(), {}, allow_teach=False)
+    assert tasks[0]["reason"] == "unexpected page" and [c["kind"] for c in seen] == ["stopped", "review"]
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_cli_run_never_teaches(tmp_path, monkeypatch):
+    e, tasks, err, seen, _ = teach_run(tmp_path, monkeypatch, TeachDesk(), {}, run_id=None)
+    assert seen == [] and not lessons_written(tmp_path)
+    assert [x["reason"] for x in e if x.get("action") == "task_stop"][0] == "unexpected page"
+
+
+def test_teach_needs_the_pinned_window(tmp_path):
+    r = Runner.__new__(Runner)
+    with pytest.raises(Stop, match="teach needs the pinned browser window"):
+        r.teach("x")
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_idle_teaching_ends_and_an_empty_lesson_is_not_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "TEACH_IDLE_S", -1)   # idle at once: no event ever came
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")
+    e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, TeachDesk(forever=LOOK), {"new_page": "teach"})
+    assert tasks[0]["reason"] == "lesson cancelled" and tasks[1]["status"] == "done"
+    assert not lessons_written(tmp_path) and not live

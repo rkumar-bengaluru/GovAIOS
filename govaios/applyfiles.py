@@ -12,7 +12,10 @@ RESULT = "apply/result.json"
 TASKS = "apply/tasks.json"       # JobLens: one task per job, its status and counts (labels only, never values)
 SANDBOX = "apply/sandbox.json"   # web sandbox: the pages captured so far
 # a card the run shows on the panel, and the only replies each kind accepts
-CARDS = {"fix": ("continue", "skip"), "review": ("next", "end"), "stopped": ("next", "end"), "sandbox": ("capture", "done")}
+CARDS = {"fix": ("continue", "skip"), "review": ("next", "end"), "stopped": ("next", "end"), "sandbox": ("capture", "done"),
+         "new_page": ("teach", "skip"), "terms": ("checked", "cancel"), "teaching": ("done", "cancel"),
+         "lesson": ("approved", "discarded")}
+LESSON_LIVE = "apply/lesson.json"   # Studio: what the admin did so far, one line per event (labels and lengths, never values)
 MAX = 64 * 1024
 
 

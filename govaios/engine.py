@@ -14,9 +14,9 @@ from pathlib import Path
 import yaml
 from urllib.parse import urlsplit
 
-from . import auth, capture, runstate, studio
+from . import auth, capture, runstate, studio, terms
 from .agents import user_home
-from .applyfiles import ASK, BANK, CARDS, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
+from .applyfiles import ASK, BANK, CARDS, LESSON_LIVE, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
                        read_form, restricted)
 from .audit.log import AuditLog, url_for_audit
@@ -33,6 +33,8 @@ LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over")   # what a 
 MAX_LEARNED = 10   # learned pages run within one classify_page call
 FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
+TEACH_IDLE_S = 1800   # the teaching card ends after 30 min with no new event
+LIVE_LINES = 50
 
 
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
@@ -199,6 +201,15 @@ def _same_phone(value, got):
 
 def _option(group, value):
     return next((n for n in group.walk() if n.role == "radio" and n.name == value), None)
+
+
+def _lesson_line(e):
+    """One live line for the panel: the element's label and what was done, never the value (a fill: its length)."""
+    label = (e.get("label") or "a field")[:80]
+    if e["kind"] == "fill":
+        return f"{label} \u2190 hidden" if e.get("secure") else f"{label} \u2190 {len(e.get('value') or '')} chars"
+    return {"click": f"clicked {label}", "tick": f"ticked {label}", "choose": f"chose an option in {label}",
+            "attach": f"attached a file to {label}"}.get(e["kind"], f"{e['kind']} {label}")
 
 
 # ---------- executor ----------
@@ -467,6 +478,7 @@ class Runner:
         if f"({want})" not in node.name:
             raise Stop("wrong browser profile: account on page does not match the flow")
         self.d.pin_window(window)   # refuses if focus left that window during the check
+        self.pinned = True   # teach observes only this window
 
     def do_navigate(self, s):
         value = self.inputs[s["value_from"].removeprefix("input.")] if "value_from" in s else s["value"]
@@ -507,6 +519,9 @@ class Runner:
                 self.do_click({"id": self.step, "target": f"{page}.{what['click']}"})
                 continue
             if what == "stop_and_report":
+                if page is None and self.run_id is not None and decide(
+                        {"action": "teach", "risk": "read", "destination": None}, self.flow, self.approvals) == "allow":
+                    self.teach(self.step)   # always raises Stop
                 raise Stop("unexpected page")
             # stop_and_request_user (Rule 6)
             ok, how = self.ask(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
@@ -809,7 +824,7 @@ class Runner:
             self.ctx["apply"]["yourself"].append(f.label)
         return ok
 
-    def card(self, kind, label):
+    def card(self, kind, label, tick=None):
         """Panel run only: show a card (applyfiles.CARDS) and wait for the admin's choice, then bring the pinned
         window back. None when there is no panel or the flow may not ask (a CLI run carries on without it)."""
         if self.run_id is None or decide({"action": "ask_admin", "risk": "read", "destination": None},
@@ -819,12 +834,61 @@ class Runner:
         task = self._current_task()
         cap, self.last_capture = getattr(self, "last_capture", None), None   # the page saved for this card, if any
         reply = self._ask({"card": {"kind": kind, "label": label[:300], "capture": cap if kind != "sandbox" else None,
-                                    "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}})
+                                    "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}}, tick)
         choice = reply.get("card")
         if choice not in CARDS[kind]:
             raise Stop("bad reply")
         self._act("raise_pinned", self.d.raise_pinned)
         return choice
+
+    def teach(self, step_id):
+        """Studio: the admin does an unknown page in Chrome while the read-only observer records it as a lesson.
+        Always ends this job with a Stop; a lesson is used only once approved, from the next run."""
+        from . import lessons, observer   # lessons imports engine
+        if not getattr(self, "pinned", False):
+            raise Stop("teach needs the pinned browser window")
+        if self.card("new_page", "A page this flow does not know") != "teach":
+            raise Stop("unexpected page")
+        url = self.d.current_url(self.app) or ""
+        site = origin(url)
+        declared = {origin(d) for d in self.flow.get("destinations", [])}
+        if terms.verdict(self.home, url, declared) != "allowed" and (
+                self.card("terms", site) != "checked" or terms.verdict(self.home, url, declared) != "allowed"):
+            raise Stop("site terms do not allow a personal agent")
+        if site not in declared:   # in memory, this run only; first contact asks for Touch ID
+            self.flow["destinations"] = [*self.flow["destinations"], site]
+        self.gate("read_page", "read", destination=url)
+        self.d.teach_tab(self.app)
+        obs = observer.Observer(self.d, self.app, self.d.same)
+        lines, last = [], [time.monotonic()]
+
+        def snap():
+            return self.d.web_root(self.app)
+
+        def tick():
+            try:
+                evs = obs.feed(self.d.observe_sample(self.app), snap)
+            except Exception:   # the window closed mid-look: the teach tab is gone
+                evs = obs.feed({"tab": False}, snap)
+            if evs:
+                lines.extend(_lesson_line(e) for e in evs)
+                del lines[:-LIVE_LINES]
+                write_json(self.home, LESSON_LIVE, {"run": self.run_id, "lines": lines})
+                last[0] = time.monotonic()
+            if obs.ended or time.monotonic() - last[0] > TEACH_IDLE_S:
+                return {"run": self.run_id, "card": "done"}   # what was recorded so far is kept
+            return None
+        try:
+            choice = self.card("teaching", "Do this page in Chrome", tick)
+        finally:
+            remove(self.home, LESSON_LIVE)
+        if choice != "done" or not any(p["events"] for p in obs.pages):
+            raise Stop("lesson cancelled")
+        name = lessons.save(self.home, self.flow["id"], self.digest, step_id, obs.pages)
+        self._audit("lesson", outcome="recorded", target=name)
+        if self.card("lesson", name) == "approved":
+            raise Stop("page learned: it is used from the next run")
+        raise Stop("lesson discarded")
 
     def fix_by_hand(self, f, shown0):
         """Panel run only: the admin fills the failed field in Chrome, then Continue (or Skip). Re-read after."""
@@ -973,8 +1037,9 @@ class Runner:
             else:
                 a["yourself"].append(f.label)
 
-    def _ask(self, body):
-        """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it)."""
+    def _ask(self, body, tick=None):
+        """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it).
+        tick (the teaching card): called every 0.2 s, its reply dict ends the wait; it keeps its own idle timeout."""
         try:
             remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
             self.asks = getattr(self, "asks", 0) + 1   # each ask unique: a stale reply never answers the next one
@@ -988,9 +1053,13 @@ class Runner:
                     raise Stop("emergency stop")
                 if auth.screen_locked():
                     raise Stop("screen_locked")
-                if time.monotonic() > deadline:
+                if tick is not None:
+                    reply = tick()
+                    if reply is not None:
+                        break
+                elif time.monotonic() > deadline:
                     raise Stop("no answer from admin")
-                time.sleep(1)
+                time.sleep(0.2 if tick is not None else 1)
         finally:
             remove(self.home, ASK, REPLY)
         return reply
