@@ -580,3 +580,42 @@ def test_snap_blanks_secure_value(env, monkeypatch):
                         lambda el, attrs, o, n: (0, ("AXSecureTextField", None, "pw", None, "hunter2", None, [], [])))
     env.d._count = 0
     assert env.d._snap("root").value == ""
+
+
+def test_observe_other_focused_window_is_not_the_lesson(env, monkeypatch):
+    _observe_env(env, monkeypatch, {**STRIP, ("app", "AXFocusedWindow"): "win2"})   # devtools, popup, 2nd window
+    env.d._window = "win1"
+    s = env.d.observe_sample("chrome")
+    assert s["web"] is None and s["focus"] is None and s["hit"] is None
+
+
+def test_observe_nothing_pinned_has_no_hit(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP)
+    s = env.d.observe_sample("chrome")
+    assert s["hit"] is None and s["web"] is None
+
+
+def test_observe_chrome_gone_is_tab_false(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP)
+    env.d._window = "win1"
+    env.d.teach_tab("chrome")
+    env.d._app = lambda name: None
+    assert env.d.observe_sample("chrome")["tab"] is False
+
+
+def test_observe_teach_tab_source(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP)
+    env.d._window = "win1"
+    env.d.teach_tab("chrome")
+    assert env.d.teach_tab_source == "tab_strip"
+    _observe_env(env, monkeypatch, {**STRIP, ("win1", "AXChildren"): ["page"]})
+    env.d.teach_tab("chrome")
+    assert env.d.teach_tab_source == "web_area"
+
+
+def test_snap_blanks_secure_subrole(env, monkeypatch):
+    monkeypatch.setattr(macos, "AXUIElementCopyMultipleAttributeValues",
+                        lambda el, attrs, o, n: (0, ("AXTextField", "AXSecureTextField", "pw", None, "hunter2", None, [], [])))
+    env.d._count = 0
+    n = env.d._snap("root")
+    assert n.value == "" and n.role == "native:AXSecureTextField"

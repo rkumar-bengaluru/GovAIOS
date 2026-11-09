@@ -218,8 +218,8 @@ class MacDesktop:
         neutral = NEUTRAL.get(f"{role}/{sub}") or NEUTRAL.get(role) or f"native:{role}"
         if neutral == "tab" and parent_role != "AXTabGroup":
             neutral = "radio"   # Chrome's role=tab and plain radios are both AXRadioButton
-        if role == "AXSecureTextField":
-            value = ""   # a password never reaches a snapshot (lessons store trees)
+        if "AXSecureTextField" in (role, sub):   # Chrome: the role; AppKit: AXTextField + this subrole
+            neutral, value = "native:AXSecureTextField", ""   # a password never reaches a snapshot (lessons store trees)
         node = Node(role=neutral, name=_s(title) or _s(desc), value=_s(value), dom_id=_s(dom_id),
                     dom_class=tuple(c for c in classes if isinstance(c, str)) if hasattr(classes, '__iter__') and not isinstance(classes, str) else (), handle=el)
         if neutral == "document" and self._count > 1:
@@ -372,12 +372,18 @@ class MacDesktop:
 
     def _tab_id(self, app):
         win = self._win(app)
-        # shortcut: no tab strip found (e.g. a tabless app window), so the web area stands in; it changes per document
-        return self._selected_tab(win) or (self._find(win, "AXWebArea", 30) if win is not None else None)
+        tab = self._selected_tab(win)
+        self._tab_source = "tab_strip"
+        if tab is None and win is not None:
+            # shortcut: no tab strip found (e.g. a tabless app window), so the web area stands in; it changes per document
+            tab, self._tab_source = self._find(win, "AXWebArea", 30), "web_area"
+        return tab
 
     def teach_tab(self, app):
-        """The tab the admin teaches in: Chrome's selected tab of the pinned window (stable across navigation)."""
+        """The tab the admin teaches in: Chrome's selected tab of the pinned window (stable across navigation).
+        Call it before observe_sample. teach_tab_source says which path found it: "tab_strip" or "web_area"."""
         self._teach = self._tab_id(app)
+        self.teach_tab_source = self._tab_source
         return self._teach
 
     def _hit(self, pt):
@@ -388,24 +394,31 @@ class MacDesktop:
         perr, pid = AXUIElementGetPid(hit, None)
         if perr != 0 or pid != self._target_pid():
             return None
-        if self._window is not None and not self.same(_attr(hit, "AXWindow"), self._window):
+        if self._window is None or not self.same(_attr(hit, "AXWindow"), self._window):
             return None
         return hit
 
     def observe_sample(self, app):
-        """One look at mouse, focus, url, title and tabs. Polls button state and the down counter, so a tap
-        inside one poll still shows down once; no event tap, no input posted."""
+        """One look at mouse, focus, url, title and tabs (teach_tab first). Polls button state and the down
+        counter, so a tap inside one poll still shows down once; no event tap, no input posted. hit/focus/web are
+        None unless the pinned window has focus (devtools, a popup or another window are not the lesson);
+        Chrome gone -> tab False, never raises."""
         st = Q.kCGEventSourceStateCombinedSessionState
         count = Q.CGEventSourceCounterForEventType(st, Q.kCGEventLeftMouseDown)
         tapped = getattr(self, "_downs", None) is not None and count > self._downs
         self._downs = count
         p = Q.CGEventGetLocation(Q.CGEventCreate(None))
         pt = (p.x, p.y)
+        down = bool(Q.CGEventSourceButtonState(st, Q.kCGMouseButtonLeft)) or tapped
+        if self._app(app) is None or (self._target and self._app(self._target) is None):   # Chrome quit
+            return {"down": down, "pt": pt, "hit": None, "focus": None, "url": "", "title": "", "tab": False, "web": None}
         teach = getattr(self, "_teach", None)
-        return {"down": bool(Q.CGEventSourceButtonState(st, Q.kCGMouseButtonLeft)) or tapped, "pt": pt,
-                "hit": self._hit(pt), "focus": self._focus_el(), "url": self.current_url(app),
-                "title": self.window_title(app), "tab": teach is not None and _attr(teach, "AXRole") is not None,
-                "web": self._tab_id(app)}
+        win = _attr(self._ax_app(app), "AXFocusedWindow")
+        mine = self._window is not None and self.same(win, self._window)
+        return {"down": down, "pt": pt, "hit": self._hit(pt) if mine else None, "focus": self._focus_el() if mine else None,
+                "url": self.current_url(app), "title": self.window_title(app),
+                "tab": teach is not None and _attr(teach, "AXRole") is not None,
+                "web": self._tab_id(app) if mine else None}
 
     def _focus_el(self):
         return _attr(AXUIElementCreateApplication(self._target_pid()), "AXFocusedUIElement")
