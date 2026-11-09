@@ -1989,6 +1989,26 @@ def test_sandbox_lesson_writes_only_pages(cc):
     assert cc.asked[-1] == "Add what GOV-AIOS learned to Studio" and _log(cc.home, "lesson")[-1]["outcome"] == "approved"
 
 
+def test_sandbox_lesson_pages_are_studio_drafts_and_deletable(cc):
+    from govaios import studio
+    name, _ = _lesson(cc, flow="web_sandbox")
+    cc.post("/lesson/approve", name=name, p=_lesson_form(cc, name)[0])
+    pages = cc.flows.parent / "pages"
+    cat = studio.catalogue(cc.flows, pages)
+    assert cat["jobs_acme_example_apply_acme"]["url"] == "https://jobs.acme.example/apply"   # never the query
+    assert cat["jobs_acme_example_review_acme"]["url"] == "https://jobs.acme.example/review"
+    assert (pages / "jobs_acme_example_review_acme.yaml").read_text().startswith("# Draft from the Web Sandbox lesson")
+    _delete(cc, "page", "jobs_acme_example_review_acme")
+    assert not (pages / "jobs_acme_example_review_acme.yaml").exists()
+
+
+def test_sandbox_lesson_page_has_no_bank_section(cc):
+    name, _ = _lesson(cc, flow="web_sandbox")
+    page = _lesson_form(cc, name)[1]
+    assert "Answer bank" not in page and "name='keep:" not in page
+    assert "Answer bank" in _lesson_form(cc, _lesson(cc)[0])[1]
+
+
 def test_discard_audits_and_replies(cc):
     from govaios import applyfiles
     name, _ = _lesson(cc)
@@ -2178,3 +2198,24 @@ def test_delete_refuses_an_unbound_page_that_is_not_a_draft(cc):
     (pages / "plain.yaml").write_text("page: {id: plain, identification: {title_matches: x}, elements: {}}")
     _delete(cc, "page", "plain")
     assert (pages / "plain.yaml").exists() and "only draft pages" in _tells(cc)[-1]
+
+
+def test_known_draft_page_keeps_its_header_when_a_lesson_adds_to_it(cc):
+    from govaios import lessons, studio
+    from govaios.desktop import Node
+    pages = cc.flows.parent / "pages"
+    t = {"role": "document", "name": "Shop", "children": [{"role": "heading", "name": "Shop"},
+                                                         {"role": "link", "name": "Cart"}]}
+    pid = studio.write_draft(cc.flows, pages, t, "https://shop.example/home", None, "c.json")
+    doc = yaml.safe_load((pages / f"{pid}.yaml").read_text())
+    del doc["page"]["elements"]["link_cart"]
+    (pages / f"{pid}.yaml").write_text("# Draft from the Web Sandbox capture c.json\n# Start link: https://shop.example/home\n"
+                                       + yaml.safe_dump(doc))
+    tree = Node("document", "Shop", children=[Node("heading", "Shop"), Node("link", "Cart")])
+    name = lessons.save(cc.home, "web_sandbox", None, None, [{"url": "https://shop.example/home", "title": "Shop",
+        "tree": tree, "events": [{"kind": "click", "spec": {"role": "link", "name": "Cart"}, "label": "Cart",
+                                  "value": "", "secure": False}]}])
+    cc.post("/lesson/approve", name=name, p=_lesson_form(cc, name)[0])
+    text = (pages / f"{pid}.yaml").read_text()
+    assert text.startswith("# Draft from the Web Sandbox capture c.json\n# Start link: https://shop.example/home\n")
+    assert "Cart" in text and pid in studio.catalogue(cc.flows, pages)

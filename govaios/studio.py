@@ -160,6 +160,14 @@ def _add_items(tree, nodes, elements, add):
         add(f"items_{n}", spec)
 
 
+def draft_head(source, url):
+    """A draft page's header: Studio lists a page by its Start link, and deletes only pages that begin this way."""
+    u = urlsplit(url)
+    return (f"# Draft from the Web Sandbox {source} ({date.today().isoformat()}). Review before use:\n"
+            f"# Start link: {u.scheme}://{(u.hostname or '').lower()}{f':{u.port}' if u.port else ''}{u.path or '/'}\n"   # no userinfo, query or fragment: they can hold secrets
+            "# every button is rated submit until lowered; names are as the page showed them.\n")
+
+
 def write_draft(flows_dir, pages_dir, tree, url, browser, capture_name):
     """Write the draft page (exclusive, never overwriting). Returns the page id."""
     for d in (flows_dir, pages_dir):
@@ -174,11 +182,7 @@ def write_draft(flows_dir, pages_dir, tree, url, browser, capture_name):
     else:
         raise OSError("no free draft name")
     page = draft_page(tree, pid)
-    u = urlsplit(url)
-    head = (f"# Draft from the Web Sandbox capture {capture_name} ({date.today().isoformat()}). Review before use:\n"
-            f"# Start link: {u.scheme}://{(u.hostname or '').lower()}{f':{u.port}' if u.port else ''}{u.path or '/'}\n"   # no userinfo, query or fragment: they can hold secrets
-            "# every button is rated submit until lowered; names are as the page showed them.\n")
-    if not _create(pages_dir / f"{pid}.yaml", (head + yaml.safe_dump(page, sort_keys=False, allow_unicode=True)).encode()):
+    if not _create(pages_dir / f"{pid}.yaml", (draft_head(f"capture {capture_name}", url) + yaml.safe_dump(page, sort_keys=False, allow_unicode=True)).encode()):
         raise OSError("draft page exists")
     return pid
 

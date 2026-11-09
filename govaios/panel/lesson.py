@@ -74,7 +74,8 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
             s["keep"] and lessons._do(s, last) for s in last["steps"])):
         secs.append("<p class=note>The last page gets no steps, so the run does not end there: it looks at the "
                     "page again and stops if it does not know it.</p>")
-    bank = "".join(_bank_line(i, o) for i, o in enumerate(proposal["bank"]))
+    bank = "".join(_bank_line(i, o) for i, o in enumerate(proposal["bank"])) \
+        if lesson.get("flow") not in lessons.SANDBOX else ""   # a sandbox lesson writes pages only
     bank = f"<h2>Answer bank</h2><ul>{bank}</ul>" if bank else ""
     flow = escape(str(lesson.get("flow") or "Studio"))
     return (f"<h1>What I learned</h1><p class=m>Lesson <code>{escape(name)}</code> for <b>{flow}</b>. Nothing changes "

@@ -301,14 +301,18 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir) -> dict:
     deleted: {(page index, line index)}; keeps: {bank line index: keep}. ValueError when it cannot be written."""
     pages_dir = Path(pages_dir)
     pages, fresh = {}, set()
-    for p in proposal["pages"]:
+    for p, lp in zip(proposal["pages"], lesson["pages"]):
         if p["new"] or p["added"]:   # a known page gaining nothing is not rewritten
             path = pages_dir / f"{p['id']}.yaml"
             if p["new"] and os.path.lexists(path):
                 raise ValueError(f"page {p['id']} exists now; teach it again")
             if p["new"]:
                 fresh.add(path)
-            pages[path] = yaml.safe_dump(p["yaml"], sort_keys=False, allow_unicode=True).encode()
+                head = studio.draft_head(f"lesson for {lesson.get('flow') or 'Studio'}", lp["url"]).encode()
+            else:   # a known page keeps its header comments (a draft's Start link)
+                lines = (raw[path] if raw and path in raw else path.read_bytes()).splitlines(keepends=True)
+                head = b"".join(lines[:next((i for i, x in enumerate(lines) if not x.startswith(b"#")), len(lines))])
+            pages[path] = head + yaml.safe_dump(p["yaml"], sort_keys=False, allow_unicode=True).encode()
     new = sum(1 for p in proposal["pages"] if p["new"])
     if lesson.get("flow") in SANDBOX:
         return {"pages": pages, "new": fresh, "flow": None, "digest": None, "ops": [],
