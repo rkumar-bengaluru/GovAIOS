@@ -363,3 +363,30 @@ def test_leaving_the_site_ends_the_lesson_without_reading_the_other_site(tmp_pat
     assert [p["title"] for p in lesson["pages"]] == ["Somewhere else"]
     assert live[-1]["lines"] == ["clicked Apply Now", "left elsewhere.example.org: lesson ended"]
     assert len(desk.samples) == 1   # stopped at the first look at the other site
+
+
+@pytest.mark.parametrize("after, job2", [(None, "done"), ("revoke", "revoked"), ("other", "revoked")])
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_approving_a_lesson_keeps_the_run_and_a_real_revoke_still_stops(tmp_path, monkeypatch, after, job2):
+    from govaios.approvals import Approvals
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")
+    ap = Approvals(tmp_path / "approvals.json")
+
+    def approved(card):   # the panel's approve_lesson: approvals.json now holds the new flow's digest
+        ap.approve_flow("job_apply", "n" * 64)
+        return "approved"
+
+    def stopped(card):   # job 1's stop card, after the lesson: the admin revokes, or approves yet another version
+        if after == "revoke":
+            ap.revoke_flow("job_apply")
+        elif after == "other":
+            ap.approve_flow("job_apply", "o" * 64)
+        return "next"
+    desk = TeachDesk([LOOK, {**LOOK, "down": True, "hit": "b1"}])
+    e, tasks, err, seen, _ = teach_run(tmp_path, monkeypatch, desk,
+                                       {"new_page": "teach", "lesson": approved, "stopped": stopped})
+    assert tasks[0]["reason"].startswith("page learned")
+    if job2 == "done":
+        assert err is None and tasks[1]["status"] == "done"
+    else:
+        assert str(err) == "revoked"

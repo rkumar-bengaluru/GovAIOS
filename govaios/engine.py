@@ -286,7 +286,8 @@ class Runner:
         """keep=False: a first-contact approval holds for this call only, never remembered (teach)."""
         if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
             raise Stop("emergency stop")
-        if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked since approve_flow
+        now = self.approvals.snapshot()["flows"].get(self.flow["id"])
+        if now is None or now not in (self.digest, getattr(self, "superseded", None)):   # revoked since approve_flow
             raise Stop("revoked")
         if destination is not NO_DEST and not destination:   # blank/None URL: fail closed
             self._audit("request", action=action, risk=risk, target=target, decision="deny",
@@ -913,6 +914,8 @@ class Runner:
         name = lessons.save(self.home, self.flow["id"], self.digest, step_id, obs.pages)
         self._audit("lesson", outcome="recorded", target=name)
         if self.card("lesson", name) == "approved":
+            # the panel approved the flow as the lesson rewrote it: this run keeps the flow it started with
+            self.superseded = self.approvals.snapshot()["flows"].get(self.flow["id"])
             raise TeachEnded("page learned: it is used from the next run")
         raise TeachEnded("lesson discarded")
 
