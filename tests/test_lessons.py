@@ -194,3 +194,12 @@ def test_shared_answer_does_not_pick_a_key(tmp_path):
                                          ev("choose", "combo_box", "Remote ok?", "Yes")]))
     ops = lessons.propose(les, tmp_path / "pages", bank)["bank"]
     assert [(o["op"], o["key"]) for o in ops] == [("add", "willing_to_relocate")]
+
+
+def test_failed_write_leaves_no_lesson(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(lessons.json, "dumps", boom)
+    with pytest.raises(OSError):
+        lessons.save(tmp_path, "job_apply", "d", "s", [page(tree(), [])])
+    assert list((tmp_path / "lessons").iterdir()) == []

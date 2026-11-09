@@ -279,7 +279,8 @@ class Runner:
         return ok, how
 
     # governance gate for every side effect
-    def gate(self, action, risk, target=None, destination=NO_DEST, question=None):
+    def gate(self, action, risk, target=None, destination=NO_DEST, question=None, keep=True):
+        """keep=False: a first-contact approval holds for this call only, never remembered (teach)."""
         if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
             raise Stop("emergency stop")
         if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked since approve_flow
@@ -301,7 +302,7 @@ class Runner:
         self._audit("request", action=action, risk=risk, target=target, destination=dest, decision=verdict,
                     approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how,
                     shown=self.shown if asked else None)
-        if remember:   # only once the approval is on record
+        if remember and keep:   # only once the approval is on record
             self.approvals.approve_destination(self.flow["id"], origin(destination))
         if verdict != "allow":
             raise Denied(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
@@ -855,9 +856,15 @@ class Runner:
         if terms.verdict(self.home, url, declared) != "allowed" and (
                 self.card("terms", site) != "checked" or terms.verdict(self.home, url, declared) != "allowed"):
             raise Stop("site terms do not allow a personal agent")
-        if site not in declared:   # in memory, this run only; first contact asks for Touch ID
-            self.flow["destinations"] = [*self.flow["destinations"], site]
-        self.gate("read_page", "read", destination=url)
+        before = self.flow["destinations"]
+        if site not in declared:   # in memory, this run only; Touch ID each time, never remembered: the
+            self.flow["destinations"] = [*before, site]   # lesson's own approval is where a site joins the flow
+        try:
+            self.gate("read_page", "read", destination=url, keep=False)
+        except BaseException:
+            self.flow["destinations"] = before   # refused: never read (or captured) after all
+            raise
+        allowed = {origin(d) for d in self.flow["destinations"]}
         self.d.teach_tab(self.app)
         obs = observer.Observer(self.d, self.app, self.d.same)
         lines, last = [], [time.monotonic()]
@@ -866,12 +873,19 @@ class Runner:
             return self.d.web_root(self.app)
 
         def tick():
+            left = []
             try:
-                evs = obs.feed(self.d.observe_sample(self.app), snap)
+                sample = self.d.observe_sample(self.app)
+                if sample.get("tab") and origin(sample.get("url") or "") not in allowed:
+                    # never snapshot a site not approved for this lesson: end it as if the tab closed.
+                    # shortcut: fails closed on any other site; ask terms + Touch ID there when lessons span sites
+                    left = [f"left {(urlsplit(sample.get('url') or '').hostname or 'the site')[:100]}: lesson ended"]
+                    sample = {"tab": False}
+                evs = obs.feed(sample, snap)
             except Exception:   # the window closed mid-look: the teach tab is gone
                 evs = obs.feed({"tab": False}, snap)
-            if evs:
-                lines.extend(_lesson_line(e) for e in evs)
+            if evs or left:
+                lines.extend([*(_lesson_line(e) for e in evs), *left])
                 del lines[:-LIVE_LINES]
                 write_json(self.home, LESSON_LIVE, {"run": self.run_id, "lines": lines})
                 last[0] = time.monotonic()

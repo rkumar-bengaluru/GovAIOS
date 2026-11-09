@@ -328,3 +328,38 @@ def test_idle_teaching_ends_and_an_empty_lesson_is_not_saved(tmp_path, monkeypat
     e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, TeachDesk(forever=LOOK), {"new_page": "teach"})
     assert tasks[0]["reason"] == "lesson cancelled" and tasks[1]["status"] == "done"
     assert not lessons_written(tmp_path) and not live
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_denied_touch_id_never_reads_or_captures_the_site(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: (False, "biometric"))
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")
+    desk = TeachDesk([LOOK])
+    e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, desk, {"new_page": "teach"})
+    assert tasks[0]["reason"].startswith("denied read_page") and tasks[1]["status"] == "done"
+    assert not any(x.get("action") == "capture" and x.get("outcome") == "done" and x.get("item") == 1 for x in e)
+    assert not (tmp_path / "captures").exists() and desk.samples == [LOOK] and not lessons_written(tmp_path)
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_teach_approval_is_not_remembered(tmp_path, monkeypatch):
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")
+    desk = TeachDesk([LOOK, {**LOOK, "down": True, "hit": "b1"}])
+    e, tasks, err, seen, _ = teach_run(tmp_path, monkeypatch, desk, {"new_page": "teach", "lesson": "approved"})
+    assert tasks[0]["reason"].startswith("page learned")
+    from govaios.approvals import Approvals
+    assert not Approvals(tmp_path / "approvals.json").destination_ok("job_apply", "https://apply.example.invalid")
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_leaving_the_site_ends_the_lesson_without_reading_the_other_site(tmp_path, monkeypatch):
+    terms.record(tmp_path, ODD, "allowed", "https://example.invalid/terms", "ok")
+    other = {**LOOK, "url": "https://elsewhere.example.org/p", "title": "Elsewhere"}
+    desk = TeachDesk([LOOK, {**LOOK, "down": True, "hit": "b1"}, other, {**other, "down": True, "hit": "b1"}])
+    e, tasks, err, seen, live = teach_run(tmp_path, monkeypatch, desk, {"new_page": "teach", "lesson": "approved"})
+    assert tasks[0]["reason"].startswith("page learned")
+    [name] = lessons_written(tmp_path)
+    lesson = json.loads((tmp_path / "lessons" / name).read_text())
+    assert [p["title"] for p in lesson["pages"]] == ["Somewhere else"]
+    assert live[-1]["lines"] == ["clicked Apply Now", "left elsewhere.example.org: lesson ended"]
+    assert len(desk.samples) == 1   # stopped at the first look at the other site

@@ -39,9 +39,15 @@ def save(home, flow_id, flow_digest, step_id, pages) -> str:
            "pages": [{"url": url(p["url"]), "title": p["title"], "tree": capture.tree(p["tree"]),
                       "events": p["events"]} for p in pages]}
     name = f"{datetime.now():%Y%m%d-%H%M%S-%f}-{flow_id}.json"
-    fd = os.open(d / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(json.dumps(doc, ensure_ascii=False, indent=1).encode())
+    tmp = d / (name + ".tmp")   # never a half-written lesson under its real name
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(json.dumps(doc, ensure_ascii=False, indent=1).encode())
+        os.replace(tmp, d / name)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     for old in sorted(p for p in d.iterdir() if p.name.endswith(f"-{flow_id}.json"))[:-KEEP]:
         old.unlink()
     return name
