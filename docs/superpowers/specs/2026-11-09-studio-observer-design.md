@@ -127,7 +127,16 @@ During a lesson it watches **only the teach tab's window** in Chrome, and record
 4. **First slice: only `classify_page`'s unknown page offers Teach.** The learned page is added as a case of that step. The other "wrong page" stops (a click's page check, "left the form page", "still not on the expected page") keep Next job / End and come in a later slice, each converted to a classify point.
 5. **A lesson writes the flow's copy in the apps folder, which the admin owns** (install never overwrites it). It never writes the repo's shipped file: Claude copies a learned page back into the repo when asked. The **panel** writes the files after the Touch ID approval, never the engine mid-run (it is sandboxed and busy). "Shipped apps stay revoke-only" is about deleting only.
 
+## Admin's answer (2026-11-09): sensitive fields
+
+"This is my data and if it is part of the bank then feel free to use it."
+
+- A bank answer the admin approved from a lesson **may fill a field that `formfill.RESTRICTED` holds back today**: passport, PAN, gender, veteran status, consent boxes such as "I agree".
+- The key is marked `learned: true` in the bank, and only marked keys lift the restriction. Fields with no such answer stay on the "fill yourself" list, as now.
+- The What I learned screen labels these lines *sensitive*, so the admin sees them before approving.
+
 ## Open questions for the admin
 
-1. A submit click you made during the lesson: played back as *hand over* (my call), or replayed with its own Touch ID each run?
-2. During a lesson, should the other jobs' tabs wait, or can the run carry on with other jobs in the background? (My call: the run waits; one thing at a time.)
+Both are open, with defaults to plan on:
+1. A submit click the admin made during a lesson: played back as *hand over* (my call), or replayed with its own Touch ID each run?
+2. During a lesson, do the other jobs wait (my call: yes, one thing at a time), or does the run carry on with them in the background?
