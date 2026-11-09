@@ -87,7 +87,7 @@ def run_sandbox(tmp_path, desk, choices, monkeypatch, site=SITE, run_id="r1", fi
 def test_flow_is_read_only_with_a_site_input():
     wf = yaml.safe_load(FLOW.read_text())["workflow"]
     assert wf["app"] == "Web Sandbox" and wf["permissions"]["max_element_risk"] == "read"
-    assert set(wf["permissions"]["allow"]) == {"launch_application", "navigate", "read_page", "ask_admin", "write_draft"}
+    assert set(wf["permissions"]["allow"]) == {"launch_application", "navigate", "read_page", "ask_admin", "write_draft", "teach"}
     assert wf["destinations"] == ["https://www.google.com"] and wf["destination_inputs"] == ["site"]
     assert pages_used(wf) == {"google_home"}
 
@@ -104,6 +104,13 @@ def test_captures_each_page_the_admin_chooses(tmp_path, monkeypatch):
     files = sorted((tmp_path / "captures").iterdir())
     assert len(files) == 2 and json.loads(files[0].read_text())["reason"] == "sandbox"
     assert any(x.get("decision") == "deny" and x.get("action") == "read_page" for x in e)   # the other site
+
+
+def test_teach_that_ends_does_not_end_the_sandbox(tmp_path, monkeypatch):
+    d = SiteDesk(pages=[SITE])
+    e, err, _ = run_sandbox(tmp_path, d, ["teach", "skip", "capture", "done"], monkeypatch)   # skip: no lesson
+    assert err is None and e[-1]["kind"] == "flow_end"
+    assert len(applyfiles.read_json(tmp_path, applyfiles.SANDBOX)["pages"]) == 1
 
 
 def test_site_refused_at_touch_id_stops(tmp_path, monkeypatch):

@@ -14,6 +14,10 @@ Design: `docs/superpowers/specs/2026-11-08-joblens-tasks-design.md`. Branch `fea
    ```
 4. In the panel, approve the four Drafts: **JobLens**, **SyncJobLens**, **Web Sandbox** and **Inbox Brief** (the morning brief's new short name). Each file changed, so each needs approving once.
 
+Before you start: run the observer spike once from Terminal (it still has Accessibility): `.venv/bin/python spikes/plan5/observe_spike.py`. Paste its `done.` line to Claude.
+
+Both flow files changed (JobLens and Web Sandbox allow `teach`), so after copying, approve **JobLens** and **Web Sandbox** again in the panel. The copy command in step 3 already includes both.
+
 ## A. JobLens — one task per Ready job
 
 You need at least one job with Status **Ready** in JobLens (`http://localhost:8100/`). Both of today's jobs are Submitted. Either sync a new one, or set WIN back to Ready:
@@ -51,6 +55,17 @@ If a job hits a site the flow doesn't know (Workable, a direct company page), on
 2. Compose an app, for example: Open page 1, Click a link on page 1, Open page 2, Fill the form on page 2, Hand over. Then press **Save as a Draft app**.
 3. Approve it in Drafts and run it. Expected: it follows your steps and never clicks a submit-rated button.
 4. **For each**: capture a list page (Himalayas matches, say). Its line on the Studio page should offer "For each item in items_1 on …". Compose: Open list → For each item → Click the item → Open the detail page → Hand over → End of for each. Expected: one task and one tab per item.
+
+## D. Teach a page
+
+First-version limits: a lesson ends if the tab goes to another site, and a password field is always "fill yourself".
+
+1. Run `/joblens` with eClerx Ready. At Oracle, choose **Teach this page** on the card. (In Web Sandbox, the same button is on the **Web sandbox** card.)
+2. Terms: open the site's terms and record your verdict.
+3. Touch ID.
+4. Do the page in Chrome, then close the tab.
+5. Review **What I learned**, then approve with Touch ID.
+6. Run again. Expected: it gets past the page you taught.
 
 ## C. SyncJobLens
 

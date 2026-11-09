@@ -142,3 +142,10 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
   unlocked GUI session, which conflicts with stop-on-lock.
 - Unattended execution.
 - Windows adapter.
+
+## Studio observer: deferred from the first slice
+
+- Pause for terms + Touch ID when a lesson moves to a new origin (today the lesson just ends).
+- Consent checkboxes can't be filled from the bank yet.
+- Type then Enter misses the last value.
+- Reading a site's terms for the admin (Plan 3, second slice).

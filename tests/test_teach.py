@@ -218,8 +218,8 @@ def teach_run(tmp_path, monkeypatch, desk, answers, allow_teach=True, run_id="r1
     """job_apply with `teach` allowed (a copy); answers: card kind -> reply (a callable gets the card); the teaching
     card is left to end by itself unless answered."""
     wf = yaml.safe_load(ja.FLOW.read_text())
-    if allow_teach:
-        wf["workflow"]["permissions"]["allow"].append("teach")
+    allow = wf["workflow"]["permissions"]["allow"]
+    allow[:] = [a for a in allow if a != "teach"] + (["teach"] if allow_teach else [])
     flow = tmp_path / "job_apply.yaml"
     flow.write_text(yaml.safe_dump(wf))
     monkeypatch.setattr(ja, "FLOW", flow)

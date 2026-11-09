@@ -303,6 +303,8 @@ def answer_cards(tmp_path, choose, seen):
 
 def run_apply(tmp_path, desk, choose=lambda c: "next", seen=None, run_id="r1"):
     wf = yaml.safe_load(FLOW.read_text())
+    if FLOW == REPO / "flows" / "job_apply.yaml":   # the shipped file: these tests are about stopping; test_teach.py teaches
+        wf["workflow"]["permissions"]["allow"].remove("teach")
     wf["workflow"]["browser"]["account"] = ACCT   # the fake Google page's account; the shipped file is untouched
     src = tmp_path / "src"
     (src / "flows").mkdir(parents=True)
@@ -502,3 +504,7 @@ def test_two_jobs_with_the_same_client_and_role_are_both_done(tmp_path, monkeypa
     d.web_root, d.click = web_root, click
     e, tasks, err = run_apply(tmp_path, d)
     assert err is None and [t["status"] for t in tasks] == ["done", "done"] and rows == [1, 2]
+
+
+def test_shipped_joblens_flow_allows_teach():
+    assert "teach" in yaml.safe_load(FLOW.read_text())["workflow"]["permissions"]["allow"]

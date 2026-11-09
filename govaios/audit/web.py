@@ -779,7 +779,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     "in Chrome yourself. Press Next job to go on, or End.", (("next", "Next job"), ("end", "End")),
                     "{name}, {job} stopped: {label}."),
         "sandbox": ("Web sandbox", "Go to the page you want in Chrome, then press Capture this page. Done ends the "
-                    "sandbox.", (("capture", "Capture this page"), ("done", "Done")), None),
+                    "sandbox.", (("capture", "Capture this page"), ("teach", "Teach this page"), ("done", "Done")), None),
         "new_page": ("This page is new", "{app} can't go on: this page is new. Teach it?",
                      (("teach", "Teach this page"), ("skip", "Next job")),
                      "{name}, {app} can't go on: this page is new. Teach it?"),

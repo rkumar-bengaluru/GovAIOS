@@ -40,6 +40,7 @@ LIVE_LINES = 50
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
              "the browser has no window in front")
+TEACH_ENDS = ("lesson ", "page learned", "unexpected page", "site terms do not allow")
 
 
 def _ends_run(e):
@@ -626,6 +627,13 @@ class Runner:
             choice = self.card("sandbox", f"{len(pages)} captured")
             if choice == "done":
                 return
+            if choice == "teach":
+                try:
+                    self.teach(self.step)
+                except Stop as e:   # a teach outcome ends the lesson, not the sandbox; safety stops go on
+                    if not str(e).startswith(TEACH_ENDS):
+                        raise
+                continue
             url = self.d.current_url(self.app)
             try:
                 self.gate("read_page", "read", destination=url)
