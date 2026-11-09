@@ -845,7 +845,8 @@ class Runner:
         task = self._current_task()
         cap, self.last_capture = getattr(self, "last_capture", None), None   # the page saved for this card, if any
         reply = self._ask({"card": {"kind": kind, "label": label[:300], "capture": cap if kind != "sandbox" else None,
-                                    "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}}, tick)
+                                    "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}}, tick,
+                          TEACH_IDLE_S if kind in ("lesson", "terms") else ASK_TIMEOUT_S)   # reading terms or a lesson takes time
         choice = reply.get("card")
         if choice not in CARDS[kind]:
             raise Stop("bad reply")
@@ -1077,14 +1078,14 @@ class Runner:
             else:
                 a["yourself"].append(f.label)
 
-    def _ask(self, body, tick=None):
+    def _ask(self, body, tick=None, timeout=ASK_TIMEOUT_S):
         """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it).
         tick (the teaching card): called every 0.2 s, its reply dict ends the wait; it keeps its own idle timeout."""
         try:
             remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
             self.asks = getattr(self, "asks", 0) + 1   # each ask unique: a stale reply never answers the next one
             write_json(self.home, ASK, {"run": self.run_id, "seq": self.asks, **body})
-            deadline = time.monotonic() + ASK_TIMEOUT_S
+            deadline = time.monotonic() + timeout
             while True:
                 reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet
                 if reply and reply.get("run") == self.run_id:

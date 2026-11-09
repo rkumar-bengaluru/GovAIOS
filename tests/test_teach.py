@@ -419,3 +419,24 @@ def test_navigation_during_the_snapshot_never_stores_the_other_site(tmp_path, mo
     text = (tmp_path / "lessons" / name).read_text()
     assert [p["title"] for p in json.loads(text)["pages"]] == ["Somewhere else"] and "Apply here" not in text
     assert live[-1]["lines"][-1] == "left elsewhere.example.org: lesson ended" and desk.samples == [LOOK]
+
+
+@pytest.mark.parametrize("kind, reply, ok", [("lesson", "approved", True), ("terms", "checked", True),
+                                             ("fix", "continue", False)])
+def test_lesson_and_terms_cards_wait_past_the_ask_timeout(tmp_path, monkeypatch, kind, reply, ok):
+    import itertools
+    import types
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
+    f, _ = make(tmp_path, [])
+    r = Runner(f, Desk(), tmp_path)
+    r.approvals.approve_flow("teach", r.digest)
+    r.run_id = "r1"
+    clock = itertools.count(0, 100)   # 100 s per look: the reply comes after 1200 s, past ASK_TIMEOUT_S
+    monkeypatch.setattr(engine, "time", types.SimpleNamespace(sleep=lambda s: None, monotonic=lambda: next(clock)))
+    looks = itertools.count()
+    monkeypatch.setattr(engine, "read_json", lambda h, n: {"run": "r1", "card": reply} if next(looks) >= 12 else None)
+    if ok:
+        assert r.card(kind, "x") == reply
+    else:
+        with pytest.raises(Stop, match="no answer from admin"):
+            r.card(kind, "x")
