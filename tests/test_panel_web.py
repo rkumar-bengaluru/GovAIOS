@@ -1812,7 +1812,7 @@ def test_studio_compose_refuses_a_submit_click(cc):
 
 # --- Studio lessons: the teach cards, the terms form, What I learned and its Touch ID approval ---
 
-def _lesson(P, flow="job_apply", digest=None):
+def _lesson(P, flow="job_apply", digest=None, site="https://jobs.acme.example"):
     """A saved lesson of two pages on a new site, stuck at job_apply's on_form step; returns its name."""
     from govaios import lessons
     from govaios.desktop import Node
@@ -1825,10 +1825,10 @@ def _lesson(P, flow="job_apply", digest=None):
     a = Node("document", "Apply | Acme", children=[Node("heading", "Apply <b>here</b>"), Node("link", "Next"),
                                                    Node("text_field", "Email"), Node("text_field", "Passport number")])
     b = Node("document", "Review | Acme", children=[Node("heading", "Review"), Node("button", "Submit")])
-    pages = [{"url": "https://jobs.acme.example/apply?t=1", "title": a.name, "tree": a,
+    pages = [{"url": f"{site}/apply?t=1", "title": a.name, "tree": a,
               "events": [ev("fill", "text_field", "Email", "a@x.example"),
                          ev("fill", "text_field", "Passport number", "P<script>1"), ev("click", "link", "Next")]},
-             {"url": "https://jobs.acme.example/review", "title": b.name, "tree": b,
+             {"url": f"{site}/review", "title": b.name, "tree": b,
               "events": [ev("click", "button", "Submit")]}]
     return lessons.save(P.home, flow, digest or ja.digest, "on_form", pages), ja
 
@@ -2014,3 +2014,102 @@ def test_terms_post_validates_and_records(cc):
     assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": "checked"}
     cc.post("/apply/card", ask="x", choice="checked")   # checked only through the form
     assert _log(cc.home, "apply_card")[-1]["outcome"] == "checked" and len(_log(cc.home, "apply_card")) == 1
+
+
+def _approved_now(P):
+    return next(a for a in list_apps(P.flows, P.home) if a.id == "job_apply").approved
+
+
+def test_bound_page_changed_during_touch_id_not_approved(cc, monkeypatch):
+    from govaios import auth
+    name, ja = _lesson(cc)
+    p = _lesson_form(cc, name)[0]
+    gh = cc.flows.parent / "pages" / "greenhouse_application.yaml"   # bound by on_form
+    monkeypatch.setattr(auth, "prove", lambda r, h, **k: (gh.write_text(gh.read_text() + "# swapped\n"), (True, "biometric"))[1])
+    cc.post("/lesson/approve", name=name, p=p)
+    assert not _approved_now(cc) and _log(cc.home, "lesson")[-1]["outcome"] == "error"
+    assert Approvals(cc.home / "approvals.json").snapshot()["flows"]["job_apply"] == ja.digest   # the old one only
+
+
+def test_http_site_is_never_added(cc):
+    name, _ = _lesson(cc, site="http://jobs.acme.example")
+    before, n = _snap(cc), len(cc.asked)
+    cc.post("/lesson/approve", name=name, p=_lesson_form(cc, name)[0])
+    assert _tells(cc)[-1] == "GOV-AIOS -> Not approved: only https sites can be added, not http://jobs.acme.example."
+    assert _snap(cc) == before and len(cc.asked) == n
+
+
+def test_site_added_normalised(cc):
+    name, ja = _lesson(cc, site="https://Jobs.Acme.Example:443")
+    cc.post("/lesson/approve", name=name, p=_lesson_form(cc, name)[0])
+    assert yaml.safe_load(ja.path.read_text())["workflow"]["destinations"][-1] == "https://jobs.acme.example"
+
+
+def test_revoked_flow_is_not_reapproved_by_a_lesson(cc):
+    name, ja = _lesson(cc)
+    p = _lesson_form(cc, name)[0]
+    Approvals(cc.home / "approvals.json").revoke_flow("job_apply")
+    before, n = _snap(cc), len(cc.asked)
+    cc.post("/lesson/approve", name=name, p=p)
+    assert _tells(cc)[-1] == "GOV-AIOS -> Approve Job Apply first, then add what it learned."
+    assert _snap(cc) == before and len(cc.asked) == n and not _approved_now(cc)
+
+
+@pytest.mark.parametrize("how", ["no_session", "bad_csrf", "origin"])
+def test_lesson_approve_needs_session_csrf_and_origin(cc, how):
+    name, _ = _lesson(cc)
+    p = _lesson_form(cc, name)[0]
+    before, n = _snap(cc), len(cc.asked)
+    body = {"csrf": cc.csrf(), "name": name, "p": p}
+    if how == "no_session":
+        s = cc.req("/lesson/approve", "POST", body=body)[0]
+    elif how == "bad_csrf":
+        s = cc.req("/lesson/approve", "POST", cookie=cc.sid, body={**body, "csrf": "x"})[0]
+    else:
+        s = cc.req("/lesson/approve", "POST", cookie=cc.sid, body=body, headers={"Origin": "http://evil.example"})[0]
+    assert s == 403 and _snap(cc) == before and len(cc.asked) == n
+
+
+def test_bank_failure_midway_leaves_flow_unapproved(cc, monkeypatch):
+    from govaios import formfill
+    name, _ = _lesson(cc)
+    p = _lesson_form(cc, name)[0]
+    monkeypatch.setattr(formfill, "apply_ops", lambda *a: (_ for _ in ()).throw(formfill.BankError("bank full")))
+    cc.post("/lesson/approve", name=name, p=p)
+    assert not _approved_now(cc) and _log(cc.home, "lesson")[-1]["outcome"] == "error"
+    assert _log(cc.home, "lesson")[-1]["reason"] == "BankError"
+
+
+def test_new_page_made_during_touch_id_is_never_replaced(cc, monkeypatch):
+    from govaios import auth
+    name, _ = _lesson(cc)
+    p = _lesson_form(cc, name)[0]
+    other = cc.flows.parent / "pages" / "jobs_acme_example_review_acme.yaml"
+    monkeypatch.setattr(auth, "prove", lambda r, h, **k: (other.write_text("mine\n"), (True, "biometric"))[1])
+    cc.post("/lesson/approve", name=name, p=p)
+    assert other.read_text() == "mine\n" and "jobs_acme" not in (cc.flows / "job_apply.yaml").read_text()
+    assert _log(cc.home, "lesson")[-1]["outcome"] == "error"
+
+
+def test_lesson_page_warns_about_end_and_other_apps(cc):
+    pages = cc.flows.parent / "pages"
+    (pages / "acme_apply.yaml").write_text(
+        "page:\n  id: acme_apply\n  identification: {title_matches: '^Apply \\| Acme$', anchors: [heading]}\n"
+        "  elements:\n    heading: {role: heading, name: 'Apply <b>here</b>', risk: read}\n")
+    other = cc.flows / "other.yaml"
+    other.write_text((cc.flows / "job_apply.yaml").read_text().replace("id: job_apply", "id: other_flow", 1)
+                     .replace('app: "Job Apply"', 'app: "Other <i>app</i>"', 1)
+                     .replace("greenhouse_application: continue", "acme_apply: continue", 1))
+    name, _ = _lesson(cc)
+    page = _lesson_form(cc, name)[1]
+    assert "acme_apply</code> \u00b7 known" in page and "Adds to this page: next</p>" in page
+    assert "Changing this page means approving again: Other &lt;i&gt;app&lt;/i&gt;." in page
+    assert "the run does not end there" not in page
+    # the last page already has a case in the step: no learned case, so no then: end
+    on_form = cc.flows / "job_apply.yaml"
+    on_form.write_text(on_form.read_text().replace("lever_application: continue", "lever_application: continue\n"
+                                                   "        jobs_acme_example_review_acme: continue", 1))
+    (pages / "jobs_acme_example_review_acme.yaml").write_text(
+        "page:\n  id: jobs_acme_example_review_acme\n  identification: {title_matches: '^Review \\| Acme$'}\n"
+        "  elements: {}\n")
+    assert "the run does not end there" in _lesson_form(cc, name)[1]

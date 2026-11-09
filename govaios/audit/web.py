@@ -24,7 +24,7 @@ import yaml
 from govaios import agents, applyfiles, auth, lessons, runstate, studio, terms
 import os
 from govaios.formfill import BankError, add_answer, load_bank, ok_value, read_bank, stage_text
-from govaios.approvals import Approvals, read_bound
+from govaios.approvals import Approvals, pages_used, read_bound
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
 from govaios.audit.verify import verify
@@ -1419,7 +1419,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     lesson_lock = threading.Lock()   # one lesson approval (and its Touch ID) at a time
 
     def lesson_ctx(name):
-        """(lesson, proposal, app or None, the stuck step's case ids). ValueError/OSError for a bad or missing one."""
+        """(lesson, proposal, app or None, the stuck step's case ids, {known page gaining elements: names of the
+        other apps that use it}). ValueError/OSError for a bad or missing one."""
         if not flows_dir:
             raise ValueError("no apps folder")
         lesson = lessons.load(home, name)
@@ -1430,17 +1431,22 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if app is not None and lesson.get("flow") not in lessons.SANDBOX:
             st = lessons._find(yaml.safe_load(app.path.read_bytes())["workflow"]["steps"], lesson.get("step"))
             cases = set((st or {}).get("on_match", {}))
-        return lesson, proposal, app, cases
+        grown, others = {p["id"] for p in proposal["pages"] if p["added"]}, {}
+        for a in apps() if grown else ():
+            if a.id != lesson.get("flow"):
+                for pid in grown & pages_used(yaml.safe_load(a.path.read_bytes())["workflow"]):
+                    others.setdefault(pid, []).append(a.name)
+        return lesson, proposal, app, cases, others
 
     def lesson_page(name, csrf):
         try:
-            lesson, proposal, _, cases = lesson_ctx(name)
+            lesson, proposal, _, cases, others = lesson_ctx(name)
         except BankError as e:
             return _page(f"<h1>What I learned</h1><p class=fail>Your answer bank has an error: {escape(str(e))}. "
                          f"<a href='/apply/bank'>Fix it</a> first.</p>", here="/")
         except (ValueError, OSError, KeyError, TypeError):
             return None
-        return _page(lesson_ui.page(name, lesson, proposal, cases, hidden(csrf)), here="/")
+        return _page(lesson_ui.page(name, lesson, proposal, cases, others, hidden(csrf)), here="/")
 
     def lesson_reply(name, choice):
         """Answer the engine's lesson card for this lesson, if it is still waiting."""
@@ -1466,24 +1472,28 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return None
         back = f"/lesson/{name}"
         try:
-            lesson, proposal, app, _ = lesson_ctx(name)
+            lesson, proposal, app, _, _ = lesson_ctx(name)
             deleted, keeps = lesson_ui.edits(proposal, f)
         except (ValueError, OSError, KeyError, TypeError):
             return None
         fid, sandbox, pages_dir = lesson.get("flow"), lesson.get("flow") in lessons.SANDBOX, flows_dir.parent / "pages"
+        raw = None
         if not sandbox:
-            try:
-                same = app is not None and read_bound(app.path, pages_dir)[0] == lesson.get("digest")
+            try:   # these bytes are what is built on and approved: the flow is never read again
+                d, raw = read_bound(app.path, pages_dir) if app is not None else (None, None)
             except (OSError, KeyError, ValueError, yaml.YAMLError):
-                same = False
-            if not same:
+                d = None
+            if d is None or d != lesson.get("digest"):
                 tell(f"{app.name if app else fid} changed since this lesson; teach it again")
+                return back
+            if not Approvals(approvals_path).flow_ok(app.id, d):   # revoked: a lesson never re-approves it
+                tell(f"Approve {app.name} first, then add what it learned.")
                 return back
         if f.get("p") != lesson_ui.digest(proposal):
             tell("This lesson changed since you opened it. Look at it again.")
             return back
         try:
-            plan = lessons.build(lesson, proposal, deleted, keeps, None if sandbox else app.path, pages_dir)
+            plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back

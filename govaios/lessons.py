@@ -5,9 +5,11 @@ Dev mode: lessons are NOT masked (values as typed; secure fields are already bla
 shortcut: unmasked, add masking before this leaves dev. Files are 0600 under <data home>/lessons/, last KEEP per flow.
 """
 import copy
+import hashlib
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -16,7 +18,7 @@ import yaml
 
 from .policy import origin
 from . import capture, engine, formfill, studio
-from .approvals import read_bound
+from .approvals import pages_used, read_bound
 from .formfill import FIELD_ROLES, Field, new_key, normalize, restricted
 
 DIR = "lessons"
@@ -245,22 +247,39 @@ def _do(line, page):
     return {"action": _DO[kind]} if kind in _DO else None
 
 
-def build(lesson, proposal, deleted, keeps, flow_path, pages_dir) -> dict:
-    """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "flow": (path, bytes) | None,
-    "ops": bank ops, "counts": str}. deleted: {(page index, line index)}; keeps: {bank line index: keep}.
-    Raises ValueError when it cannot be written as approved."""
+def _site(url):
+    """https://host[:port] for a new destination, by the engine's rule for typed sites (engine destination_inputs)."""
+    try:
+        u = urlsplit(url)
+        port = u.port
+    except ValueError:
+        raise ValueError("a page's address is not valid") from None
+    if u.scheme != "https" or u.username or u.password or not u.hostname:
+        raise ValueError(f"only https sites can be added, not {u.scheme}://{u.hostname or ''}"[:200])
+    return f"https://{u.hostname.lower()}" + (f":{port}" if port not in (None, 443) else "")
+
+
+def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir) -> dict:
+    """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
+    "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
+    raw: read_bound's {path: bytes} from the digest check: the flow is built from those bytes, never re-read.
+    deleted: {(page index, line index)}; keeps: {bank line index: keep}. ValueError when it cannot be written."""
     pages_dir = Path(pages_dir)
-    pages = {}
+    pages, fresh = {}, set()
     for p in proposal["pages"]:
         if p["new"] or p["added"]:   # a known page gaining nothing is not rewritten
             path = pages_dir / f"{p['id']}.yaml"
             if p["new"] and os.path.lexists(path):
                 raise ValueError(f"page {p['id']} exists now; teach it again")
+            if p["new"]:
+                fresh.add(path)
             pages[path] = yaml.safe_dump(p["yaml"], sort_keys=False, allow_unicode=True).encode()
     new = sum(1 for p in proposal["pages"] if p["new"])
     if lesson.get("flow") in SANDBOX:
-        return {"pages": pages, "flow": None, "ops": [], "counts": f"pages {len(pages)} ({new} new), steps 0, bank 0"}
-    doc = yaml.safe_load(Path(flow_path).read_bytes())
+        return {"pages": pages, "new": fresh, "flow": None, "digest": None, "ops": [],
+                "counts": f"pages {len(pages)} ({new} new), steps 0, bank 0"}
+    flow_path = Path(flow_path)
+    doc = yaml.safe_load(raw[flow_path])
     wf = doc["workflow"]
     step = _find(wf["steps"], lesson.get("step"))
     if step is None or step.get("action") != "classify_page":
@@ -285,9 +304,8 @@ def build(lesson, proposal, deleted, keeps, flow_path, pages_dir) -> dict:
         on["unknown"] = on.pop("unknown")   # stays the last case, as written by hand
     dests = wf.setdefault("destinations", [])
     for lp in lesson["pages"]:
-        o = origin(lp["url"])
-        if o not in dests:
-            dests.append(o)
+        if origin(lp["url"]) not in dests and (site := _site(lp["url"])) not in dests:
+            dests.append(site)
     try:
         engine.check_learned(wf["steps"])
     except engine.Stop as e:
@@ -295,22 +313,34 @@ def build(lesson, proposal, deleted, keeps, flow_path, pages_dir) -> dict:
     data = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True).encode()
     if yaml.safe_load(data) != doc:
         raise ValueError("the new flow does not read back the same")
+    h = hashlib.sha256(data)   # read_bound's digest, over the bytes approved here: what the files must hold after
+    for pid in sorted(pages_used(doc["workflow"])):
+        pp = pages_dir / f"{pid}.yaml"
+        try:   # a page bound only now (a known page's new case) is read here, before Touch ID
+            h.update(pages[pp] if pp in pages else raw[pp] if pp in raw else pp.read_bytes())
+        except FileNotFoundError:
+            raise ValueError(f"page {pid} is missing") from None
     ops = [{**o, "keep": keeps.get(i, o["keep"])} for i, o in enumerate(proposal["bank"])]
     kept = sum(1 for o in ops if o["keep"] == "bank")
-    return {"pages": pages, "flow": (Path(flow_path), data), "ops": ops,
+    return {"pages": pages, "new": fresh, "flow": (flow_path, data), "digest": h.hexdigest(), "ops": ops,
             "counts": f"pages {len(pages)} ({new} new), steps {n}, bank {kept}"}
 
 
-def _put(path, data):
-    """Exclusive temp file beside path, then os.replace: a crash leaves the old file whole."""
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+def _put(path, data, new=False):
+    """A fresh temp file beside path, then os.replace (a crash leaves the old file whole); new: os.link instead,
+    which fails if a file appeared there meanwhile."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.replace(tmp, path)
+        os.chmod(tmp, 0o644)
+        if new:
+            os.link(tmp, path)
+            os.unlink(tmp)
+        else:
+            os.replace(tmp, path)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        Path(tmp).unlink(missing_ok=True)
         raise
 
 
@@ -318,9 +348,12 @@ def apply(plan, pages_dir, bank_path) -> str | None:
     """Write what build() made: pages, then the flow, then the bank ops. Returns the new flow digest, read back
     from the files as written (None for a sandbox lesson)."""
     for path, data in plan["pages"].items():
-        _put(path, data)
+        _put(path, data, path in plan["new"])
     if plan["flow"] is None:
         return None
     _put(*plan["flow"])
     formfill.apply_ops(Path(bank_path), plan["ops"])
-    return read_bound(plan["flow"][0], pages_dir)[0]
+    digest = read_bound(plan["flow"][0], pages_dir)[0]
+    if digest != plan["digest"]:   # a bound file changed during the Touch ID wait: not what was approved
+        raise ValueError("files changed while you approved")
+    return digest

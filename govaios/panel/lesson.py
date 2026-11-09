@@ -5,6 +5,8 @@ import json
 import re
 from html import escape
 
+from govaios import lessons
+
 KEEPS = (("bank", "Keep in bank"), ("job", "This job only"), ("drop", "Don't keep"))
 WORDS = {"click": "Click", "fill_form": "Fill the form from the bank", "attach_file": "Attach your CV",
          "hand_over": "Hand over: you check and submit", "hand_fill": "You fill this yourself"}
@@ -43,8 +45,9 @@ def _bank_line(i, o):
             f"<select id=keep{i} name='keep:{i}'>{opts}</select></li>")
 
 
-def page(name, lesson, proposal, flow_cases, hidden):
-    """The page body. flow_cases: page ids the flow's step already handles (their steps are not added)."""
+def page(name, lesson, proposal, flow_cases, others, hidden):
+    """The page body. flow_cases: page ids the flow's step already handles (their steps are not added);
+    others: {known page gaining elements: names of the other apps that use it}."""
     secs = []
     for i, p in enumerate(proposal["pages"]):
         lp = lesson["pages"][i] if i < len(lesson["pages"]) else {}
@@ -59,10 +62,18 @@ def page(name, lesson, proposal, flow_cases, hidden):
         added = (f"<p class=m>Adds to this page: {escape(', '.join(p['added']))}</p>" if p["added"] else "")
         handled = ("<p class=note>The flow already handles this page: these steps are not added.</p>"
                    if p["id"] in flow_cases else "")
+        if others.get(p["id"]):
+            handled += (f"<p class=note>Changing this page means approving again: "
+                        f"{escape(', '.join(others[p['id']]))}.</p>")
         secs.append(f"<section class=appcard><h2><code>{escape(p['id'])}</code> · {'new' if p['new'] else 'known'}"
                     f"</h2><p class=m>{escape(str(lp.get('title') or '')[:200])} "
                     f"<code>{escape(str(lp.get('url') or '')[:200])}</code></p>{added}{handled}"
                     f"<ol>{''.join(rows)}</ol></section>")
+    last = proposal["pages"][-1] if proposal["pages"] else None
+    if last and lesson.get("flow") not in lessons.SANDBOX and (last["id"] in flow_cases or not any(
+            s["keep"] and lessons._do(s, last) for s in last["steps"])):
+        secs.append("<p class=note>The last page gets no steps, so the run does not end there: it looks at the "
+                    "page again and stops if it does not know it.</p>")
     bank = "".join(_bank_line(i, o) for i, o in enumerate(proposal["bank"]))
     bank = f"<h2>Answer bank</h2><ul>{bank}</ul>" if bank else ""
     flow = escape(str(lesson.get("flow") or "Studio"))
