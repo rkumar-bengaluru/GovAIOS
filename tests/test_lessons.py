@@ -62,13 +62,15 @@ def test_submit_click_becomes_hand_over(tmp_path):
     les = lesson(tmp_path, page(t, [ev("click", "link", "Jobs"), ev("click", "button", "Submit"),
                                     ev("click", "button", "Send")]))
     [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
-    assert kinds(p) == ["click", "hand_over"]   # one hand_over, and it ends the page: none added
+    assert kinds(p) == ["click", "hand_over", "hand_over"]   # it ends the page: no final one added
+    assert [st["keep"] for st in p["steps"]] == [True, True, False]   # after the hand over: dead, shown off
     pid = p["id"]
     assert p["new"] and pid == "jobs_acme_example_apply_acme"
     assert p["steps"][0]["target"] == f"{pid}.link_jobs"
     els = p["yaml"]["page"]["elements"]
     assert els["link_jobs"]["risk"] == "navigate" and els["button_submit"]["risk"] == "submit"
-    assert "button_send" not in els   # trimmed: only identification + used elements
+    assert set(els) == {"heading_apply_for_engineer", "link_jobs", "button_submit", "button_send"}
+    assert p["added"] == []
     assert set(p["yaml"]["page"]["identification"]["anchors"]) <= set(els)
 
 
@@ -98,6 +100,7 @@ def test_known_page_reuses_its_id(tmp_path):
     assert (a["id"], a["new"]) == ("acme_apply", False)
     assert a["steps"] == [{"kind": "click", "label": "Next", "target": "acme_apply.next", "keep": True}]  # admin lowered it
     assert a["yaml"]["page"]["elements"] == known["page"]["elements"]
+    assert a["added"] == []
     assert b["new"] and b["id"] == "jobs_acme_example_other_2"   # never an existing file's name
     assert kinds(b) == ["click", "hand_over"]
     assert (pages / "acme_apply.yaml").read_text() == yaml.safe_dump(known)   # pure: nothing written
@@ -139,3 +142,55 @@ def test_lesson_name_validated(tmp_path):
         lessons.load(tmp_path, "../x.json")
     with pytest.raises(ValueError):
         lessons.save(tmp_path, "../x", "d", "s", [])
+
+
+def known_page(tmp_path, elements, anchors=("head",)):
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    els = {"head": {"role": "heading", "name": "Apply for Engineer", "risk": "read"}, **elements}
+    (pages / "acme.yaml").write_text(yaml.safe_dump({"page": {
+        "id": "acme", "identification": {"title_matches": "^Apply", "anchors": list(anchors)}, "elements": els}}))
+    return pages
+
+
+def test_known_page_gaining_an_element_lists_it(tmp_path):
+    pages = known_page(tmp_path, {})
+    les = lesson(tmp_path, page(tree(Node("link", "Jobs")), [ev("click", "link", "Jobs")]))
+    [p] = lessons.propose(les, pages, Bank())["pages"]
+    assert (p["new"], p["added"]) == (False, ["jobs"])
+    assert p["yaml"]["page"]["elements"]["jobs"] == {"role": "link", "name": "Jobs", "risk": "navigate"}
+
+
+def test_look_alike_nodes_compare_by_identity(tmp_path):
+    pages = known_page(tmp_path, {
+        "side": {"role": "group", "dom_id": "side", "risk": "read"},
+        "side_next": {"role": "link", "name": "More", "within": "side", "risk": "navigate"}})
+    t = tree(Node("group", dom_id="side", children=[Node("link", "More")]),
+             Node("group", dom_id="main", children=[Node("link", "More")]))
+    e = ev("click", "link", "More")
+    e["spec"] = {"role": "link", "name": "More", "index": 1}   # the second one
+    [p] = lessons.propose(lesson(tmp_path, page(t, [e])), pages, Bank())["pages"]
+    assert p["steps"][0]["target"] == "acme.more" and p["added"] == ["more"]
+
+
+def test_unresolved_target_is_proposed_but_off(tmp_path):
+    les = lesson(tmp_path, page(tree(Node("link", "Jobs")), [ev("click", "link", "Careers")]))   # not in the tree
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert p["steps"][0] == {"kind": "click", "label": "Careers (check this target)",
+                             "target": f"{p['id']}.careers", "keep": False}
+    assert "careers" in p["yaml"]["page"]["elements"]
+
+
+def test_clicks_after_hand_over_are_kept_off(tmp_path):
+    t = tree(Node("button", "Submit"), Node("link", "Back"))
+    les = lesson(tmp_path, page(t, [ev("click", "button", "Submit"), ev("click", "link", "Back")]))
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert [(st["kind"], st["keep"]) for st in p["steps"]] == [("hand_over", True), ("click", False)]
+
+
+def test_shared_answer_does_not_pick_a_key(tmp_path):
+    bank = Bank((Entry("visa", ("Need a visa?",), "Yes"), Entry("remote", ("Remote ok?",), "Yes")))
+    les = lesson(tmp_path, page(tree(), [ev("choose", "combo_box", "Willing to relocate?", "Yes"),
+                                         ev("choose", "combo_box", "Remote ok?", "Yes")]))
+    ops = lessons.propose(les, tmp_path / "pages", bank)["bank"]
+    assert [(o["op"], o["key"]) for o in ops] == [("add", "willing_to_relocate")]

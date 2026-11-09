@@ -81,22 +81,24 @@ def _known(pages_dir):
 
 
 def _key_for(page, root, spec, label):
-    """The element key in page that locates spec's node (adding it, risk by role, when none does)."""
+    """(key, sure): the element key in page that locates spec's node (adding it, risk by role, when none does);
+    sure is False when spec does not find exactly one node in the stored tree."""
     els = page["elements"]
-    want = engine.find_all(root, spec, {"elements": {}})
+    want = [id(n) for n in engine.find_all(root, spec, {"elements": {}})]   # Node is a dataclass: compare identity
+    sure = len(want) == 1
     for k, s in els.items():
         if "fields" in s:
             continue
         if {a: b for a, b in s.items() if a != "risk"} == spec:
-            return k
-        if len(want) == 1 and engine.find_all(root, s, page) == want:
-            return k
+            return k, sure
+        if sure and [id(n) for n in engine.find_all(root, s, page)] == want:
+            return k, sure
     base = studio._slug(label) or spec["role"]
     k, i = base, 2
     while k in els:
         k, i = f"{base}_{i}", i + 1
     els[k] = {**spec, "risk": _risk(spec["role"])}
-    return k
+    return k, sure
 
 
 def _new_id(lp, taken):
@@ -131,26 +133,28 @@ def propose(lesson, pages_dir, bank) -> dict:
         if new:
             anchors = page["identification"].get("anchors", [])
             page["elements"] = {k: v for k, v in page["elements"].items() if k in anchors}
-        steps = []
+        steps, added = [], []
         evs = lp["events"]
         for i, ev in enumerate(evs):
             kind, label, spec = ev["kind"], ev.get("label") or "", ev.get("spec")
             if kind == "click" and i + 1 < len(evs) and evs[i + 1]["kind"] == "attach":
                 continue   # the file chooser's own button: the attach covers it
-            k = _key_for(look, root, spec, label) if kind in ("click", "attach") and spec else None
+            k, sure = _key_for(look, root, spec, label) if kind in ("click", "attach") and spec else (None, False)
             target = f"{pid}.{k}" if k else None
-            line = None
+            line, keep = None, sure and not (kind == "click" and any(s["kind"] == "hand_over" for s in steps))
+            text = label + ("" if sure else " (check this target)")   # off until the admin checks it
             if kind == "click" and not k:
                 line = {"kind": "click", "label": "not sure what this was", "target": None, "keep": False}
             elif kind == "click" and look["elements"][k].get("risk") == "submit":
-                if not any(s["kind"] == "hand_over" for s in steps):   # recorded and shown, replayed as hand over
-                    line = {"kind": "hand_over", "label": label, "target": target, "keep": True}
+                line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
             elif kind in ("click", "attach"):
-                line = {"kind": "click" if kind == "click" else "attach_file", "label": label, "target": target,
-                        "keep": True}
+                line = {"kind": "click" if kind == "click" else "attach_file", "label": text, "target": target,
+                        "keep": keep}   # a click after the hand over is dead: replay stops there
             if line:
                 steps.append(line)
                 if k:
+                    if not new and k not in page["elements"]:
+                        added.append(k)
                     page["elements"][k] = look["elements"][k]
             elif kind in ("click", "attach"):
                 continue
@@ -162,8 +166,9 @@ def propose(lesson, pages_dir, bank) -> dict:
                                   "keep": True})
                 if kind != "tick" and (op := _bank_op(label, ev.get("value") or "", bank, keys, ops)):
                     ops.append(op)
-        out_pages.append({"id": pid, "new": new, "yaml": {"page": page}, "steps": steps})
-    if out_pages and not any(s["kind"] == "hand_over" for s in out_pages[-1]["steps"]):
+        out_pages.append({"id": pid, "new": new, "yaml": {"page": page}, "steps": steps,
+                          "added": added})
+    if out_pages and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[-1]["steps"]):
         out_pages[-1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None,
                                        "keep": True})
     return {"pages": out_pages, "bank": ops}
@@ -182,12 +187,12 @@ def _bank_op(label, value, bank, keys, ops):
         return None
     base = {"label": label, "value": value, "keep": _keep(value),
             "sensitive": restricted(Field("", label, "text", (), False)) is not None}
-    same = next((e for e in bank.entries if e.answer == value), None)
-    if same:
-        return None if nl in {normalize(x) for x in same.labels} else {"op": "label", "key": same.key, **base}
     known = next((e for e in bank.entries if nl in {normalize(x) for x in e.labels}), None)
     if known:
-        return {"op": "change", "key": known.key, **base}
+        return None if known.answer == value else {"op": "change", "key": known.key, **base}
+    same = [e for e in bank.entries if e.answer == value]
+    if len(same) == 1:   # "Yes" answers many keys: only a unique answer says which key this label belongs to
+        return {"op": "label", "key": same[0].key, **base}
     key = new_key(label, keys)
     keys.add(key)
     return {"op": "add", "key": key, **base}
