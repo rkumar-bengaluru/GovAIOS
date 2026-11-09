@@ -136,6 +136,8 @@ def _attach(look, page, root, evs, i, new):
               else (kc, sure))
     for k, risk in ((kc, "read"), (kt, "modify")):   # the target last: when it is the input too, it is clicked
         if new or k not in page["elements"]:   # a draft's own rating (buttons submit) is lowered; a known page's kept
+            if k != kc and RISK_ORDER.index(look["elements"][k]["risk"]) > RISK_ORDER.index("modify"):
+                st = False   # a separate button might be a real submit: off until the admin checks its label
             look["elements"][k]["risk"] = risk
         elif RISK_ORDER.index(page["elements"][k]["risk"]) > RISK_ORDER.index("modify"):
             sure = False   # the engine would refuse it at run time
@@ -188,6 +190,8 @@ def propose(lesson, pages_dir, bank) -> dict:
             target = f"{pid}.{k}" if k else None
             line, keep = None, sure and not (kind == "click" and any(s["kind"] == "hand_over" for s in steps))
             text = label + ("" if sure else " (check this target)")   # off until the admin checks it
+            if kind == "attach" and k and k != chk:
+                text += f" via the button {evs[i - 1].get('label') or '?'!r}"   # the button replay clicks
             if kind == "click" and not k:
                 line = {"kind": "click", "label": "not sure what this was", "target": None, "keep": False}
             elif kind == "click" and look["elements"][k].get("risk") == "submit":

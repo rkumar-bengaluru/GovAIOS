@@ -213,10 +213,21 @@ def test_attach_replays_with_the_chooser_button_and_the_file_input(tmp_path):
     [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
     pid, els = p["id"], p["yaml"]["page"]["elements"]
     [line] = [s for s in p["steps"] if s["kind"] == "attach_file"]
-    assert line["keep"] and line["target"] == f"{pid}.button_attach" and line["check"].startswith(pid + ".")
+    assert not line["keep"] and "'Attach'" in line["label"]   # a separate button: the admin checks it first
+    assert line["target"] == f"{pid}.button_attach" and line["check"].startswith(pid + ".")
     chk = line["check"].split(".")[1]
     assert els["button_attach"]["risk"] == "modify" and els[chk] == {"role": "button", "dom_id": "resume", "risk": "read"}
     assert lessons._do(line, p) == {"action": "attach_file", "target": line["target"], "check": line["check"]}
+
+
+def test_a_submit_button_before_an_attach_is_never_kept_as_the_chooser(tmp_path):
+    t = tree(Node("button", "Submit application"), Node("button", "Attach: No file chosen", dom_id="resume"))
+    att = ev("attach", "button", "Attach: No file chosen")
+    att["spec"] = {"role": "button", "dom_id": "resume"}
+    les = lesson(tmp_path, page(t, [ev("click", "button", "Submit application"), att]))
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    [line] = [s for s in p["steps"] if s["kind"] == "attach_file"]
+    assert not line["keep"] and "'Submit application'" in line["label"]
 
 
 def test_attach_on_chromes_own_file_input_checks_its_name_prefix(tmp_path):
