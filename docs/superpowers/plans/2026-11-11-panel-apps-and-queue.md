@@ -21,6 +21,8 @@
 
 ## Review Focus
 
+(Pre-flight architect review folded in: queue-jump guard, digest-before-approval, one lock for check+start, browser sign-in check, failed-start drop.)
+
 1. A queued app whose flow was edited or revoked while it waited → dropped with a reason, never started (Task 1 test `test_queued_app_edited_while_waiting_is_dropped`).
 2. The session expires or the screen locks while apps are queued → queue cleared, nothing starts later even after a new session (Task 1 `test_session_end_clears_the_queue`).
 3. Two ticks in a row after a run ends → the next app starts exactly once (Task 1 `test_next_starts_once`).
@@ -56,18 +58,22 @@ def test_run_while_busy_queues_then_starts_when_the_run_ends(panel):
     assert [e["outcome"] for e in _log(P.home, "run_queue")] == ["queued", "started"]
 
 def test_next_starts_once(panel):          # two ticks after the end start one run
+def test_typed_run_never_jumps_the_queue(panel):   # live run done but not yet reported, Inbox briefing queued; typed "run joblens" → "JobLens queued #2."; tick → Inbox briefing starts, JobLens not; exactly one start per app over the following ticks
+def test_a_failed_start_is_dropped_and_told(panel):   # launcher raises for the queued app → "… left the queue: it did not start." and run_queue outcome dropped
+def test_no_browser_signed_in_clears_the_queue(panel):   # P.wall[0] += 9*3600 (browser sign-ins expire), tick → "Queue cleared: signed out."; assert on P.srv.panel.convo, not on GET /
 def test_same_app_queues_once(panel):      # 2nd "run inbox briefing" → "Inbox briefing is already queued (#1)."
 def test_queued_app_edited_while_waiting_is_dropped(panel):
     # queue Inbox briefing, then append a comment to its yaml (digest changes), end the live run, tick:
     # no 2nd run; Home has "Inbox briefing left the queue: it changed since it was queued."; run_queue outcome dropped
 def test_revoked_while_waiting_is_dropped(panel):   # reason text "it is no longer approved."
 def test_session_end_clears_the_queue(panel):
-    # queue one, P.mono[0] += 31*60, tick → "Queue cleared: the session ended." and panel.queue == []; reopen + tick: no start
+    # queue one, P.mono[0] += 31*60, tick → "Queue cleared: the session ended." and panel.queue == []; reopen with a fresh code
+    # (code_at(secret, time.time() + 30): the Verifier refuses a replayed step) + tick: no start
 def test_end_session_and_emergency_stop_clear_the_queue(panel):   # POST /end; and (home/"STOPPED") + tick
-def test_signout_clears_the_queue(panel):   # POST /signout
+def test_signout_clears_the_queue(panel):   # POST /signout; assert on P.srv.panel.convo / panel.queue (GET / is signed out now)
 def test_end_on_a_card_starts_the_next(panel):   # live run done with stopped_reason set → next starts, "/" returns 200
 def test_unqueue(panel):   # POST /unqueue flow=morning_inbox_briefing → removed, outcome removed; "unqueue inbox briefing" in Talk does the same
-def test_queued_inputs_are_checked_when_queued(panel):   # job_apply (has an input) queued with a bad value → "That isn't a valid …", not queued
+def test_queued_inputs_are_checked_when_queued(panel):   # approve job_apply first, start JobLens so a run is live, then queue job_apply with a bad value → "That isn't a valid …", not queued
 ```
 
 `_approve(P, id)`: approve the flow in `approvals.json` the way the fixture approves JobLens. The reason strings are exact: `"it changed since it was queued."`, `"it is no longer approved."`, `"the session ended."`, `"signed out."`.
@@ -79,9 +85,9 @@ Expected: FAIL (`queued #1` not found; `/unqueue` 404).
 
 - [ ] **Step 3: Implement**
 
-- `command()`: when `kind == "run" and live()`: run `invalid_input` first (bad → existing message, not queued); already queued → `"<app> is already queued (#n)."`; else append `(hit.id, hit.digest, vals or None)`, audit `queued`, tell `"<app> queued #<n>."`. `kind == "run"` and not live → `start_run(hit, vals)`. Add `unqueue <words>` matched with `apps.match` on the words.
-- `tick()`, after `report()`: if `not live()`, `panel.queue`, `panel.told is panel.run` (the last run was reported, or there was none) and the session is active → under `panel.lock` pop the first entry, look it up in fresh `apps()` by id: missing or not approved → drop `"it is no longer approved."`; `digest != queued digest` → drop `"it changed since it was queued."`; else `start_run(app, vals, queued=True)` and audit `started`. One start per tick.
-- `end_session()` calls `clear_queue("the session ended.")` (covers expiry, screen lock, emergency stop, End session); the `/signout` handler calls `clear_queue("signed out.")`.
+- `command()`: queue when `kind == "run" and (live() or panel.queue or panel.told is not panel.run)` — a run that is done but not yet reported, or apps already waiting, must not be jumped (else an app runs twice and the finished run is never reported). On that path: run `invalid_input` first (bad → existing message, not queued); already queued → `"<app> is already queued (#n)."`; else append `(hit.id, hit.digest, vals or None)`, audit `queued`, tell `"<app> queued #<n>."`. `kind == "run"` and not live → `start_run(hit, vals)`. Add `unqueue <words>`: strip the leading "unqueue" ("unqueue" is not in `_FILLER`), then `apps.match` on the rest.
+- `tick()`, after `report()`: in ONE `with panel.lock:` block (checks, pop and start together): if `not live()`, `panel.queue`, `panel.told is panel.run` (the last run was reported, or there was none), the code session is active, `not runstate.stopped(home)`, and at least one browser sign-in is unexpired (`state["sessions"]` under `sign_lock`, `now() - signed_in_at < SIGNIN_S`; none → `clear_queue("signed out.")`) → loop: pop the first entry and look it up in fresh `apps()` by id: missing → drop `"it is no longer approved."`; **digest first**: fresh digest != queued digest → drop `"it changed since it was queued."` (an edited flow is also unapproved, so this check must come before approval); not approved → drop `"it is no longer approved."`; else audit `started` (audit first, then apply) and `start_run(app, vals, queued=True)` inside `try`: an exception drops it as `"it did not start."` (audited `dropped`). A drop moves on to the next entry in the same tick; at most one start per tick.
+- `end_session()` calls `clear_queue("the session ended.")` inside its existing `with panel.lock:` block, right after `panel.session.end(...)` and before `if sid is None: return` (covers expiry, screen lock, emergency stop, End session); the `/signout` handler calls `clear_queue("signed out.")`.
 - `start_run` sets `panel.told = None`-safe state exactly as today's branch (`panel.run, panel.app, panel.card, panel.run_id`).
 
 - [ ] **Step 4: Update `test_busy_text`**: the 2nd `run joblens` while live now says `"JobLens queued #1."`, and `len(P.made) == 1` still holds until the run is done and `tick()` runs.
@@ -98,7 +104,7 @@ Expected: PASS.
 ### Task 2: The Apps page, and the left rail keeps only the navigation
 
 **Files:**
-- Modify: `govaios/panel/apps.py` (`App` gains `title: str = ""` = the flow's `workflow.name`)
+- Modify: `govaios/panel/apps.py` (`App` gains `title: str = ""` = the flow's `workflow.name`, shown as the card's description line: flows have no separate description field)
 - Modify: `govaios/audit/web.py` (`_page` nav; `PANEL_PATH` gains `/apps`; new `apps_page(csrf)`; GET route; `talk()` passes no rail; `approvals()` gains the drafts list)
 - Test: `tests/test_panel_web.py`, `tests/test_panel_apps.py`, `tests/test_cli.py::test_agent_missing_apps_dir` (its rail assertion)
 
