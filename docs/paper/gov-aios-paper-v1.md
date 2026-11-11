@@ -2,6 +2,8 @@
 
 Version 1 · 11 Nov 2026 · exported from the team review doc, rev 49
 
+> **Not AIOS.** GOV-AIOS is unrelated to AIOS (Mei, Zhang et al., Rutgers; [arXiv:2403.16971](https://arxiv.org/abs/2403.16971)), which shares part of the name. AIOS is an LLM agent operating system: a kernel that schedules agents and manages their context, memory and storage, so agents are built on top of it. Its access manager covers only agent-to-agent access to memory and logs, and it asks the user to confirm irreversible operations. GOV-AIOS is not an agent runtime. It is a governance layer that sits between existing third-party agents (its own browser and desktop flows, Claude Code, OpenAI Codex) and the operating system. It enforces policy outside the model through OS permissions, sandboxing and vendor-managed hook points, binds approvals to the owner's physical presence, and keeps a hash-chained audit log. The two systems solve different problems, and neither builds on the other.
+
 ## Abstract
 
 AI agents now act on personal computers through browsers, desktop apps and shells, and defenses that live inside the model fall to adaptive prompt injection. We present GOV-AIOS, a governor for one person's laptop that enforces a capability boundary outside the model. Browser and desktop flows may act only on elements of page schemas captured from the operating system's accessibility tree, each one risk-rated and default-deny. Every run and every risky action is approved by a human who is physically present, through the platform's own biometric or PIN prompt (Touch ID on macOS, Windows Hello on Windows) combined with a typed code word, and the approval covers an artifact the governor wrote, not text the agent wrote. An authenticator-app session gives a short, screen-lock-bounded alternative. The same policy and the same hash-chained audit log govern two vendors' coding agents, Claude Code and OpenAI Codex, through administrator-owned managed configuration that the agent cannot edit. The governor has no network access and no model in its run-time loop. Our prototype runs on macOS, and a Windows port is in progress behind the same OS-neutral interfaces. We report live use on real sites: job vetting on Himalayas under its Personal Agent clause, an inbox briefing on Gmail, and form filling on Greenhouse and Lever that stops before Submit, plus live tests of both coding agents under governance. GOV-AIOS does not detect prompt injection; it limits what an injected agent can do and records what it tried.
@@ -74,7 +76,9 @@ An explicit anti-goal: GOV-AIOS does not disguise automation to evade a site's b
 
 The governor is a pure decision function, `allow | deny | ask`, over one request format. Every request names its executor, flow, flow digest, step and the page it was perceived on. Rules layer as ground rules, then flow policy, then approved lists, and anything unmatched is denied. The policy engine never sees screen or OS state directly, so it can be unit-tested in isolation.
 
-> **Figure 1 · GOV-AIOS architecture.** Rendered in the review doc (https://claude.ai/artifact/RB63mqBQ9XCP5BxhgPVTYZ); not included in this Markdown copy.
+![Figure 1: GOV-AIOS architecture](figures/fig1-architecture.png)
+
+*Figure 1 · GOV-AIOS architecture*
 
 Flows and both coding agents send every request to the governor; only an allowed request acts on macOS, and only the present admin approves.
 
@@ -164,19 +168,25 @@ The admin meets GOV-AIOS in three places: a local control panel, the OS presence
 
 The panel is a local web page served on 127.0.0.1 with no JavaScript. It has a Talk page to start apps by name, an Apps page, a run queue, Approvals, the setup pages for the coding agents, and the audit log. A signed-out browser sees only a Locked page with one button. Pressing it raises the OS prompt, which carries a fresh four-letter code word; the admin then types that word into the page (Figure 2). A wrong word, a refused prompt or a screen lock while the prompt is up signs the browser out, and repeated refusals pause sign-in.
 
-> **Figure 2 · panel sign-in (mock-up from the prototype's prompt text).** Rendered in the review doc (https://claude.ai/artifact/RB63mqBQ9XCP5BxhgPVTYZ); not included in this Markdown copy.
+![Figure 2: panel sign-in (mock-up from the prototype's prompt text)](figures/fig2-panel-sign-in.png)
+
+*Figure 2 · panel sign-in (mock-up from the prototype's prompt text)*
 
 ### 5.2 Approving an agent's action
 
 When a coding agent asks for something outside its allow-list, GOV-AIOS, not the agent, writes the question (Figure 3). It names the agent, the tool, the folder and the exact command, and for a network fetch it says that approving also allows later fetches to that origin. The admin presses Approve and then passes the OS prompt. Deny, closing the dialog, or 60 seconds of silence all mean no, and the agent's tool call fails with a GOV-AIOS reason. Commands that contain secret-like values are denied outright and never offered for approval.
 
-> **Figure 3 · a coding agent's request, the presence check, and its audit entry (mock-up).** Rendered in the review doc (https://claude.ai/artifact/RB63mqBQ9XCP5BxhgPVTYZ); not included in this Markdown copy.
+![Figure 3: a coding agent's request, the presence check, and its audit entry (mock-up)](figures/fig3-agent-approval.png)
+
+*Figure 3 · a coding agent's request, the presence check, and its audit entry (mock-up)*
 
 ### 5.3 Voice for the daily briefs
 
 The end state is speech: the admin says "inbox brief" and hears the newest emails read aloud, or later "calendar brief" for the day ahead (Figure 4). Voice is a channel, not a new authority. A spoken command can start only an app that is already approved, only inside a session opened with the OS prompt or the authenticator code, and only while the screen is unlocked. It can never approve a new flow, a payment or a new destination. Speech recognition runs on the laptop and matches only fixed phrases (start, pause, skip, stop, approve, deny); anything else is "unrecognized", never interpreted freely. Audio and transcripts are not kept; the audit records only which phrase matched. Today, apps are started by typing in Talk and the result is spoken on the laptop; spoken commands and the calendar brief are designed but not yet built.
 
-> **Figure 4 · the voice path for the inbox brief.** Rendered in the review doc (https://claude.ai/artifact/RB63mqBQ9XCP5BxhgPVTYZ); not included in this Markdown copy.
+![Figure 4: the voice path for the inbox brief](figures/fig4-voice-brief.png)
+
+*Figure 4 · the voice path for the inbox brief*
 
 ## 6. Implementation
 
