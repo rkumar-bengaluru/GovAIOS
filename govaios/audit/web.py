@@ -319,12 +319,11 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             with panel.lock:
                 sid = panel.session.end(reason)
                 run = panel.run if sid is not None and live() else None
-                queued = bool(panel.queue)
+                if sid is not None:   # empty even if session_end's audit then fails: a new session must not start it
+                    clear_queue({"emergency_stop": "emergency stop.", "screen_lock": "screen locked."}.get(reason, "the session ended."))
             if sid is None:
                 return None
             log.append("session_end", session=sid, reason=reason)
-            if queued:   # after session_end: a failed queue audit must not drop it
-                clear_queue({"emergency_stop": "emergency stop.", "screen_lock": "screen locked."}.get(reason, "the session ended."))
         finally:   # a failed audit line must not leave the run going
             if run is not None:
                 stop = lambda: stop_run(run)

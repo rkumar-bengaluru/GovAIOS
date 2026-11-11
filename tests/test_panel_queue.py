@@ -185,3 +185,25 @@ def test_session_end_is_audited_before_the_queue_cleared(panel):
     P.post("/end")
     kinds = [e["kind"] for e in _log(P.home)]
     assert kinds.index("session_end") < kinds.index("run_queue", kinds.index("session_end"))
+
+
+def test_queue_is_empty_even_if_the_session_end_audit_fails(panel, monkeypatch):
+    from govaios.audit.log import AuditLog
+    P = panel; _busy_with_inbox_queued(P)
+    real = AuditLog.append
+
+    def append(self, kind, *a, **k):
+        if kind == "session_end":
+            raise OSError("disk")
+        return real(self, kind, *a, **k)
+    monkeypatch.setattr(AuditLog, "append", append)
+    P.mono[0] += 31 * 60
+    try:
+        P.srv.panel.tick()
+    except OSError:
+        pass
+    assert P.srv.panel.queue == []
+    monkeypatch.setattr(AuditLog, "append", real)
+    P.say(code_at(_secret(P), time.time() + 30))
+    P.srv.panel.tick()
+    assert len(P.made) == 1
