@@ -130,7 +130,7 @@ def test_end_session_and_emergency_stop_clear_the_queue(panel):
     assert P.srv.panel.queue
     (P.home / "STOPPED").write_text("")
     P.srv.panel.tick()
-    assert "Queue cleared: the session ended." in _convo(P) and P.srv.panel.queue == [] and len(P.made) == 1
+    assert "Queue cleared: emergency stop." in _convo(P) and P.srv.panel.queue == [] and len(P.made) == 1
 
 
 def test_signout_clears_the_queue(panel):
@@ -166,3 +166,22 @@ def test_queued_inputs_are_checked_when_queued(panel):
     good = "https://himalayas.app/companies/acme/jobs/dev"
     P.say(f"/job-apply {good}?ref=x")
     assert P.srv.panel.queue == [("job_apply", P.srv.panel.queue[0][1], {"job_url": good})]
+
+
+def test_home_keeps_refreshing_while_apps_are_queued(panel):
+    P = panel; _busy_with_inbox_queued(P)
+    P.made[0].done, P.made[0].code = True, 0
+    assert '<meta http-equiv="refresh" content="2">' in P.get("/")[1]
+
+
+def test_queue_lines_are_not_steps_of_a_run():
+    from govaios.audit.web import _runs
+    ent = [({"kind": k, **x}, None) for k, x in [("flow_start", {"seq": 1, "flow": "a"}), ("run_queue", {"flow": "a"}), ("flow_end", {"flow": "a"})]]
+    assert [e["kind"] for e in _runs(ent)[0][0]] == ["flow_start", "flow_end"]
+
+
+def test_session_end_is_audited_before_the_queue_cleared(panel):
+    P = panel; _busy_with_inbox_queued(P)
+    P.post("/end")
+    kinds = [e["kind"] for e in _log(P.home)]
+    assert kinds.index("session_end") < kinds.index("run_queue", kinds.index("session_end"))

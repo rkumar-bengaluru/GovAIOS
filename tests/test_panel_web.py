@@ -272,7 +272,7 @@ def test_busy_text(panel):
     P.say("run joblens")
     assert "JobLens queued #1." in P.get("/")[1] and len(P.made) == 1
     P.made[0].done = True
-    assert "refresh" not in P.get("/")[1] and len(P.made) == 1
+    assert "refresh" in P.get("/")[1] and len(P.made) == 1
     P.srv.panel.tick()
     assert len(P.made) == 2
 
@@ -2328,6 +2328,7 @@ def test_apps_card_shows_running_and_queued(panel):
     body = panel.get("/apps")[1]
     assert "<a class=go href='/'>Running…</a>" in body and "Queued #1" in body
     assert "action=/unqueue" in body and "name=next value=/apps" in body
+    assert "<button aria-label='Take Inbox briefing out of the queue'>✕</button>" in body
 
 
 def test_app_with_inputs_runs_through_its_input_card(panel):

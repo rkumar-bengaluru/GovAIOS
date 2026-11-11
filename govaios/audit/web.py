@@ -163,7 +163,7 @@ def _seq(e):
     return s if type(s) is int else None
 
 
-PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "apply_card", "bank_updated")
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "apply_card", "bank_updated", "run_queue")
 
 
 def _runs(entries):
@@ -319,10 +319,12 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             with panel.lock:
                 sid = panel.session.end(reason)
                 run = panel.run if sid is not None and live() else None
-                clear_queue("the session ended.")
+                queued = bool(panel.queue)
             if sid is None:
                 return None
             log.append("session_end", session=sid, reason=reason)
+            if queued:   # after session_end: a failed queue audit must not drop it
+                clear_queue({"emergency_stop": "emergency stop.", "screen_lock": "screen locked."}.get(reason, "the session ended."))
         finally:   # a failed audit line must not leave the run going
             if run is not None:
                 stop = lambda: stop_run(run)
@@ -748,7 +750,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             n = next((i for i, e in enumerate(panel.queue, 1) if e[0] == a.id), None)
             if n:
                 return (f"Queued #{n}<form method=post action=/unqueue>{hidden(csrf)}<input type=hidden name=flow "
-                        f"value='{escape(a.id)}'><input type=hidden name=next value=/apps><button>Remove</button></form>")
+                        f"value='{escape(a.id)}'><input type=hidden name=next value=/apps><button aria-label='Take {escape(a.name)} out of the queue'>✕</button></form>")
             say = f"/{slug(a.name)}" if flow_inputs(a.path) else "run " + a.id.replace("_", " ")
             return (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='{escape(say)}'>"
                     f"<button class=go>Run</button></form>")
@@ -790,7 +792,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
                      f"<button class=go>Send</button></form>"
                      f"{card(csrf)}{ans}{steps}{tasks_card()}{result_card()}<ul class=talk>{talked}</ul>",
-                     '<meta http-equiv="refresh" content="2">' if live() and (not ans or teaching()) else "",
+                     '<meta http-equiv="refresh" content="2">' if (live() or panel.queue) and (not ans or teaching()) else "",
                      here="/")
 
     def setup(csrf, bad):
