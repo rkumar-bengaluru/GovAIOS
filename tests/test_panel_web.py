@@ -2361,3 +2361,25 @@ def test_drafts_are_on_approvals(panel):
 
 def test_coding_agents_line_is_on_apps(panel):
     assert "Governed: type /" not in panel.get("/")[1]
+
+
+def test_home_is_newest_first_with_the_talk_box_on_top(panel):
+    P = panel; _open(P); P.say("run mail"); P.say("run joblens")
+    body = P.get("/")[1]
+    assert body.index("class=cmd") < body.index("class=talk")
+    assert body.index("Starting JobLens.") < body.index("I don&#x27;t know that app.")   # newest first
+
+
+def test_the_live_card_stays_under_the_talk_box(cc):
+    _carding(cc)
+    for i in range(5):
+        cc.say(f"run nothing{i}")
+    body = cc.get("/")[1]
+    assert body.index("class=cmd") < body.index("/apply/card") < body.index("class=talk")
+
+
+def test_joblens_jobs_newest_first(cc):
+    rid = _carding(cc, "review", "", "A", 2)
+    _tasks(cc, rid, [{"n": 1, "title": "One", "status": "done"}, {"n": 2, "title": "Two", "status": "review"}])
+    page = cc.get("/")[1]
+    assert page.index("/apply/task/2'") < page.index("/apply/task/1'")

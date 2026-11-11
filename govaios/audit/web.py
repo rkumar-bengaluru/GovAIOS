@@ -767,7 +767,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         ring = f"Session open: {math.ceil(s.remaining() / 60)} min left" if s.active() else "No session"
         pct = round(100 * s.remaining() / SESSION_S) if s.active() else 0
         lines = lambda xs: "<ul>" + "".join(f"<li>{escape(x)}</li>" for x in xs) + "</ul>"
-        talked = "".join(f"<li class='{_tone(x)}'>{escape(x)}</li>" for x in convo)
+        talked = "".join(f"<li class='{_tone(x)}'>{escape(x)}</li>" for x in reversed(convo))   # newest first
         end = (f"<form method=post action=/end>{hidden(csrf)}<button class=stop>End session</button></form>"
                if s.active() else "")
         steps = (f"<section class=run><h2>{escape(panel.app.name)}</h2>{lines(run.lines())}</section>"
@@ -784,11 +784,12 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                if not s.active() and store.load() is not None else "")
         cmds = "".join(f"<option value='{escape(x)}'>" for x in slashes())
         ans = answer_card(csrf) or task_card(csrf)   # the admin is answering: no reload wipes it, no box steals focus
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{ans}{tasks_card()}{result_card()}{otp}"
+        return _page(f"{who}{nodir}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
                      f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp or ans else ' autofocus'} "
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
-                     f"<button class=go>Send</button></form>",
+                     f"<button class=go>Send</button></form>"
+                     f"{card(csrf)}{ans}{steps}{tasks_card()}{result_card()}<ul class=talk>{talked}</ul>",
                      '<meta http-equiv="refresh" content="2">' if live() and (not ans or teaching()) else "",
                      here="/")
 
@@ -973,7 +974,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if not ts:
             return ""
         rows = "".join(f"<li><a href='/apply/task/{t['n']}'>{t['n']}. {escape(t['title'][:200])}</a> \u00b7 "
-                       f"{TASK_WORDS[t['status']]}</li>" for t in ts)
+                       f"{TASK_WORDS[t['status']]}</li>" for t in reversed(ts))
         return f"<section class=appcard><h2>JobLens jobs</h2><ul>{rows}</ul></section>"
 
     def task_page(n, csrf):
