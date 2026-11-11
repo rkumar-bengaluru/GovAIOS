@@ -130,6 +130,7 @@ box-shadow:none;outline-offset:4px}
 .tpl .state{font-weight:700;color:var(--ok)}
 .pick label{display:flex;gap:10px;align-items:baseline;font-weight:400;padding:8px 0;border-top:1px solid var(--line)}
 code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:1rem}
 @media (max-width:820px){.app{grid-template-columns:minmax(0,1fr);min-height:0}.rail{order:1}main{padding:16px 16px 32px}
 .top{margin:-16px -16px 16px;padding:12px 16px}}
 """
@@ -200,7 +201,7 @@ def _td(v):
 
 def _page(body, head="", rail="", here=None):
     nav = "".join(f"<a href='{h}'{' aria-current=page' if h == here else ''}>{t}</a>"
-                  for h, t in (("/", "Talk"), ("/market", "Marketplace"), ("/studio", "Studio"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
+                  for h, t in (("/", "Home"), ("/apps", "Apps"), ("/studio", "Studio"), ("/market", "Marketplace"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
     return (f"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,"
             f"initial-scale=1'>{head}<title>GOV-AIOS</title><style>{CSS}</style><div class=app>"
             f"<nav class=rail aria-label='GOV-AIOS'>{BRAND}{nav}{rail}</nav><main>{body}</main></div>")
@@ -245,7 +246,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/studio|/claude|/codex|/lesson/[^/]{1,200}")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/apps|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/studio|/claude|/codex|/lesson/[^/]{1,200}")
 DOES = {"claude_code": "Every command Claude Code runs is checked by GOV-AIOS first and written to the audit log.",
         "codex": "Shell commands, file edits and plugin calls are checked by GOV-AIOS first and written to the audit "
                  "log. Plugins stay on; each new plugin tool asks you once."}
@@ -709,6 +710,12 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             f"<form method=post action=/totp/reset>{hidden(csrf)}<button class=stop>Reset authenticator</button></form>")
         authn = (f"<h2>Your name</h2><form method=post action=/name>{hidden(csrf)}<label for=nm>Your name</label> "
                  f"<input id=nm name=name maxlength=40 value='{escape(panel.name)}'> <button>Save</button></form>") + authn
+        waiting = "<h2>Waiting for approval</h2><ul>" + "".join(
+            f"<li>{escape(a.name)} <span class=m>Needs approval</span>"
+            f"<form method=post action=/approve>{hidden(csrf)}"
+            f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>"
+            f"{delete_form(csrf, 'flow', a.id, '/approvals') if DELETABLE.fullmatch(a.id) else ''}</li>"
+            for a in apps() if not a.approved) + "</ul>"
         bad = "<p class=fail>approvals.json unreadable</p>"
         try:
             d = json.loads(approvals_path.read_text())
@@ -721,7 +728,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         flows, dests = (d or {}).get("flows", {}), (d or {}).get("destinations", {})
         if not (isinstance(d, dict) and isinstance(flows, dict) and isinstance(dests, dict)
                 and all(isinstance(v, list) for v in dests.values())):
-            return _page(f"<h1>Approvals</h1>{bad}{authn}", here="/approvals")
+            return _page(f"<h1>Approvals</h1>{bad}{waiting}{authn}", here="/approvals")
         def form(kind, flow="", dest="", label="Revoke", cls=""):
             return (f"<form method=post action=/revoke><input type=hidden name=csrf value='{escape(csrf)}'>"
                     f"<input type=hidden name=kind value={kind}><input type=hidden name=flow value='{escape(flow)}'>"
@@ -729,13 +736,30 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         fr = "".join(f"<tr>{_td(k)}{_td(v)}<td>{form('flow', str(k), label='Revoke flow')}</td></tr>" for k, v in flows.items())
         dr = "".join(f"<tr>{_td(k)}{_td(d)}<td>{form('destination', str(k), str(d), label='Revoke site')}</td></tr>"
                      for k, v in dests.items() for d in v)
-        return _page(f"<h1>Approvals</h1><h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
+        return _page(f"<h1>Approvals</h1>{waiting}<h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
                      f"<h2>Destinations</h2><table><tr><th>flow</th><th>destination</th><th></th></tr>{dr}</table>"
                      f"{form('all', label='Revoke all', cls=' class=stop')}{authn}", here="/approvals")
 
+    def apps_page(csrf):
+        last = {d["id"]: d["last_time"] for d in _apps_summary(_runs(_entries(log))[0], apps())}
+        def ctl(a):
+            if live() and panel.app.id == a.id:
+                return "<a class=go href='/'>Running…</a>"
+            n = next((i for i, e in enumerate(panel.queue, 1) if e[0] == a.id), None)
+            if n:
+                return (f"Queued #{n}<form method=post action=/unqueue>{hidden(csrf)}<input type=hidden name=flow "
+                        f"value='{escape(a.id)}'><input type=hidden name=next value=/apps><button>Remove</button></form>")
+            say = f"/{slug(a.name)}" if flow_inputs(a.path) else "run " + a.id.replace("_", " ")
+            return (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='{escape(say)}'>"
+                    f"<button class=go>Run</button></form>")
+        cards = "".join(f"<section class=appcard><h2>{escape(a.name)}</h2><p>{escape(a.title)}</p>"
+                        f"<p class=m>{'Last started ' + escape(last[a.id]) if last.get(a.id) else 'Never run'}</p>{ctl(a)}</section>"
+                        for a in apps() if a.approved)
+        cc = "".join(f"<li>{ag.title}<span class=m> Governed: type /{ag.slash}</span></li>"
+                     for ag in agents.AGENTS.values() if cc_roots(ag) is not None)
+        return _page(f"<h1>Apps</h1><div class=grid>{cards}</div><h2>Coding agents</h2><ul>{cc}</ul>", here="/apps")
+
     def talk(csrf):
-        cc_li = "".join(f"<li class=ok>{ag.title}<span class=m>Governed: type /{ag.slash}</span></li>"
-                        for ag in agents.AGENTS.values() if cc_roots(ag) is not None)
         report()   # the page refresh stops once the run is done: show its result on that same load
         s, run, al = panel.session, panel.run, apps()
         with panel.lock:
@@ -744,12 +768,6 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         pct = round(100 * s.remaining() / SESSION_S) if s.active() else 0
         lines = lambda xs: "<ul>" + "".join(f"<li>{escape(x)}</li>" for x in xs) + "</ul>"
         talked = "".join(f"<li class='{_tone(x)}'>{escape(x)}</li>" for x in convo)
-        ok = "".join(f"<li class=ok>{escape(a.name)}<span class=m>Can run</span></li>" for a in al if a.approved)
-        drafts = "".join(f"<li class=draft>{escape(a.name)}<span class=m>Needs approval</span>"
-                         f"<form method=post action=/approve>{hidden(csrf)}"
-                         f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>"
-                         f"{delete_form(csrf, 'flow', a.id, '/') if DELETABLE.fullmatch(a.id) else ''}</li>"
-                         for a in al if not a.approved)
         end = (f"<form method=post action=/end>{hidden(csrf)}<button class=stop>End session</button></form>"
                if s.active() else "")
         steps = (f"<section class=run><h2>{escape(panel.app.name)}</h2>{lines(run.lines())}</section>"
@@ -772,7 +790,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
                      f"<button class=go>Send</button></form>",
                      '<meta http-equiv="refresh" content="2">' if live() and (not ans or teaching()) else "",
-                     f"<h2>Approved</h2><ul>{ok}{cc_li}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
+                     here="/")
 
     def setup(csrf, bad):
         if store.load() is not None:
@@ -1198,7 +1216,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             tell(f"{hit.name} is approved.")
         except Stop:
             tell(f"{hit.name} was not approved.")
-        return "/"
+        return "/approvals"
 
     def setup_post(f):
         with panel.lock:   # take-and-clear: two concurrent POSTs cannot both reach the dialog
@@ -1352,7 +1370,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def apps_delete(f):
         """Delete a Studio app (studio_*, check_*) or a draft page no flow uses; its approval goes first."""
         kind, name, back = f.get("kind"), f.get("name", ""), f.get("back")
-        back = back if back in ("/", "/studio") else "/"
+        back = back if back in ("/", "/studio", "/approvals") else "/"
         if not flows_dir:
             return None
         pages = flows_dir.parent / "pages"
@@ -1854,7 +1872,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 ls = LESSON.fullmatch(u.path)
                 ap = by_slash(u.path[1:])
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
-                        else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
+                        else approvals(sess[1]) if u.path == "/approvals" else apps_page(sess[1]) if u.path == "/apps" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
                         else bank_page(sess[1]) if u.path == "/apply/bank"
                         else task_page(int(tk[1]), sess[1]) if tk

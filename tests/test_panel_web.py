@@ -326,7 +326,7 @@ def test_approve_draft_uses_native_dialog(panel):
     ap = P.home / "approvals.json"
     before = ap.read_bytes()
     P.answers["approve"] = False
-    assert "Approve…</button>" in P.get("/")[1]
+    assert "Approve…</button>" in P.get("/approvals")[1]
     P.post("/approve", flow="morning_inbox_briefing")
     assert ap.read_bytes() == before
     import yaml
@@ -580,7 +580,7 @@ def test_pages_share_stylesheet(panel):
 
 def test_rail_marks_current_page(panel):
     P = panel
-    for path, link in (("/", "href='/' aria-current=page>Talk"), ("/audit", "href='/audit' aria-current=page>Audit log"),
+    for path, link in (("/", "href='/' aria-current=page>Home"), ("/audit", "href='/audit' aria-current=page>Audit log"),
                        ("/approvals", "href='/approvals' aria-current=page>Approvals")):
         body = P.get(path)[1]
         assert link in body and body.count("aria-current=page") == 1
@@ -1125,7 +1125,7 @@ def test_claude_code_in_talk_and_audit(cc):
                decision="deny", reason="not allowed", approver="admin", auth="biometric")
     log.append("request", flow="claude_code", executor="claude_code", action="Bash", command="make --version",
                decision="allow", approver="admin", auth="biometric")
-    assert "Claude Code<span class=m>Governed: type /claude" in cc.get("/")[1]
+    assert "Claude Code<span class=m> Governed: type /claude" in cc.get("/apps")[1]
     idx = cc.get("/audit")[1]
     assert "Coding agents" in idx and "href='/audit/app/claude_code'" in idx
     assert re.search(r"<td>Governed</td><td>3</td><td>1</td>", idx)
@@ -1228,7 +1228,7 @@ def test_codex_set_up_start_and_audit(cc):
     assert load(cc.home, "executors/codex.yaml")[0]["tools"] == ["Bash", "Write"]
     assert "Claude Code, governed" in cc.get("/market")[1] and "<p class=state>Governed</p>" in cc.get("/market")[1]
     talk = cc.get("/")[1]
-    assert "OpenAI Codex<span class=m>Governed: type /codex" in talk and "<option value='/codex'>" in talk
+    assert "OpenAI Codex<span class=m> Governed: type /codex" in cc.get("/apps")[1] and "<option value='/codex'>" in talk
     assert "<option value='/claude'>" not in talk   # Claude Code is not set up in this test
     _open(cc)
     cc.say("/codex")
@@ -2176,7 +2176,7 @@ def test_studio_new_automation_saves_a_draft_and_refuses_http(cc):
     assert not a.approved and _log(cc.home, "setting")[-1]["field"] == "studio_new"
     cc.post("/studio/new", app="Plain", url="http://acme.example/")
     assert "https" in _tells(cc)[-1] and not (cc.flows / "studio_plain.yaml").exists()
-    assert "Delete" in cc.get("/studio")[1] and "Delete" in cc.get("/")[1]
+    assert "Delete" in cc.get("/studio")[1] and "Delete" in cc.get("/approvals")[1]
 
 
 def _delete(cc, kind, name):
@@ -2307,3 +2307,57 @@ def test_teach_approve_then_the_next_run_uses_the_learned_page(cc, monkeypatch):
     seen = run(desk, {})
     assert ("click", "Continue") in desk.calls and "new_page" not in [c["kind"] for c in seen]
     assert [c["kind"] for c in seen] == ["review", "review"]
+
+
+def test_nav_is_home_apps_studio_market_audit_approvals(panel):
+    nav = re.search(r"<nav class=rail.*?</nav>", panel.get("/")[1], re.S)[0]
+    assert re.findall(r">([A-Za-z ]+)</a>", nav) == ["Home", "Apps", "Studio", "Marketplace", "Audit log", "Approvals"]
+    assert "<h2>Approved</h2>" not in nav and "<h2>Drafts</h2>" not in nav
+
+
+def test_apps_page_shows_approved_apps_as_cards(panel):
+    body = panel.get("/apps")[1]
+    assert body.count("class=appcard") == 1 and "JobLens" in body and "Inbox briefing" not in body
+    assert "Himalayas Job Vetting" in body and "Never run" in body
+    assert "name=text value='run himalayas job vetting'" in body
+
+
+def test_apps_card_shows_running_and_queued(panel):
+    from test_panel_queue import _busy_with_inbox_queued
+    _busy_with_inbox_queued(panel)
+    body = panel.get("/apps")[1]
+    assert "<a class=go href='/'>Running…</a>" in body and "Queued #1" in body
+    assert "action=/unqueue" in body and "name=next value=/apps" in body
+
+
+def test_app_with_inputs_runs_through_its_input_card(panel):
+    from test_panel_queue import _approve
+    _approve(panel, "job_apply")
+    assert re.search(r"name=text value='/[a-z0-9-]+'", panel.get("/apps")[1])   # "/<slug>", not "run ..."
+
+
+def test_apps_card_shows_last_started(panel):
+    log = AuditLog(panel.home)
+    log.append("flow_start", flow="himalayas_job_vetting")
+    log.append("request", action="run_start", channel="totp_session", auth="ticket", session="s1")
+    log.append("flow_end", flow="himalayas_job_vetting", outcome="done")
+    body = panel.get("/apps")[1]
+    assert "Last started 20" in body and "Never run" not in body
+
+
+def test_apps_page_escapes_names(panel):
+    p = panel.flows / "himalayas_job_vetting.yaml"
+    p.write_text(re.sub(r"(?m)^  app: .*$", "  app: '<b>x</b>'", p.read_text(), count=1))
+    from test_panel_queue import _approve
+    _approve(panel, "himalayas_job_vetting")
+    body = panel.get("/apps")[1]
+    assert "&lt;b&gt;x&lt;/b&gt;" in body and "<b>x</b>" not in body
+
+
+def test_drafts_are_on_approvals(panel):
+    body = panel.get("/approvals")[1]
+    assert "Waiting for approval" in body and "Inbox briefing" in body and "action=/approve" in body
+
+
+def test_coding_agents_line_is_on_apps(panel):
+    assert "Governed: type /" not in panel.get("/")[1]

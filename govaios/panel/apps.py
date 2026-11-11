@@ -17,6 +17,7 @@ class App:
     path: Path
     digest: str
     approved: bool
+    title: str = ""   # the flow's workflow.name: the card's description line
 
 
 def list_apps(flows_dir: Path, home: Path) -> list[App]:
@@ -27,7 +28,7 @@ def list_apps(flows_dir: Path, home: Path) -> list[App]:
         try:
             digest, raw = read_bound(p, flows_dir.parent / "pages")
             wf = yaml.safe_load(raw[p])["workflow"]
-            out.append(App(wf["id"], wf.get("app") or wf["name"], p, digest, approvals.flow_ok(wf["id"], digest)))
+            out.append(App(wf["id"], wf.get("app") or wf["name"], p, digest, approvals.flow_ok(wf["id"], digest), wf["name"]))
         except Exception:   # unloadable file: not an app
             continue
     return sorted(out, key=lambda a: (not a.approved, a.name.lower()))
