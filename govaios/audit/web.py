@@ -299,7 +299,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
                             speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
-                            told=None, voice=None, card=None, run_id=None, fix_spoken=None, notify=_notify)
+                            told=None, voice=None, card=None, run_id=None, fix_spoken=None, notify=_notify,
+                            queue=[])   # (app id, digest at queue time, inputs), in order; memory only
 
     def tell(line):
         panel.convo.append(f"GOV-AIOS -> {line}")
@@ -312,12 +313,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         Ending and taking the run share panel.lock with say()'s run start, so a run cannot start unseen;
         run.stop may block (direct RunLaunch: up to 2 s; via the helper it returns at once): it runs after the lock,
         or goes on `later` when the caller holds the lock."""
-        with panel.lock:
-            sid = panel.session.end(reason)
-            run = panel.run if sid is not None and live() else None
-        if sid is None:
-            return None
+        run = None
         try:
+            with panel.lock:
+                sid = panel.session.end(reason)
+                run = panel.run if sid is not None and live() else None
+                clear_queue("the session ended.")
+            if sid is None:
+                return None
             log.append("session_end", session=sid, reason=reason)
         finally:   # a failed audit line must not leave the run going
             if run is not None:
@@ -371,7 +374,61 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if reason:
                 end_session(reason)   # Session.end hands the id out once: a racing request cannot end it twice
         report()
+        with panel.lock:   # checks, pop and start together: a Run typed meanwhile cannot slip in between
+            while (panel.queue and not live() and panel.told is panel.run and panel.session.active()
+                   and not runstate.stopped(home)):
+                with sign_lock:
+                    signed = any(now() - c < SIGNIN_S for c, _ in state["sessions"].values())
+                if not signed:
+                    clear_queue("signed out.")
+                    break
+                fid, digest, vals = panel.queue.pop(0)
+                app = next((a for a in apps() if a.id == fid), None)
+                # digest first: an edited flow is unapproved too, and the edit is the real reason
+                why = ("it is no longer approved." if app is None else "it changed since it was queued."
+                       if app.digest != digest else "it is no longer approved." if not app.approved else None)
+                if why is None:
+                    try:
+                        audited("run_queue", {"flow": fid, "outcome": "started"},
+                                lambda: start_run(app, vals, queued=True))
+                        break
+                    except Exception:
+                        why = "it did not start."
+                log.append("run_queue", flow=fid, outcome="dropped", reason=why)
+                tell(f"{app.name if app else fid} left the queue: {why}")
     panel.tick = tick
+
+    def start_run(hit, vals, queued=False):
+        t = tickets.create(home, hit.id, hit.digest, panel.session.id, vals or None)
+        r = launcher(hit.path, t, vals or None)
+        r.start()
+        panel.run, panel.app, panel.card, panel.run_id = r, hit, None, tickets.run_id(t)
+        tell(f"Starting {hit.name} (queued)." if queued else f"Starting {hit.name}.")
+
+    def clear_queue(why):
+        with panel.lock:
+            try:
+                for fid, _, _ in panel.queue:
+                    log.append("run_queue", flow=fid, outcome="cleared", reason=why)
+            finally:   # emptied even when an audit line fails: nothing may start from a cleared queue
+                was, panel.queue[:] = bool(panel.queue), []
+            if was:
+                tell(f"Queue cleared: {why}")
+
+    def unqueue(fid):
+        """Take the app out of the queue; False when it was not in it."""
+        with panel.lock:
+            i = next((i for i, e in enumerate(panel.queue) if e[0] == fid), None)
+            if i is None:
+                return False
+            log.append("run_queue", flow=fid, outcome="removed")
+            del panel.queue[i]
+            tell(f"{next((a.name for a in apps() if a.id == fid), fid)} taken out of the queue.")
+            return True
+
+    def unqueue_post(f):
+        unqueue(f.get("flow", ""))   # a stale ✕ (the app already started) just goes back
+        return f.get("next") if f.get("next") in ("/", "/apps") else "/"
 
     def apps():
         return list_apps(flows_dir, home) if flows_dir else []
@@ -1100,17 +1157,26 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if cm:
             claude_start(agents.CODEX if cm[1].lower() == "codex" else agents.CLAUDE, cm[2] or "")
             return "/"
+        uq = re.fullmatch(r"unqueue (.+)", text, re.I)
+        if uq:
+            kind, hit = match(uq[1], apps())
+            if kind not in ("run", "draft") or not unqueue(hit.id):
+                tell("That app is not in the queue.")   # never echo the words: they may hold a code
+            return "/"
         kind, hit = match(text, al := apps())
-        if kind == "run" and live():
-            tell(f"{panel.app.name} is still running.")
-        elif kind == "run" and (bad := invalid_input(hit, vals)):
+        if kind == "run" and (bad := invalid_input(hit, vals)):
             tell(f"That isn't a valid {bad}.")
+        # a done run not yet reported, or apps already waiting, must not be jumped
+        elif kind == "run" and (live() or panel.queue or panel.told is not panel.run):
+            n = next((i for i, e in enumerate(panel.queue, 1) if e[0] == hit.id), None)
+            if n:
+                tell(f"{hit.name} is already queued (#{n}).")
+            else:
+                audited("run_queue", {"flow": hit.id, "outcome": "queued"},
+                        lambda: panel.queue.append((hit.id, hit.digest, vals or None)))
+                tell(f"{hit.name} queued #{len(panel.queue)}.")
         elif kind == "run":
-            t = tickets.create(home, hit.id, hit.digest, panel.session.id, vals or None)
-            r = launcher(hit.path, t, vals or None)
-            r.start()
-            panel.run, panel.app, panel.card, panel.run_id = r, hit, None, tickets.run_id(t)
-            tell(f"Starting {hit.name}.")
+            start_run(hit, vals)
         elif kind == "draft":
             tell(f"{hit.name} is a draft. Get it approved first.")
         elif kind == "ambiguous":
@@ -1610,7 +1676,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/"
 
     POSTS = {"/terms": terms_post, "/lesson/approve": lesson_approve, "/lesson/discard": lesson_discard,
-             "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+             "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/unqueue": unqueue_post, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new,
              "/apps/delete": apps_delete}
     for _ag in agents.AGENTS.values():
@@ -1829,6 +1895,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if path == "/signout":   # this browser only; the code session stays open
                 with sign_lock:
                     state["sessions"].pop(sess[2], None)
+                clear_queue("signed out.")
                 return self._redirect("/")
             try:
                 loc = act(f)

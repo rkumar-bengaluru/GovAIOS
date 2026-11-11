@@ -270,10 +270,10 @@ def test_busy_text(panel):
     P.say("run joblens")
     assert '<meta http-equiv="refresh" content="2">' in P.get("/")[1]
     P.say("run joblens")
-    assert "JobLens is still running." in P.get("/")[1] and len(P.made) == 1
+    assert "JobLens queued #1." in P.get("/")[1] and len(P.made) == 1
     P.made[0].done = True
-    assert "refresh" not in P.get("/")[1]
-    P.say("run joblens")
+    assert "refresh" not in P.get("/")[1] and len(P.made) == 1
+    P.srv.panel.tick()
     assert len(P.made) == 2
 
 
