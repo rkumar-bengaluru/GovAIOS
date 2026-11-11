@@ -149,3 +149,15 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 - Consent checkboxes can't be filled from the bank yet.
 - Type then Enter misses the last value.
 - Reading a site's terms for the admin (Plan 3, second slice).
+
+## Panel: Apps page and run queue, follow-ups (2026-11-11)
+
+- "Last started" on an app card shows the raw ISO time; show it like "today 12:49".
+- Empty states: an empty Apps grid and an empty "Waiting for approval" list render nothing.
+- When a queued app auto-starts, the previous JobLens run's job list and result drop off Home (they are keyed on the run); the finished/stopped line stays.
+- Signing out of one browser clears the queue even if another browser is still signed in (as the spec says; revisit if two browsers are used).
+- A failed queued start writes three audit lines (started, error, dropped); a failed "dropped" audit loses the entry without a message.
+- An app queued while it is running shows only "Running…" on its card (no ✕); "unqueue <app>" removes it.
+- If an audit write fails as a session ends, the queue is cleared but the session_end line can be missing.
+- /apps re-reads the whole audit log on each load; App.title has no unit test; Home order tests anchor on strings.
+- tests/test_web_sandbox.py::test_full_lesson_returns_to_the_sandbox_card flaked once in a full run.
