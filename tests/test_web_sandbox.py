@@ -6,7 +6,7 @@ import time
 import pytest
 import yaml
 
-from govaios import applyfiles, engine
+from govaios import applyfiles, engine, terms
 from govaios.approvals import pages_used
 from govaios.engine import REPO, Runner
 from conftest import ACCT, FakeDesktop, N, google_home
@@ -46,7 +46,7 @@ def run_sandbox(tmp_path, desk, choices, monkeypatch, site=SITE, run_id="r1", fi
     monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))   # the start proof
     asked = []
-    monkeypatch.setattr(engine.auth, "approve", lambda q, r, h, **k: (asked.append(q), (first_contact, "biometric"))[1])
+    monkeypatch.setattr(engine.auth, "approve", lambda q, r, h, **k: (asked.append(q), (first_contact.pop(0) if isinstance(first_contact, list) else first_contact, "biometric"))[1])
     wf = yaml.safe_load(FLOW.read_text())
     wf["workflow"]["browser"]["account"] = ACCT
     src = tmp_path / "src"
@@ -87,7 +87,7 @@ def run_sandbox(tmp_path, desk, choices, monkeypatch, site=SITE, run_id="r1", fi
 def test_flow_is_read_only_with_a_site_input():
     wf = yaml.safe_load(FLOW.read_text())["workflow"]
     assert wf["app"] == "Web Sandbox" and wf["permissions"]["max_element_risk"] == "read"
-    assert set(wf["permissions"]["allow"]) == {"launch_application", "navigate", "read_page", "ask_admin", "write_draft"}
+    assert set(wf["permissions"]["allow"]) == {"launch_application", "navigate", "read_page", "ask_admin", "write_draft", "teach"}
     assert wf["destinations"] == ["https://www.google.com"] and wf["destination_inputs"] == ["site"]
     assert pages_used(wf) == {"google_home"}
 
@@ -104,6 +104,63 @@ def test_captures_each_page_the_admin_chooses(tmp_path, monkeypatch):
     files = sorted((tmp_path / "captures").iterdir())
     assert len(files) == 2 and json.loads(files[0].read_text())["reason"] == "sandbox"
     assert any(x.get("decision") == "deny" and x.get("action") == "read_page" for x in e)   # the other site
+
+
+LOOK = {"down": False, "pt": (0, 0), "hit": None, "focus": None, "url": SITE, "title": "Shop", "tab": True, "web": "w1"}
+
+
+class LessonDesk(SiteDesk):
+    def __init__(self, samples):
+        super().__init__(pages=[SITE])
+        self.samples = list(samples)
+
+    def web_root(self, app):
+        root = super().web_root(app)
+        if "google.com" not in self.url:
+            root.children.append(N("button", "Buy", handle="b1"))
+        return root
+
+
+def kinds(monkeypatch):
+    seen, orig = [], engine.Runner.card
+    monkeypatch.setattr(engine.Runner, "card", lambda self, kind, *a, **k: (seen.append(kind), orig(self, kind, *a, **k))[1])
+    return seen
+
+
+def test_teach_cancelled_returns_to_the_sandbox_card(tmp_path, monkeypatch):
+    terms.record(tmp_path, SITE, "allowed", "https://shop.example.com/terms", "ok")
+    seen = kinds(monkeypatch)
+    d = LessonDesk([LOOK] * 3)
+    e, err, _ = run_sandbox(tmp_path, d, ["capture", "teach", "cancel", "capture", "done"], monkeypatch)
+    assert err is None and e[-1]["kind"] == "flow_end"
+    assert "teaching" in seen and "terms" not in seen and "new_page" not in seen
+
+
+def test_teach_on_the_typed_site_asks_for_its_terms(tmp_path, monkeypatch):
+    seen = kinds(monkeypatch)   # no verdict stored: the typed site is not terms-exempt
+    e, err, _ = run_sandbox(tmp_path, LessonDesk([LOOK]), ["capture", "teach", "cancel", "done"], monkeypatch)
+    assert err is None and "terms" in seen and "teaching" not in seen
+
+
+def test_full_lesson_returns_to_the_sandbox_card(tmp_path, monkeypatch):
+    terms.record(tmp_path, SITE, "allowed", "https://shop.example.com/terms", "ok")
+    seen = kinds(monkeypatch)
+    d = LessonDesk([LOOK, {**LOOK, "down": True, "hit": "b1"}])   # then the tab is gone
+    e, err, _ = run_sandbox(tmp_path, d, ["capture", "teach", "done", "approved", "done"], monkeypatch)
+    assert err is None and e[-1]["kind"] == "flow_end"
+    assert seen[seen.index("teaching"):][:3] == ["teaching", "lesson", "sandbox"]
+    assert len(list((tmp_path / "lessons").iterdir())) == 1
+
+
+def test_refused_touch_id_at_teach_returns_to_the_card(tmp_path, monkeypatch):
+    other = "https://other.example.org/x"   # the typed site is already approved: Touch ID asks on another site
+    terms.record(tmp_path, other, "allowed", "https://other.example.org/terms", "ok")
+    seen = kinds(monkeypatch)
+    d = LessonDesk([LOOK])
+    d.pages = [other]
+    e, err, _ = run_sandbox(tmp_path, d, ["capture", "teach", "done"], monkeypatch, first_contact=[True, False, False])
+    assert err is None and e[-1]["kind"] == "flow_end" and "teaching" not in seen and d.samples == [LOOK]
+
 
 
 def test_site_refused_at_touch_id_stops(tmp_path, monkeypatch):
@@ -149,7 +206,7 @@ def test_site_typed_with_case_and_default_port_still_matches(tmp_path, monkeypat
     assert p["file"] is not None
 
 
-def test_each_capture_writes_a_draft_page_and_check_app(tmp_path, monkeypatch):
+def test_each_capture_writes_a_draft_page_and_no_check_app(tmp_path, monkeypatch):
     from govaios.panel.apps import list_apps
     d = SiteDesk(pages=[SITE])
     e, err, asked = run_sandbox(tmp_path, d, ["capture", "done"], monkeypatch)
@@ -160,7 +217,6 @@ def test_each_capture_writes_a_draft_page_and_check_app(tmp_path, monkeypatch):
     page = yaml.safe_load((src / "pages" / f"{pid}.yaml").read_text())["page"]
     assert page["elements"]["button_go"] == {"role": "button", "name": "Go", "risk": "submit"}
     apps = {a.id: a for a in list_apps(src / "flows", tmp_path)}
-    check = apps[f"check_{pid}"]
-    assert check.name.startswith("Check ") and not check.approved   # a Draft until the admin approves it
+    assert not any(i.startswith("check_") for i in apps)   # no Check app any more
     assert any(x.get("action") == "write_draft" and x.get("outcome") == "done" for x in e)
     assert any(x.get("action") == "write_draft" and x.get("decision") == "allow" for x in e)

@@ -16,7 +16,7 @@ workflow:
   destination_inputs: [site]            # the site you type, Touch ID on first contact; nothing else
 
   permissions:                          # Rule 9: unlisted = denied. Read only: it never clicks or types on the site.
-    allow: [launch_application, navigate, read_page, ask_admin, write_draft]   # write_draft: Drafts only, never approved
+    allow: [launch_application, navigate, read_page, ask_admin, write_draft, teach]   # write_draft: Drafts only, never approved
     max_element_risk: read
   destinations: ["https://www.google.com"]
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,7 @@ class Entry:
     key: str
     labels: tuple[str, ...]
     answer: str
+    learned: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,7 +106,10 @@ def load_bank(path: Path, user_home: Path) -> Bank:
             raise BankError(f"entry {key}: bad labels")
         if not isinstance(ans, str) or len(ans) > 2000 or not ok_value(ans, "textarea"):
             raise BankError(f"entry {key}: bad answer")
-        entries.append(Entry(key, tuple(labels), ans))
+        learned = r.get("learned", False)
+        if not isinstance(learned, bool):
+            raise BankError(f"entry {key}: bad learned")
+        entries.append(Entry(key, tuple(labels), ans, learned))
     return Bank(tuple(entries), cv)
 
 
@@ -136,6 +141,16 @@ def stage_text(path: Path, text: str) -> Path:
     return tmp
 
 
+def new_key(label: str, taken) -> str:
+    """A bank key named from the label (snake case, at most 40), not in taken."""
+    base = normalize(label).replace(" ", "_")[:40] or "answer"
+    key, n = base, 1
+    while key in taken:
+        n += 1
+        key = f"{base[:40 - len(str(n)) - 1]}_{n}"
+    return key
+
+
 def add_answer(path: Path, label: str, answer: str) -> str:
     if not ok_value(answer, "textarea") or len(answer) > 2000:
         raise BankError("answer refused")
@@ -143,18 +158,64 @@ def add_answer(path: Path, label: str, answer: str) -> str:
     bank = load_bank(path, path.parent)
     if len(label) > 300 or len(bank.entries) >= 300:
         raise BankError("label too long or bank full")
-    base = normalize(label).replace(" ", "_")[:40] or "answer"
-    key, n = base, 1
-    taken = {e.key for e in bank.entries}
-    while key in taken:
-        n += 1
-        key = f"{base[:40 - len(str(n)) - 1]}_{n}"
-    doc = {"answers": [{"key": e.key, "labels": list(e.labels), "answer": e.answer} for e in bank.entries]
-           + [{"key": key, "labels": [label], "answer": answer}]}
-    if bank.cv_file:
-        doc["cv_file"] = bank.cv_file
-    os.replace(stage_text(path, yaml.safe_dump(doc, allow_unicode=True)), path)
+    key = new_key(label, {e.key for e in bank.entries})
+    os.replace(stage_text(path, _dump(bank.entries + (Entry(key, (label,), answer),), bank.cv_file)), path)
     return key
+
+
+def _dump(entries, cv_file) -> str:
+    rows = [{"key": e.key, "labels": list(e.labels), "answer": e.answer, **({"learned": True} if e.learned else {})}
+            for e in entries]
+    doc = {"answers": rows, **({"cv_file": cv_file} if cv_file else {})}
+    return yaml.safe_dump(doc, allow_unicode=True)
+
+
+def apply_ops(path: Path, ops: list[dict], dry: bool = False) -> None:
+    """Apply approved (keep == "bank") lesson ops all-or-nothing: backup the bank, then replace it.
+    dry: only check them against the bank as it is now (BankError), writing nothing."""
+    ops = [o for o in ops if o.get("keep") == "bank"]
+    if not ops:
+        return
+    _check_dir(path)
+    bank = load_bank(path, path.parent)
+    by = {e.key: e for e in bank.entries}
+    for o in ops:
+        kind, key, label, value = o.get("op"), o.get("key"), o.get("label"), o.get("value")
+        if kind not in ("add", "label", "change") or not isinstance(key, str) or not isinstance(label, str):
+            raise BankError("bad op")
+        if len(label) > 300 or (kind == "add" and key in by) or (kind != "add" and key not in by):
+            raise BankError(f"op {kind}: key {key!r} refused")
+        if kind != "label" and (not isinstance(value, str) or len(value) > 2000 or not ok_value(value, "textarea")):
+            raise BankError("answer refused")
+        if kind == "add":
+            if not _KEY.fullmatch(key):
+                raise BankError("bad key")
+            by[key] = Entry(key, (label,), value, True)
+        else:
+            e = by[key]
+            labels = e.labels if label in e.labels or not label else e.labels + (label,)
+            if len(labels) > 20:
+                raise BankError(f"entry {key}: too many labels")
+            by[key] = Entry(key, labels, value if kind == "change" else e.answer, True)
+        if len(by) > 300:
+            raise BankError("bank full")
+    if dry:
+        return
+    raw = read_bank(path)
+    if raw is not None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        for n in range(1, 100):
+            bak = path.with_name(f"{path.name}.bak-{stamp}" + (f"-{n}" if n > 1 else ""))
+            try:
+                fd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise BankError("no backup name free")
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+    os.replace(stage_text(path, _dump(tuple(by.values()), bank.cv_file)), path)
 
 
 FIELD_ROLES = {"text_field", "text_area", "combo_box", "popup_button", "radio", "checkbox"}
@@ -262,7 +323,7 @@ def restricted(f: Field) -> str | None:
 
 def answer_for(f: Field, bank: Bank, fields: list[Field]) -> tuple[str, str] | None:
     nl = normalize(f.label)
-    if not nl or restricted(f) or f.filled or f.kind not in ASKABLE:
+    if not nl or f.filled or f.kind not in ASKABLE:
         return None
     if sum(1 for g in fields if normalize(g.label) == nl) != 1:
         return None
@@ -270,6 +331,8 @@ def answer_for(f: Field, bank: Bank, fields: list[Field]) -> tuple[str, str] | N
     if len(hits) != 1 or not ok_value(hits[0].answer, f.kind):
         return None
     e = hits[0]
+    if restricted(f) and not e.learned:
+        return None
     if f.kind in ("select", "radio"):
         m = [o for o in f.options if normalize(o) == normalize(e.answer)]
         return (m[0], f"bank:{e.key}") if len(m) == 1 and ok_value(m[0], f.kind) else None

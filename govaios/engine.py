@@ -14,9 +14,9 @@ from pathlib import Path
 import yaml
 from urllib.parse import urlsplit
 
-from . import auth, capture, runstate, studio
+from . import auth, capture, runstate, studio, terms
 from .agents import user_home
-from .applyfiles import ASK, BANK, CARDS, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
+from .applyfiles import ASK, BANK, CARDS, LESSON_LIVE, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
                        read_form, restricted)
 from .audit.log import AuditLog, url_for_audit
@@ -29,18 +29,24 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 
 
 NO_DEST = object()
+LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over")   # what a taught page may do (Studio lessons)
+MAX_LEARNED = 10   # learned pages run within one classify_page call
 FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
+TEACH_IDLE_S = 1800   # the teaching card ends after 30 min with no new event
+LIVE_LINES = 50
 
 
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
              "the browser has no window in front")
-
-
 def _ends_run(e):
     m = str(e)
     return m.startswith(RUN_STOPS) or m.startswith("input refused") and "not on the target element" not in m
+
+
+class TeachEnded(Stop):
+    """A lesson's own outcome (cancelled, discarded, learned, skipped, terms refused): the job ends, the run goes on."""
 
 
 class Denied(Stop):
@@ -109,6 +115,38 @@ def identify(page, root):
     return True
 
 
+def check_learned(steps):
+    """A learned page case {do: [steps], then: again|end}: only the allowed actions, each with its own id."""
+    ids = []
+
+    def walk(steps):
+        for s in steps:
+            ids.append(s.get("id"))
+            walk(s.get("steps", []))
+            for page, v in s.get("on_match", {}).items():
+                if not (isinstance(v, dict) and "do" in v):
+                    continue
+                if page == "unknown":   # its steps would run on a page the engine never identified
+                    raise Stop("learned steps: unknown cannot be taught")
+                if not isinstance(v["do"], list) or not v["do"]:
+                    raise Stop(f"learned steps: {page} has no steps")
+                if v.get("then") not in ("again", "end"):
+                    raise Stop("learned steps: then must be again or end")
+                for d in v["do"]:
+                    if not isinstance(d, dict) or not d.get("id"):
+                        raise Stop("learned steps: a step without an id")
+                    if d.get("action") not in LEARNED_ACTIONS:
+                        raise Stop(f"learned steps: {d.get('action')} not allowed")
+                    ids.append(d["id"])
+                    learned.add(d["id"])
+
+    learned = set()
+    walk(steps)
+    for i in sorted(learned):
+        if ids.count(i) > 1:
+            raise Stop(f"duplicate step id: {i}")
+
+
 def approval_question(f, deliver):
     return (f"First run of flow '{f['id']}' (v{f['version']}). It may: {', '.join(f['permissions']['allow'])}; "
             f"max element risk {f['permissions']['max_element_risk']}; destinations "
@@ -167,6 +205,15 @@ def _option(group, value):
     return next((n for n in group.walk() if n.role == "radio" and n.name == value), None)
 
 
+def _lesson_line(e):
+    """One live line for the panel: the element's label and what was done, never the value (a fill: its length)."""
+    label = (e.get("label") or "a field")[:80]
+    if e["kind"] == "fill":
+        return f"{label} \u2190 hidden" if e.get("secure") else f"{label} \u2190 {len(e.get('value') or '')} chars"
+    return {"click": f"clicked {label}", "tick": f"ticked {label}", "choose": f"chose an option in {label}",
+            "attach": f"attached a file to {label}"}.get(e["kind"], f"{e['kind']} {label}")
+
+
 # ---------- executor ----------
 
 class Runner:
@@ -188,6 +235,7 @@ class Runner:
         self.flow = yaml.safe_load(raw[self.flow_path])["workflow"]
         if not re.fullmatch(r"[a-z0-9_]+", str(self.flow.get("id"))):   # it becomes part of a report filename
             raise Stop("invalid flow id")
+        check_learned(self.flow["steps"])
         try:
             self.deliver = check_block(self.flow)
         except ValueError as e:
@@ -200,6 +248,7 @@ class Runner:
         self.approvals = Approvals(self.home / "approvals.json")
         self.audit = AuditLog(self.home)
         self.step = None
+        self.file_destinations = list(self.flow.get("destinations", []))   # before a typed site joins: terms-exempt
         self.pages = {}
         for pid in sorted(pages_used(self.flow)):
             self.pages[pid] = yaml.safe_load(raw[self.pages_dir / f"{pid}.yaml"])["page"]
@@ -233,10 +282,12 @@ class Runner:
         return ok, how
 
     # governance gate for every side effect
-    def gate(self, action, risk, target=None, destination=NO_DEST, question=None):
+    def gate(self, action, risk, target=None, destination=NO_DEST, question=None, keep=True):
+        """keep=False: a first-contact approval holds for this call only, never remembered (teach)."""
         if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
             raise Stop("emergency stop")
-        if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked since approve_flow
+        now = self.approvals.snapshot()["flows"].get(self.flow["id"])
+        if now is None or now not in (self.digest, getattr(self, "superseded", None)):   # revoked since approve_flow
             raise Stop("revoked")
         if destination is not NO_DEST and not destination:   # blank/None URL: fail closed
             self._audit("request", action=action, risk=risk, target=target, decision="deny",
@@ -255,7 +306,7 @@ class Runner:
         self._audit("request", action=action, risk=risk, target=target, destination=dest, decision=verdict,
                     approver="admin" if asked else "policy", channel="touch_id" if asked else None, auth=how,
                     shown=self.shown if asked else None)
-        if remember:   # only once the approval is on record
+        if remember and keep:   # only once the approval is on record
             self.approvals.approve_destination(self.flow["id"], origin(destination))
         if verdict != "allow":
             raise Denied(f"denied {action}: approval busy" if how == "busy" else f"denied {action} (risk {risk}) {dest or ''}")
@@ -411,6 +462,8 @@ class Runner:
                 raise Stop("emergency stop")
             self.step = s["id"]
             out = getattr(self, "do_" + s["action"])(s)
+            if out == ("end",):   # a learned page ended this list (the job is done)
+                return
             if isinstance(out, tuple) and out[0] == "skip_to":
                 if not any(x["id"] == out[1] for x in steps[i + 1:]):
                     raise Stop(f"skip_to {out[1]}: no such later step")
@@ -430,21 +483,38 @@ class Runner:
         if f"({want})" not in node.name:
             raise Stop("wrong browser profile: account on page does not match the flow")
         self.d.pin_window(window)   # refuses if focus left that window during the check
+        self.pinned = True   # teach observes only this window
 
     def do_navigate(self, s):
         value = self.inputs[s["value_from"].removeprefix("input.")] if "value_from" in s else s["value"]
-        self.gate("navigate", "navigate", destination=value)
+        self._go(value)
+
+    def _go(self, url):
+        self.gate("navigate", "navigate", destination=url)
         self._act("press", self.d.press, "focus_address_bar")
-        self._act("type_text", self.d.type_text, value)
+        self._act("type_text", self.d.type_text, url)
         self._act("press", self.d.press, "enter")
         time.sleep(2)
 
     def do_classify_page(self, s):
         cases = s["on_match"]
         candidates = [p for p in cases if p != "unknown"]
-        for attempt in range(3):                         # bounded resumes (Rule 10)
+        attempts = learned = 0
+        while attempts < 3:                              # bounded resumes (Rule 10)
             page, root = self.wait_for_page(candidates, s.get("timeout_seconds", 20))
             what = cases.get(page or "unknown", "stop_and_report")
+            if isinstance(what, dict) and "do" in what:  # a page the admin taught: its steps, then look again or end
+                learned += 1
+                if learned > MAX_LEARNED:
+                    raise Stop("too many learned pages in a row")
+                self.gate("read_page", "read", destination=self.d.current_url(self.app))
+                self.ctx["page"] = page
+                self.steps(what["do"])                   # each step through its own gate (click: risk ceiling)
+                self.step = s["id"]
+                if what["then"] == "end":
+                    return ("end",)
+                continue
+            attempts += 1
             if what == "continue":
                 url = self.d.current_url(self.app)
                 self.gate("read_page", "read", destination=url)      # landed origin must be declared
@@ -457,6 +527,9 @@ class Runner:
                 self.do_click({"id": self.step, "target": f"{page}.{what['click']}"})
                 continue
             if what == "stop_and_report":
+                if page is None and self.run_id is not None and decide(
+                        {"action": "teach", "risk": "read", "destination": None}, self.flow, self.approvals) == "allow":
+                    self.teach(self.step)   # always raises Stop
                 raise Stop("unexpected page")
             # stop_and_request_user (Rule 6)
             ok, how = self.ask(f"GOV-AIOS stopped at '{page}'. Complete it yourself in Chrome, "
@@ -560,6 +633,12 @@ class Runner:
             choice = self.card("sandbox", f"{len(pages)} captured")
             if choice == "done":
                 return
+            if choice == "teach":
+                try:
+                    self.teach(self.step, offered=True)
+                except (TeachEnded, Denied):   # the lesson ends, not the sandbox; safety stops go on
+                    pass
+                continue
             url = self.d.current_url(self.app)
             try:
                 self.gate("read_page", "read", destination=url)
@@ -623,11 +702,19 @@ class Runner:
             ref = tgt
         self.gate("click", spec["risk"], target=ref)
         before = self.d.current_url(self.app)
+        # open_link: go to the link's own address instead of clicking it (JobLens's two-line titles defeat the
+        # click-point check); same site only, so it never reaches a destination the click could not
+        url = self.d.link_url(node) if s.get("open_link") else None
+        if url and origin(url) != origin(before):
+            url = None
         for attempt in range(2):                         # one bounded retry (Rule 10)
-            self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
-            node, spec = (self._current_item_node(tgt.split(".", 1)[1]) if tgt.startswith("current_item.")
-                          else self.page_element(tgt))   # positions changed after scrolling
-            self._act("click", self.d.click, node, target=ref)
+            if url:
+                self._go(url)
+            else:
+                self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
+                node, spec = (self._current_item_node(tgt.split(".", 1)[1]) if tgt.startswith("current_item.")
+                              else self.page_element(tgt))   # positions changed after scrolling
+                self._act("click", self.d.click, node, target=ref)
             if "verify_page" not in s:
                 return
             page, _ = self.wait_for_page([s["verify_page"]], s.get("timeout_seconds", 15))
@@ -759,7 +846,7 @@ class Runner:
             self.ctx["apply"]["yourself"].append(f.label)
         return ok
 
-    def card(self, kind, label):
+    def card(self, kind, label, tick=None):
         """Panel run only: show a card (applyfiles.CARDS) and wait for the admin's choice, then bring the pinned
         window back. None when there is no panel or the flow may not ask (a CLI run carries on without it)."""
         if self.run_id is None or decide({"action": "ask_admin", "risk": "read", "destination": None},
@@ -769,12 +856,91 @@ class Runner:
         task = self._current_task()
         cap, self.last_capture = getattr(self, "last_capture", None), None   # the page saved for this card, if any
         reply = self._ask({"card": {"kind": kind, "label": label[:300], "capture": cap if kind != "sandbox" else None,
-                                    "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}})
+                                    "job": task["title"] if task else "", "item": self.ctx.get("task") or 0}}, tick,
+                          TEACH_IDLE_S if kind in ("lesson", "terms") else ASK_TIMEOUT_S)   # reading terms or a lesson takes time
         choice = reply.get("card")
         if choice not in CARDS[kind]:
             raise Stop("bad reply")
         self._act("raise_pinned", self.d.raise_pinned)
         return choice
+
+    def teach(self, step_id, offered=False):
+        """Studio: the admin does an unknown page in Chrome while the read-only observer records it as a lesson.
+        Always ends this job with a Stop; a lesson is used only once approved, from the next run."""
+        if not getattr(self, "pinned", False):
+            raise Stop("teach needs the pinned browser window")
+        before = self.flow["destinations"]
+        try:
+            self._teach(step_id, offered)
+        finally:
+            self.flow["destinations"] = before   # a taught site is allowed for the lesson only
+
+    def _teach(self, step_id, offered):
+        from . import lessons, observer   # lessons imports engine
+        if not offered and self.card("new_page", "A page this flow does not know") != "teach":
+            raise TeachEnded("unexpected page")
+        url = self.d.current_url(self.app) or ""
+        site = origin(url)
+        declared = {origin(d) for d in self.file_destinations}
+        if terms.verdict(self.home, url, declared) != "allowed" and (
+                self.card("terms", site) != "checked" or terms.verdict(self.home, url, declared) != "allowed"):
+            raise TeachEnded("site terms do not allow a personal agent")
+        before = self.flow["destinations"]
+        if site not in {origin(d) for d in before}:   # in memory, this run only; Touch ID each time, never remembered:
+            self.flow["destinations"] = [*before, site]   # the lesson's own approval is where a site joins the flow
+        self.gate("read_page", "read", destination=url, keep=False)   # refused: never read (or captured)
+        allowed = {origin(d) for d in self.flow["destinations"]}
+        tab = self.d.teach_tab(self.app)
+        obs = observer.Observer(self.d, self.app, self.d.same)
+        lines, last = [], [time.monotonic()]
+
+        class Left(Exception):
+            pass
+
+        def snap():
+            root = self.d.web_root(self.app)
+            url = self.d.current_url(self.app) or ""   # after the read: a navigation in between is never stored
+            if origin(url) not in allowed:
+                raise Left(url)
+            return root
+
+        def tick():
+            left = []
+            try:
+                sample = self.d.observe_sample(self.app)
+                # never snapshot a site not approved for this lesson: end it as if the tab closed. Other tabs are
+                # not the lesson (the observer ignores them). shortcut: fails closed on any other site; ask terms +
+                # Touch ID there when lessons span sites
+                if sample.get("tab") and self.d.same(sample.get("web"), tab) and \
+                        origin(sample.get("url") or "") not in allowed:
+                    raise Left(sample.get("url") or "")
+                evs = obs.feed(sample, snap)
+            except Left as e:
+                left = [f"left {(urlsplit(str(e)).hostname or 'the site')[:100]}: lesson ended"]
+                evs = obs.feed({"tab": False}, snap)
+            except Exception:   # the window closed mid-look: the teach tab is gone
+                evs = obs.feed({"tab": False}, snap)
+            if evs or left:
+                lines.extend([*(_lesson_line(e) for e in evs), *left])
+                del lines[:-LIVE_LINES]
+                write_json(self.home, LESSON_LIVE, {"run": self.run_id, "lines": lines})
+                last[0] = time.monotonic()
+            if obs.ended or time.monotonic() - last[0] > TEACH_IDLE_S:
+                return {"run": self.run_id, "card": "done"}   # what was recorded so far is kept
+            return None
+        try:
+            choice = self.card("teaching", "Do this page in Chrome", tick)
+        finally:
+            remove(self.home, LESSON_LIVE)
+        if choice != "done" or not any(p["events"] for p in obs.pages):
+            raise TeachEnded("lesson cancelled")
+        name = lessons.save(self.home, self.flow["id"], self.digest, step_id, obs.pages)
+        self._audit("lesson", outcome="recorded", target=name)
+        if self.card("lesson", name) == "approved":
+            # the panel approved the flow as the lesson rewrote it: this run keeps the flow it started with
+            self.superseded = self.approvals.snapshot()["flows"].get(self.flow["id"])
+            raise TeachEnded("page learned: it is used from the next run")
+        raise TeachEnded("lesson discarded")
 
     def fix_by_hand(self, f, shown0):
         """Panel run only: the admin fills the failed field in Chrome, then Continue (or Skip). Re-read after."""
@@ -828,12 +994,16 @@ class Runner:
             self._act("click", self.d.click, node, target=label)
         return True
 
-    def do_fill_form(self, s):
+    def _new_apply(self):
         try:
             bank = load_bank(self.home / BANK, user_home())
         except BankError as e:
             raise Stop(f"answer bank: {e}") from None
-        a = self.ctx["apply"] = {"bank": bank, "filled": 0, "total": 0, "yourself": [], "check": [], "pending": []}
+        self.ctx["apply"] = {"bank": bank, "filled": 0, "total": 0, "yourself": [], "check": [], "pending": []}
+        return self.ctx["apply"]
+
+    def do_fill_form(self, s):
+        a = self._new_apply()
         done = set()
         for _ in range(FORM_PASSES):   # a fill can reveal conditional fields
             fields = read_form(self._form()[1])
@@ -843,7 +1013,7 @@ class Runner:
             for f in new:
                 done.add(f.key)
                 a["total"] += 1
-                hit = answer_for(f, bank, fields)
+                hit = answer_for(f, a["bank"], fields)
                 if f.filled:
                     a["check"].append(f.label)
                 elif hit:
@@ -858,7 +1028,7 @@ class Runner:
     def do_attach_file(self, s):
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
         from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
-        a, ref = self.ctx["apply"], self.ref(s["target"])
+        a, ref = self.ctx.get("apply") or self._new_apply(), self.ref(s["target"])   # a learned attach: no fill before
         a["yourself"].append("Resume/CV")   # until attached: a stop from here on leaves it on the result card
         self.write_result()
         p = cv_path(a["bank"], user_home())
@@ -923,13 +1093,14 @@ class Runner:
             else:
                 a["yourself"].append(f.label)
 
-    def _ask(self, body):
-        """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it)."""
+    def _ask(self, body, tick=None, timeout=ASK_TIMEOUT_S):
+        """Write ask.json for the panel and wait for this run's reply.json (emergency stop, lock and timeout end it).
+        tick (the teaching card): called every 0.2 s, its reply dict ends the wait; it keeps its own idle timeout."""
         try:
             remove(self.home, REPLY)   # a late reply to an earlier ask in this run must not answer this one
             self.asks = getattr(self, "asks", 0) + 1   # each ask unique: a stale reply never answers the next one
             write_json(self.home, ASK, {"run": self.run_id, "seq": self.asks, **body})
-            deadline = time.monotonic() + ASK_TIMEOUT_S
+            deadline = time.monotonic() + timeout
             while True:
                 reply = read_json(self.home, REPLY)   # None mid-write or garbled: not yet
                 if reply and reply.get("run") == self.run_id:
@@ -938,9 +1109,13 @@ class Runner:
                     raise Stop("emergency stop")
                 if auth.screen_locked():
                     raise Stop("screen_locked")
-                if time.monotonic() > deadline:
+                if tick is not None:
+                    reply = tick()
+                    if reply is not None:
+                        break
+                elif time.monotonic() > deadline:
                     raise Stop("no answer from admin")
-                time.sleep(1)
+                time.sleep(0.2 if tick is not None else 1)
         finally:
             remove(self.home, ASK, REPLY)
         return reply

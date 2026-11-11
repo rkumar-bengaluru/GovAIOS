@@ -69,6 +69,8 @@ def _s(v):
 class InputRefused(Stop, RuntimeError):
     """A safety refusal with fixed text (never page content), so the run prints and audits it as a stop."""
 
+CLICK_TRIES = 6
+
 class MacDesktop:
     platform = "macos"
 
@@ -218,6 +220,8 @@ class MacDesktop:
         neutral = NEUTRAL.get(f"{role}/{sub}") or NEUTRAL.get(role) or f"native:{role}"
         if neutral == "tab" and parent_role != "AXTabGroup":
             neutral = "radio"   # Chrome's role=tab and plain radios are both AXRadioButton
+        if "AXSecureTextField" in (role, sub):   # Chrome: the role; AppKit: AXTextField + this subrole
+            neutral, value = "native:AXSecureTextField", ""   # a password never reaches a snapshot (lessons store trees)
         node = Node(role=neutral, name=_s(title) or _s(desc), value=_s(value), dom_id=_s(dom_id),
                     dom_class=tuple(c for c in classes if isinstance(c, str)) if hasattr(classes, '__iter__') and not isinstance(classes, str) else (), handle=el)
         if neutral == "document" and self._count > 1:
@@ -253,24 +257,33 @@ class MacDesktop:
         # last: the first line's left spot, for a link that wraps (its box centre falls between the lines)
         return (x + min(w / 2, 20), y + h / 2), (x + w / 2, y + h / 2), (x + min(w / 2, 20), y + min(h / 2, 9))
 
+    def link_url(self, node):
+        """The link's own address (AXURL), or None."""
+        u = _attr(node.handle, "AXURL") if node.handle is not None else None
+        return str(u.absoluteString()) if hasattr(u, "absoluteString") else (str(u) if u else None)
+
     def click(self, node):
         self._require_focus()
-        for attempt in range(3):
-            last = attempt == 2
+        # 6 tries (~5 s): Chrome answers a hit on a fresh or just-hovered wrapped link with its cell for a few
+        # seconds before its text (JobLens EVERSANA, 2026-11-09); the check stays strict, it just waits
+        for attempt in range(CLICK_TRIES):
+            last = attempt == CLICK_TRIES - 1
             pt = None
             # left spot first (link text, not trailing whitespace), then the centre, then the first line: a page button can sit over
             # an option's left edge (Greenhouse "Locate me" under the Location list)
             pts = self._settled_points(node)
             for i, p in enumerate(pts):
-                if self._point_ok(p, node, last and i == len(pts) - 1):
-                    pt = p
-                    break
+                final = last and i == len(pts) - 1
+                if self._point_ok(p, node, final):
+                    self._mouse(Q.kCGEventMouseMoved, p)
+                    time.sleep(PACE["pointer"])
+                    # re-check after the pointer pause, before the button goes down (nothing pressed yet: safe to
+                    # retry); a hover restyle can move a wrapped link's line break, so a failed spot tries the next
+                    if self._point_ok(p, node, final):
+                        pt = p
+                        break
             if pt is not None:
-                self._mouse(Q.kCGEventMouseMoved, pt)
-                time.sleep(PACE["pointer"])
-                # re-check after the pointer pause, before the button goes down (nothing pressed yet: safe to retry)
-                if self._point_ok(pt, node, last):
-                    break
+                break
             time.sleep(0.5)   # a page still scrolling or loading: Chrome's AX bounds can lag the layout ~1 s
         self._mouse(Q.kCGEventLeftMouseDown, pt)
         time.sleep(0.08)
@@ -343,6 +356,80 @@ class MacDesktop:
         for ch in text:
             self._char(self._require_focus(), ch)   # per character: focus can move mid-word
         time.sleep(PACE["after_action"])
+
+    # --- observation (Studio lessons): read only, never posts input ---
+    def same(self, a, b):
+        return a is b or (a is not None and b is not None and bool(CFEqual(a, b)))
+
+    def _win(self, app):
+        return self._window if self._window is not None else _attr(self._ax_app(app), "AXFocusedWindow")
+
+    def _selected_tab(self, el, depth=12):
+        """The selected tab button in the window's tab strip (AXTabGroup > AXRadioButton, AXValue 1);
+        page content (AXWebArea) is not searched, so a site's own tab list never counts."""
+        if el is None or depth == 0:
+            return None
+        role = _s(_attr(el, "AXRole"))
+        if role == "AXWebArea":
+            return None
+        kids = _attr(el, "AXChildren") or []
+        if role == "AXTabGroup":
+            return next((k for k in kids if _s(_attr(k, "AXRole")) == "AXRadioButton" and _attr(k, "AXValue") == 1), None)
+        for k in kids:
+            hit = self._selected_tab(k, depth - 1)
+            if hit is not None:
+                return hit
+        return None
+
+    def _tab_id(self, app):
+        win = self._win(app)
+        tab = self._selected_tab(win)
+        self._tab_source = "tab_strip"
+        if tab is None and win is not None:
+            # shortcut: no tab strip found (e.g. a tabless app window), so the web area stands in; it changes per document
+            tab, self._tab_source = self._find(win, "AXWebArea", 30), "web_area"
+        return tab
+
+    def teach_tab(self, app):
+        """The tab the admin teaches in: Chrome's selected tab of the pinned window (stable across navigation).
+        Call it before observe_sample. teach_tab_source says which path found it: "tab_strip" or "web_area"."""
+        self._teach = self._tab_id(app)
+        self.teach_tab_source = self._tab_source
+        return self._teach
+
+    def _hit(self, pt):
+        """Element under pt if it is in the target app and the pinned window, else None (never raises)."""
+        err, hit = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), pt[0], pt[1], None)
+        if err != 0 or hit is None:
+            return None
+        perr, pid = AXUIElementGetPid(hit, None)
+        if perr != 0 or pid != self._target_pid():
+            return None
+        if self._window is None or not self.same(_attr(hit, "AXWindow"), self._window):
+            return None
+        return hit
+
+    def observe_sample(self, app):
+        """One look at mouse, focus, url, title and tabs (teach_tab first). Polls button state and the down
+        counter, so a tap inside one poll still shows down once; no event tap, no input posted. hit/focus/web are
+        None unless the pinned window has focus (devtools, a popup or another window are not the lesson);
+        Chrome gone -> tab False, never raises."""
+        st = Q.kCGEventSourceStateCombinedSessionState
+        count = Q.CGEventSourceCounterForEventType(st, Q.kCGEventLeftMouseDown)
+        tapped = getattr(self, "_downs", None) is not None and count > self._downs
+        self._downs = count
+        p = Q.CGEventGetLocation(Q.CGEventCreate(None))
+        pt = (p.x, p.y)
+        down = bool(Q.CGEventSourceButtonState(st, Q.kCGMouseButtonLeft)) or tapped
+        if self._app(app) is None or (self._target and self._app(self._target) is None):   # Chrome quit
+            return {"down": down, "pt": pt, "hit": None, "focus": None, "url": "", "title": "", "tab": False, "web": None}
+        teach = getattr(self, "_teach", None)
+        win = _attr(self._ax_app(app), "AXFocusedWindow")
+        mine = self._window is not None and self.same(win, self._window)
+        return {"down": down, "pt": pt, "hit": self._hit(pt) if mine else None, "focus": self._focus_el() if mine else None,
+                "url": self.current_url(app), "title": self.window_title(app),
+                "tab": teach is not None and _attr(teach, "AXRole") is not None,
+                "web": self._tab_id(app) if mine else None}
 
     def _focus_el(self):
         return _attr(AXUIElementCreateApplication(self._target_pid()), "AXFocusedUIElement")

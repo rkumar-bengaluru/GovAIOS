@@ -11,7 +11,7 @@ workflow:
     account: rupak.kumar.ambasta02@gmail.com   # verified on google.com before any site
 
   permissions:                          # Rule 9: unlisted = denied
-    allow: [launch_application, navigate, read_page, click, fill_field, ask_admin, attach_file]
+    allow: [launch_application, navigate, read_page, click, fill_field, ask_admin, attach_file, teach]
     max_element_risk: modify            # Submit / Autofill / Apply with LinkedIn / Mark submitted are submit: the admin does them
   destinations: ["https://www.google.com", "http://localhost:8100", "https://himalayas.app", "https://job-boards.greenhouse.io", "https://jobs.lever.co"]
 
@@ -29,7 +29,7 @@ workflow:
       steps:
         - { id: job_tab, action: new_tab }   # each job in its own tab: an earlier job's form stays as you left it
         - { id: open_list, action: navigate, value: "http://localhost:8100/" }
-        - { id: open_job, action: click, target: current_item.role, verify_page: joblens_job }
+        - { id: open_job, action: click, open_link: true, target: current_item.role, verify_page: joblens_job }   # by its address: two-line titles defeat the click check
         - { id: open_apply, action: click, target: joblens_job.apply_button }
         - id: authentication_guard
           action: classify_page

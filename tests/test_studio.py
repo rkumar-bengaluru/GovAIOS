@@ -1,4 +1,4 @@
-"""Studio drafts: a capture becomes a draft page schema and a read-only Check app; bigger flows link pages by id."""
+"""Studio drafts: a capture becomes a draft page schema and a start link; bigger flows link pages by id."""
 import yaml
 
 from govaios import engine, studio
@@ -36,24 +36,23 @@ def test_draft_page_identifies_its_own_capture_and_each_element_is_unique():
     assert "SECRET-VALUE" not in yaml.safe_dump(page) and len(el) == 6
 
 
-def test_check_app_is_read_only_and_drops_the_query():
-    f = studio.draft_check_flow("acme_careers", "https://acme.example/jobs?token=SECRET", BROWSER, "Careers | Acme")["workflow"]
-    assert f["permissions"] == {"allow": ["launch_application", "navigate", "read_page"], "max_element_risk": "read"}
-    assert f["destinations"] == ["https://www.google.com", "https://acme.example"]
-    assert f["steps"][4]["value"] == "https://acme.example/jobs" and f["app"] == "Check Careers Acme"
-
-
-def test_write_draft_never_overwrites_and_check_app_binds_the_page(tmp_path):
+def test_write_draft_no_longer_writes_check_app(tmp_path):
     flows, pages = tmp_path / "flows", tmp_path / "pages"
     flows.mkdir(), pages.mkdir()
-    (pages / "google_home.yaml").write_text("page: {id: google_home, identification: {title_matches: x}, elements: {}}")
+    a = studio.write_draft(flows, pages, TREE, "https://acme.example/jobs?token=SECRET", BROWSER, "cap1.json")
+    assert a == "acme_example_careers_acme" and not list(flows.glob("check_*"))
+    text = (pages / f"{a}.yaml").read_text()
+    assert "# Start link: https://acme.example/jobs\n" in text and "SECRET" not in text   # the query never kept
+
+
+def test_write_draft_never_overwrites(tmp_path):
+    flows, pages = tmp_path / "flows", tmp_path / "pages"
+    flows.mkdir(), pages.mkdir()
     a = studio.write_draft(flows, pages, TREE, "https://acme.example/jobs", BROWSER, "cap1.json")
     b = studio.write_draft(flows, pages, TREE, "https://acme.example/jobs", BROWSER, "cap2.json")
     assert (a, b) == ("acme_example_careers_acme", "acme_example_careers_acme_2")
     assert "cap1.json" in (pages / f"{a}.yaml").read_text()
-    digest, raw = read_bound(flows / f"check_{a}.yaml", pages)
-    assert pages / f"{a}.yaml" in raw   # approving the Check app binds the draft page's exact bytes
-    assert [x.approved for x in list_apps(flows, tmp_path)] == [False, False]
+    assert list_apps(flows, tmp_path) == []
 
 
 def test_a_bigger_flow_links_draft_pages_by_id(tmp_path):
@@ -91,12 +90,13 @@ def studio_dirs(tmp_path):
     for p in ("google_home",):
         (pages / f"{p}.yaml").write_bytes((engine.REPO / "pages" / f"{p}.yaml").read_bytes())
     b = {**BROWSER, "account": ACCT}
+    (flows / "job_apply.yaml").write_text(yaml.safe_dump({"workflow": {"id": "job_apply", "browser": b, "steps": []}}))
     jobs = studio.write_draft(flows, pages, JOBS, "https://acme.example/jobs", b, "c1.json")
     form = studio.write_draft(flows, pages, FORM, "https://apply.acme.example/form", b, "c2.json")
     return flows, pages, jobs, form
 
 
-def test_catalogue_lists_draft_pages_with_their_check_app(tmp_path):
+def test_catalogue_lists_draft_pages_directly(tmp_path):
     flows, pages, jobs, form = studio_dirs(tmp_path)
     cat = studio.catalogue(flows, pages)
     assert set(cat) == {jobs, form} and cat[jobs]["url"] == "https://acme.example/jobs"
@@ -244,6 +244,7 @@ def each_dirs(tmp_path):
     flows.mkdir(parents=True), pages.mkdir()
     (pages / "google_home.yaml").write_bytes((engine.REPO / "pages" / "google_home.yaml").read_bytes())
     b = {**BROWSER, "account": ACCT}
+    (flows / "job_apply.yaml").write_text(yaml.safe_dump({"workflow": {"id": "job_apply", "browser": b, "steps": []}}))
     lst = studio.write_draft(flows, pages, LIST, "https://acme.example/roles", b, "c1.json")
     form = studio.write_draft(flows, pages, FORM, "https://apply.acme.example/form", b, "c2.json")
     return flows, pages, lst, form
@@ -312,3 +313,68 @@ def test_composed_for_each_runs_once_per_item(tmp_path, monkeypatch):
     assert d.clicked == ["Lead", "Dev", "QA", "Ops"] and d.filled == d.clicked and d.calls.count("new_tab") == 4
     e = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
     assert e[-1]["kind"] == "flow_end" and {x.get("item") for x in e if (x.get("step") or "").endswith("_fill")} == {1, 2, 3, 4}
+
+
+# ---------- Task 10: New automation ----------
+import test_job_apply_flow as ja  # noqa: E402
+from test_job_apply_flow import env, fast_clock  # noqa: E402,F401  (fixtures)
+
+
+def test_new_automation_flow_shape_and_refusals(tmp_path):
+    p = studio.new_automation(tmp_path, "My Site", "https://Acme.example:443/start?token=SECRET#x", BROWSER)
+    f = yaml.safe_load(p.read_text())["workflow"]
+    assert p.name == "studio_my_site.yaml" and f["browser"] == BROWSER and "SECRET" not in p.read_text()
+    assert f["destinations"] == ["https://www.google.com", "https://acme.example"]
+    assert f["permissions"] == {"allow": ["launch_application", "navigate", "read_page", "click", "fill_field",
+                                          "ask_admin", "attach_file", "teach"], "max_element_risk": "modify"}
+    assert f["steps"][4:] == [{"id": "open_start", "action": "navigate", "value": "https://acme.example/start"},
+                              {"id": "on_start", "action": "classify_page", "on_match": {"unknown": "stop_and_report"}}]
+    with pytest.raises(OSError, match="exists"):
+        studio.new_automation(tmp_path, "My Site", "https://acme.example", BROWSER)
+    assert studio.new_automation(tmp_path, "Local", "http://localhost:8100/x", BROWSER)
+    for bad in ("http://acme.example", "ftp://x", "https://u:p@acme.example", "javascript:1", ""):
+        with pytest.raises(ValueError):
+            studio.new_automation(tmp_path, "Bad", bad, BROWSER)
+    with pytest.raises(ValueError, match="browser"):
+        studio.new_automation(tmp_path, "Bad", "https://acme.example", None)
+    with pytest.raises(ValueError, match="name"):
+        studio.new_automation(tmp_path, "../x/", "https://acme.example", BROWSER)
+
+
+@pytest.mark.usefixtures("env", "fast_clock")
+def test_new_automation_is_teachable_from_its_start_page(tmp_path):
+    src = tmp_path / "src"
+    (src / "flows").mkdir(parents=True), (src / "pages").mkdir()
+    for pg in (engine.REPO / "pages").glob("*.yaml"):
+        (src / "pages" / pg.name).write_bytes(pg.read_bytes())
+    path = studio.new_automation(src / "flows", "Acme", "https://acme.example/start", {**BROWSER, "account": ACCT})
+    r = engine.Runner(path, ja.ApplyDesk(ja.GH), tmp_path)   # an empty page: nothing identifies it
+    r.approvals.approve_flow(r.flow["id"], r.digest)
+    for o in ("https://www.google.com", "https://acme.example"):
+        r.approvals.approve_destination(r.flow["id"], o)
+    r.run_id, seen = "r1", []
+    done = ja.answer_cards(tmp_path, lambda c: "skip", seen)
+    try:
+        with pytest.raises(engine.Stop, match="unexpected page"):
+            r.run()
+    finally:
+        done.set()
+    assert seen[0]["kind"] == "new_page"
+
+
+
+def test_old_draft_without_header_takes_its_link_from_its_check_app(tmp_path):
+    flows, pages, jobs, form = studio_dirs(tmp_path)
+    old = (pages / f"{jobs}.yaml").read_text().replace("# Start link: https://acme.example/jobs\n", "")
+    (pages / f"{jobs}.yaml").write_text(old)
+    assert jobs not in studio.catalogue(flows, pages)
+    (flows / f"check_{jobs}.yaml").write_text(yaml.safe_dump({"workflow": {"id": f"check_{jobs}", "steps": [
+        {"id": "open_page", "action": "navigate", "value": "https://acme.example/jobs"}]}}))
+    assert studio.catalogue(flows, pages)[jobs]["url"] == "https://acme.example/jobs"
+
+
+def test_start_link_header_has_no_userinfo(tmp_path):
+    flows, pages = tmp_path / "f", tmp_path / "p"
+    flows.mkdir(), pages.mkdir()
+    pid = studio.write_draft(flows, pages, TREE, "https://Bob:pw@Acme.example:8443/a?q=1#f", BROWSER, "c.json")
+    assert "# Start link: https://acme.example:8443/a\n" in (pages / f"{pid}.yaml").read_text()

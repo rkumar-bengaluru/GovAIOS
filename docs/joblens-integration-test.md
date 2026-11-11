@@ -12,7 +12,9 @@ Design: `docs/superpowers/specs/2026-11-08-joblens-tasks-design.md`. Branch `fea
    cp flows/job_apply.yaml flows/himalayas_job_vetting.yaml flows/web_sandbox.yaml flows/morning_inbox_briefing.yaml "$A/flows/"
    cp pages/joblens_applications.yaml pages/joblens_job.yaml "$A/pages/"
    ```
-4. In the panel, approve the four Drafts: **JobLens**, **SyncJobLens**, **Web Sandbox** and **Inbox Brief** (the morning brief's new short name). Each file changed, so each needs approving once.
+4. In the panel, approve the four Drafts: **JobLens**, **SyncJobLens**, **Web Sandbox** and **Inbox Brief** (the morning brief's new short name). Each file changed, so each needs approving once. JobLens and Web Sandbox changed again (they allow `teach`), so approve those two again even if you approved them earlier.
+
+Before you start: run the observer spike once from Terminal (it still has Accessibility): `.venv/bin/python spikes/plan5/observe_spike.py`. Paste its `done.` line to Claude.
 
 ## A. JobLens — one task per Ready job
 
@@ -55,3 +57,14 @@ If a job hits a site the flow doesn't know (Workable, a direct company page), on
 ## C. SyncJobLens
 
 Type `/syncjoblens`: the same Himalayas → JobLens sync as before, under its new name.
+
+## D. Teach a page
+
+First-version limits: a lesson ends if the tab goes to another site, and a password field is always "fill yourself".
+
+1. Run `/joblens` with eClerx Ready. At Oracle, choose **Teach this page** on the card. (In Web Sandbox, the same button is on the **Web sandbox** card.)
+2. Terms: open the site's terms and record your verdict.
+3. Touch ID.
+4. Do the page in Chrome, then close the tab.
+5. Review **What I learned**, then approve with Touch ID.
+6. Run again. Expected: it gets past the page you taught.

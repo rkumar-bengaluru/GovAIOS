@@ -516,3 +516,143 @@ def test_click_retries_when_the_page_moves_after_the_pointer(env, monkeypatch):
     env.d.click(Node("text_field", "SECRET", handle="job_link"))
     Q = macos.Q
     assert kinds == [Q.kCGEventMouseMoved, Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp]
+
+
+
+def test_click_tries_the_next_spot_when_hover_moves_a_wrapped_link(env, monkeypatch):
+    """JobLens 2026-11-09 21:46: the left-centre spot was on the link until the pointer hovered there, then on the
+    cell (the hover restyle moved the line break), three times over; the first-line spot was clear all along."""
+    env.d._bounds = lambda node: (322, 438, 307, 37)
+    hovered = [False]
+    def hover_shifts(el, x, y, _):   # the look right after the pointer lands on the line break sees the cell
+        env.ax.hit_parent = None if hovered[0] and y >= 456 else "job_link"
+        hovered[0] = False
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", hover_shifts)
+    pts = []
+    def mouse(src, t, pt, b):
+        hovered[0] = t == macos.Q.kCGEventMouseMoved
+        pts.append((t, pt))
+        return ("mouse", t)
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", mouse)
+    env.d.click(Node("link", "SECRET", handle="job_link"))
+    Q = macos.Q
+    assert pts[-2:] == [(Q.kCGEventLeftMouseDown, (342, 447)), (Q.kCGEventLeftMouseUp, (342, 447))]
+
+
+def test_click_waits_out_chromes_coarse_hit_on_a_wrapped_link(env, monkeypatch):
+    """JobLens 2026-11-09 21:55: for ~2 s after the scroll every spot on the two-line title hit the cell; the admin's
+    probe a few seconds later hit the title's text on the whole first line. Wait longer; never accept the cell."""
+    env.d._bounds = lambda node: (322, 438, 307, 37)
+    looks = []
+    def coarse_then_text(el, x, y, _):
+        looks.append((x, y))
+        env.ax.hit_parent = "job_link" if len(looks) > 12 else None   # 3 old tries x 3 spots + rechecks: all cell
+        return 0, "hit"
+    monkeypatch.setattr(macos, "AXUIElementCopyElementAtPosition", coarse_then_text)
+    kinds = []
+    monkeypatch.setattr(macos.Q, "CGEventCreateMouseEvent", lambda src, t, pt, b: kinds.append(t) or ("mouse", t))
+    env.d.click(Node("link", "SECRET", handle="job_link"))
+    assert kinds[-2:] == [macos.Q.kCGEventLeftMouseDown, macos.Q.kCGEventLeftMouseUp]
+
+# --- observation (Studio lessons) ---
+def _observe_env(env, monkeypatch, attrs, down=False, counts=(0,)):
+    """attrs: {(el, name): value} on top of the AX fake; mouse at (5, 6)."""
+    base, seq = env.ax.copy_attr, list(counts)
+    monkeypatch.setattr(macos, "AXUIElementCopyAttributeValue",
+                        lambda el, name, _: (0, attrs[(el, name)]) if (el, name) in attrs else base(el, name, _))
+    monkeypatch.setattr(macos, "AXUIElementCreateApplication", lambda pid: "app")
+    monkeypatch.setattr(macos, "AXUIElementSetAttributeValue", lambda *a: 0)
+    for k, v in dict(kCGEventSourceStateCombinedSessionState=1, CGEventSourceButtonState=lambda st, b: down,
+                     CGEventSourceCounterForEventType=lambda st, t: seq.pop(0) if len(seq) > 1 else seq[0],
+                     CGEventCreate=lambda src: "ev", CGEventGetLocation=lambda ev: types.SimpleNamespace(x=5, y=6)).items():
+        setattr(macos.Q, k, v)   # env gives each test a fresh fake Q
+
+
+STRIP = {("win1", "AXRole"): "AXWindow", ("win1", "AXChildren"): ["strip", "page"],
+         ("strip", "AXRole"): "AXTabGroup", ("strip", "AXChildren"): ["t1", "t2", "new"],
+         ("t1", "AXRole"): "AXRadioButton", ("t1", "AXValue"): 0,
+         ("t2", "AXRole"): "AXRadioButton", ("t2", "AXValue"): 1, ("new", "AXRole"): "AXButton",
+         ("page", "AXRole"): "AXWebArea", ("app", "AXFocusedWindow"): "win1"}
+
+
+def test_observe_sample_hit_outside_pinned_window_is_none(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP)
+    env.d._window = "win1"
+    env.ax.hit_window = "win2"
+    s = env.d.observe_sample("chrome")
+    assert s["hit"] is None and s["pt"] == (5, 6) and s["down"] is False
+    env.ax.hit_window = "win1"
+    assert env.d.observe_sample("chrome")["hit"] == "hit"
+    env.ax.hit_pid = OTHER
+    assert env.d.observe_sample("chrome")["hit"] is None
+    assert env.posted == []
+
+
+def test_observe_sample_reports_tab_gone(env, monkeypatch):
+    attrs = dict(STRIP)
+    _observe_env(env, monkeypatch, attrs)
+    env.d._window = "win1"
+    assert env.d.teach_tab("chrome") == "t2"   # the selected tab, not the page's web area
+    s = env.d.observe_sample("chrome")
+    assert s["tab"] is True and s["web"] == "t2"
+    del attrs[("t2", "AXRole")]   # tab closed: its element no longer answers
+    assert env.d.observe_sample("chrome")["tab"] is False
+
+
+def test_observe_sample_quick_tap_reports_down_once(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP, counts=(3, 4, 4))
+    assert [env.d.observe_sample("chrome")["down"] for _ in range(3)] == [False, True, False]
+
+
+def test_observe_tab_falls_back_to_web_area_without_strip(env, monkeypatch):
+    attrs = {k: v for k, v in STRIP.items() if k[0] not in ("strip",)}
+    attrs[("win1", "AXChildren")] = ["page"]
+    _observe_env(env, monkeypatch, attrs)
+    assert env.d.teach_tab("chrome") == "page"
+
+
+def test_snap_blanks_secure_value(env, monkeypatch):
+    monkeypatch.setattr(macos, "AXUIElementCopyMultipleAttributeValues",
+                        lambda el, attrs, o, n: (0, ("AXSecureTextField", None, "pw", None, "hunter2", None, [], [])))
+    env.d._count = 0
+    assert env.d._snap("root").value == ""
+
+
+def test_observe_other_focused_window_is_not_the_lesson(env, monkeypatch):
+    _observe_env(env, monkeypatch, {**STRIP, ("app", "AXFocusedWindow"): "win2"})   # devtools, popup, 2nd window
+    env.d._window = "win1"
+    s = env.d.observe_sample("chrome")
+    assert s["web"] is None and s["focus"] is None and s["hit"] is None
+
+
+def test_observe_nothing_pinned_has_no_hit(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP)
+    s = env.d.observe_sample("chrome")
+    assert s["hit"] is None and s["web"] is None
+
+
+def test_observe_chrome_gone_is_tab_false(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP)
+    env.d._window = "win1"
+    env.d.teach_tab("chrome")
+    env.d._app = lambda name: None
+    assert env.d.observe_sample("chrome")["tab"] is False
+
+
+def test_observe_teach_tab_source(env, monkeypatch):
+    _observe_env(env, monkeypatch, STRIP)
+    env.d._window = "win1"
+    env.d.teach_tab("chrome")
+    assert env.d.teach_tab_source == "tab_strip"
+    _observe_env(env, monkeypatch, {**STRIP, ("win1", "AXChildren"): ["page"]})
+    env.d.teach_tab("chrome")
+    assert env.d.teach_tab_source == "web_area"
+
+
+def test_snap_blanks_secure_subrole(env, monkeypatch):
+    monkeypatch.setattr(macos, "AXUIElementCopyMultipleAttributeValues",
+                        lambda el, attrs, o, n: (0, ("AXTextField", "AXSecureTextField", "pw", None, "hunter2", None, [], [])))
+    env.d._count = 0
+    n = env.d._snap("root")
+    assert n.value == "" and n.role == "native:AXSecureTextField"

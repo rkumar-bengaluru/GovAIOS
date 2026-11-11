@@ -21,6 +21,10 @@ def pages_used(flow):
             ids.update(s[k] for k in ("page", "verify_page") if k in s)
             ids.update(k for k in s.get("on_match", {}) if k != "unknown")
             walk(s.get("steps", []))
+            for v in s.get("on_match", {}).values():   # a learned page's steps: their targets are bound too
+                # the shape is checked by engine.check_learned at Runner init; this only has to not crash first
+                if isinstance(v, dict) and isinstance(v.get("do"), list):
+                    walk(v["do"])
 
     walk(flow["steps"])
     return ids

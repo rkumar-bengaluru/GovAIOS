@@ -276,3 +276,54 @@ def test_repeated_dom_id_falls_back_to_label_keys():
     fs = ff.read_form(r)
     assert [f.key for f in fs] == ["label:first:0", "label:second:0", "#e"]
     assert ff.locate(r, fs[1]) is r.children[1]
+
+
+def _lb(learned):
+    return ff.Bank((ff.Entry("g", ("Gender",), "Female", learned),))
+
+
+def test_learned_answer_fills_restricted_field():
+    f = ff.Field("k", "Gender", "text", (), False)
+    assert ff.answer_for(f, _lb(True), [f]) == ("Female", "bank:g")
+
+
+def test_unlearned_answer_still_left_for_admin():
+    f = ff.Field("k", "Gender", "text", (), False)
+    assert ff.answer_for(f, _lb(False), [f]) is None
+
+
+def _ops(tmp_path):
+    p = _write(tmp_path, yaml.safe_dump(GOOD))
+    return p, [
+        {"op": "add", "key": "gender", "label": "Gender", "value": "F", "keep": "bank", "sensitive": True},
+        {"op": "label", "key": "notice_period", "label": "Notice", "value": "", "keep": "bank", "sensitive": False},
+        {"op": "add", "key": "x", "label": "X", "value": "1", "keep": "job", "sensitive": False},
+        {"op": "add", "key": "y", "label": "Y", "value": "1", "keep": "drop", "sensitive": False}]
+
+
+def test_apply_ops_backs_up_first(tmp_path):
+    p, ops = _ops(tmp_path)
+    orig = p.read_bytes()
+    ff.apply_ops(p, ops)
+    baks = list(p.parent.glob("answers.yaml.bak-*"))
+    assert len(baks) == 1 and baks[0].read_bytes() == orig and baks[0].stat().st_mode & 0o777 == 0o600
+    b = ff.load_bank(p, tmp_path)
+    assert b.cv_file == "~/cv.pdf"
+    assert b.entries[0] == ff.Entry("notice_period", ("Notice period", "Notice"), "30 days", True)
+    assert b.entries[1].learned and b.entries[1].key == "gender"
+    ff.apply_ops(p, [dict(ops[0], key="z")])   # same-second backup must not overwrite
+    assert len(list(p.parent.glob("answers.yaml.bak-*"))) == 2
+
+
+def test_apply_ops_skips_job_and_drop(tmp_path):
+    p, ops = _ops(tmp_path)
+    ff.apply_ops(p, ops)
+    assert [e.key for e in ff.load_bank(p, tmp_path).entries] == ["notice_period", "gender"]
+
+
+def test_apply_ops_all_or_nothing(tmp_path):
+    p, ops = _ops(tmp_path)
+    orig = p.read_bytes()
+    with pytest.raises(ff.BankError):
+        ff.apply_ops(p, ops + [dict(ops[0], key="notice_period")])
+    assert p.read_bytes() == orig and len(list(p.parent.iterdir())) == 1
