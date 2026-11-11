@@ -180,11 +180,13 @@ def test_queue_lines_are_not_steps_of_a_run():
     assert [e["kind"] for e in _runs(ent)[0][0]] == ["flow_start", "flow_end"]
 
 
-def test_session_end_is_audited_before_the_queue_cleared(panel):
+def test_the_queue_is_cleared_and_audited_as_the_session_ends(panel):
     P = panel; _busy_with_inbox_queued(P)
     P.post("/end")
-    kinds = [e["kind"] for e in _log(P.home)]
-    assert kinds.index("session_end") < kinds.index("run_queue", kinds.index("session_end"))
+    es = _log(P.home)
+    cleared = next(i for i, e in enumerate(es) if e["kind"] == "run_queue" and e["outcome"] == "cleared")
+    # cleared inside end_session's lock, before session_end: an audit failure can never leave a queue behind
+    assert cleared < next(i for i, e in enumerate(es) if e["kind"] == "session_end") and P.srv.panel.queue == []
 
 
 def test_queue_is_empty_even_if_the_session_end_audit_fails(panel, monkeypatch):
