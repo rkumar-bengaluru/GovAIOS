@@ -122,7 +122,8 @@ def main():
             raise Left()
         return root
     print("\nPass 1: in Chrome click Discover, Shortlisted, then Review on the FIRST profile.\n"
-          "Do NOT press Approve & promote. When the Review page has loaded, click Terminal and press Enter.")
+          "HOLD the mouse button down on each for about a second before letting go.\n"
+          "Do NOT press Approve & promote. Leave the Review pop-up open, then click Terminal and press Enter.")
     try:
         while not select.select([sys.stdin], [], [], TICK)[0]:
             sample = desk.observe_sample(APP)
@@ -142,12 +143,12 @@ def main():
     clicks = [e for p in obs.pages for e in p["events"] if e["kind"] == "click"]
     checks = []
     for label in WANT:
-        ev = next((e for e in clicks if e["label"] == label), None)
+        ev = next((e for e in clicks if e["label"].startswith(label)), None)   # "Shortlisted (4)": the count is in the name
         if ev is None or not ev["spec"]:
             fail(f"no click recorded for {label!r}" if ev is None else f"{label!r} has no unique spec")
         else:
             checks.append((label, ev["spec"]))
-    print("\nThe Review page now (Approve & promote is read, not pressed):")
+    print("\nThe Review pop-up now (Approve & promote is read, not pressed):")
     root = desk.web_root(APP)
     check_root(desk, root, "pass 1 Review page")
     btns = [n for n in root.walk() if n.role == "button" and n.name == APPROVE] if root else []
@@ -160,13 +161,15 @@ def main():
 
     # --- pass 2: find again, by walk order ---
     for label, spec in checks:
-        page = "the first profile's Review page (same profile as pass 1)" if label == APPROVE \
-            else f"the page where you clicked {label!r}"
-        enter(f"Pass 2: in Chrome open {page}, press Cmd-R and wait for it to load.")
+        if label == APPROVE:
+            enter("Pass 2: in Chrome press Cmd-R, open Shortlisted, then click Review on the first profile (the same one)\n"
+                  "and leave the pop-up open.")
+        else:
+            enter(f"Pass 2: in Chrome open the page where you clicked {label!r}, press Cmd-R and wait for it to load.")
         root = desk.web_root(APP)
         check_root(desk, root, f"pass 2 {label}")
         hits = find_all(root, spec, {"elements": {}}) if root else []
-        if len(hits) == 1 and hits[0].name == label:
+        if len(hits) == 1 and hits[0].name == spec.get("name", hits[0].name):
             print(f"  PASS {label!r} found again")
         else:
             fail(f"{label!r} found {len(hits)} times" + (f" ({hits[0].name!r})" if len(hits) == 1 else ""))
