@@ -1,5 +1,6 @@
 """Teach recorder: each press the extension reports is read in the AX tree at once, before the page reacts, and
-saved to the open lesson as a click step. Clicks only: no field value is ever read or stored.
+saved to the open lesson as a click step. Clicks only: no field value is ever stored (stored trees have them
+blanked).
 Ported from spikes/plan6/match_spike.py (on_down, spec_of), which passed on JobLens."""
 import re
 from datetime import datetime
@@ -8,6 +9,7 @@ from urllib.parse import urlsplit
 from . import capture, lessons, studio
 from .applyfiles import TEACH_OPEN, TEACH_OUT, remove, write_json
 from .engine import find_all
+from .formfill import FIELD_ROLES
 
 FLOW = "teach_new"
 CLICKABLE = ("link", "button", "tab", "radio")
@@ -15,6 +17,7 @@ COUNT = re.compile(r"^(.*\S) \(\d+\)$")   # "Shortlisted (4)": the count changes
 OWN = ("localhost", "127.0.0.1")   # own apps only in this plan
 MISMATCH = "Run could not find this. Do it again, or skip it."
 OUTSIDE = "Outside sites come later: recording paused."
+UNSAVED = "Could not save this step. Do it again."
 
 
 def _key(url):
@@ -25,6 +28,15 @@ def _key(url):
 def _title(root):
     h = next((n.name for n in root.walk() if n.role == "heading" and n.name), "")
     return f"{root.name} · {h}" if h else root.name
+
+
+def _blank(root):
+    """The snapshot in capture.tree form with every field's value dropped: a lesson never stores what was typed."""
+    t = capture.tree(root)
+    for d in studio._walk(t):
+        if d["role"] in FIELD_ROLES or d["role"] == "text_area":
+            d.pop("value", None)
+    return t
 
 
 def _line(title, ev):
@@ -104,17 +116,28 @@ class Recorder:
             self.note = MISMATCH
             return
         spec = _spec(root, n)
-        sure = spec is not None and [id(h) for h in find_all(root, spec, {"elements": {}})] == [id(n)]
+        if spec is None:   # rule 2: no step a run could find again, so none is saved
+            self.note = MISMATCH
+            return
+        sure = [id(h) for h in find_all(root, spec, {"elements": {}})] == [id(n)]
         risk = lessons.level(n.role, n.name)
         key = _key(url)
         page = next((p for p in self.doc["pages"] if p["url"] == key), None)
-        if page is None:   # a page's tree and title are its first snapshot's
-            page = {"url": key, "title": _title(root), "tree": capture.tree(root), "events": []}
+        new = page is None
+        if new:   # a page's tree and title are its first snapshot's
+            page = {"url": key, "title": _title(root), "tree": _blank(root), "events": []}
             self.doc["pages"].append(page)
         e = {"kind": "click", "spec": spec, "label": n.name, "value": "", "secure": False,
              "submit": risk != "navigate", "risk": risk, "sure": sure}
         page["events"].append(e)
-        lessons.write(self.home, self.name, self.doc)
+        try:
+            lessons.write(self.home, self.name, self.doc)
+        except OSError:   # undo in memory too, so what is shown is what is on disk
+            page["events"].pop()
+            if new:
+                self.doc["pages"].pop()
+            self.note = UNSAVED
+            return
         self.lines.append(_line(page["title"], e))
         self.note = ""
 

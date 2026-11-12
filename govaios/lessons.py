@@ -56,14 +56,14 @@ def write(home, name, doc) -> None:
     if d.is_symlink():
         raise OSError("lessons/ is a symlink")
     d.mkdir(mode=0o700, exist_ok=True)
-    tmp = d / (name + ".tmp")   # never a half-written lesson under its real name
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    # never a half-written lesson under its real name; a fresh 0600 temp each time, so a crash's leftover never blocks
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(json.dumps(doc, ensure_ascii=False, indent=1).encode())
         os.replace(tmp, d / name)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        Path(tmp).unlink(missing_ok=True)
         raise
     flow = name[23:-5]   # after the 22-character time stamp and its dash
     for old in sorted(p for p in d.iterdir() if p.name.endswith(f"-{flow}.json") and p.name != name)[:-(KEEP - 1)]:

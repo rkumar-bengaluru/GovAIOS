@@ -201,3 +201,40 @@ def test_cancel_deletes_lesson(tmp_path):
     assert not (tmp_path / lessons.DIR / r.name).exists()
     assert applyfiles.read_json(tmp_path, applyfiles.TEACH_OPEN) is None
 
+
+
+def test_nameless_button_not_saved(tmp_path):
+    desk = Desk(DISCOVER, {DISCOVER: [discover_tree(Node("button", "", handle="n"))]})
+    desk.hit = "n"
+    r = rec(tmp_path, desk)
+    r.handle(down("", DISCOVER, "button"))
+    assert lessons.load(tmp_path, r.name)["pages"] == []
+    assert out(tmp_path)["note"] == "Run could not find this. Do it again, or skip it."
+
+
+def test_failed_write_keeps_memory_and_disk_in_step(tmp_path, monkeypatch):
+    desk = Desk(HOME, {HOME: [home_tree()]})
+    desk.hit = "discover"
+    r = rec(tmp_path, desk)
+
+    def boom(*a):
+        raise OSError("disk full")
+    monkeypatch.setattr(lessons, "write", boom)
+    r.handle(down("Discover"))
+    assert r.doc["pages"] == [] and r.lines == []
+    assert out(tmp_path) == {"run": "r1", "lesson": r.name, "paused": False,
+                             "note": "Could not save this step. Do it again.", "lines": []}
+    monkeypatch.undo()
+    r.handle(down("Discover"))
+    assert len(lessons.load(tmp_path, r.name)["pages"][0]["events"]) == 1
+
+
+def test_stored_tree_holds_no_field_values(tmp_path):
+    t = home_tree()
+    t.children.append(Node("text_field", "Email", value="me@x.com"))
+    desk = Desk(HOME, {HOME: [t]})
+    desk.hit = "discover"
+    r = rec(tmp_path, desk)
+    r.handle(down("Discover"))
+    text = (tmp_path / lessons.DIR / r.name).read_text()
+    assert "Email" in text and "me@x.com" not in text

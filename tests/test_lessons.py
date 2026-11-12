@@ -269,3 +269,11 @@ def test_write_rewrites_one_lesson_in_place(tmp_path):
     assert lessons.load(tmp_path, name)["pages"] == [1]
     assert [p.name for p in (tmp_path / "lessons").iterdir()] == [name]
     assert os.stat(tmp_path / "lessons" / name).st_mode & 0o777 == 0o600
+
+
+def test_leftover_tmp_does_not_block_a_write(tmp_path):
+    name = lessons.new_name("teach_new")
+    (tmp_path / "lessons").mkdir()
+    (tmp_path / "lessons" / (name + ".tmp")).write_text("half")
+    lessons.write(tmp_path, name, {"flow": "teach_new", "pages": []})
+    assert lessons.load(tmp_path, name)["pages"] == []
