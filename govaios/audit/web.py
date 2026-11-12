@@ -1745,7 +1745,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         for e, _ in _entries(log):
             if e and e.get("kind") == "lesson" and e.get("outcome") == "bound" and e.get("target") == name:
                 bound = e.get("flow") == fid
-            elif bound and e and e.get("kind") == "flow_approval" and e.get("flow") == fid and e.get("decision") == "allow":
+            elif bound and e and e.get("flow") == fid and (
+                    (e.get("kind") == "flow_approval" and e.get("decision") == "allow")
+                    or (e.get("kind") == "lesson" and e.get("outcome") == "approved")):   # a lesson's approval too
                 return True
         return not bound
 

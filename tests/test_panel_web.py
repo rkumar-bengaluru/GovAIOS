@@ -2606,3 +2606,18 @@ def test_ext_done_refused_while_teach_is_live(panel):
     _teach_lesson(panel)
     s, j, _ = _ext(panel, "/ext/done", {"name": "Approve shortlisted"}, token=tok)
     assert s == 409 and j["note"] and not (panel.flows / "studio_approve_shortlisted.yaml").exists()
+
+
+def test_new_app_lesson_never_re_approves_after_revoke(panel):
+    name = _done(panel)
+    pages = panel.flows.parent / "pages"
+    before = {f: f.read_bytes() for f in (*panel.flows.glob("*.yaml"), *pages.glob("*.yaml"))}
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert Approvals(panel.home / "approvals.json").snapshot()["flows"].get("studio_approve_shortlisted")
+    panel.post("/revoke", kind="flow", flow="studio_approve_shortlisted")
+    for f in (*panel.flows.glob("*.yaml"), *pages.glob("*.yaml")):   # the app's bytes as they were when bound
+        f.unlink() if f not in before else f.write_bytes(before[f])
+    n = len(panel.asked)
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "Approve Approve shortlisted first" in _tells(panel)[-1] and len(panel.asked) == n
+    assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
