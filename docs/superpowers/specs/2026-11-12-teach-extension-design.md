@@ -114,9 +114,17 @@ The admin passed on a review of this design; these rules answer it. Where they d
 - **Ambiguous at Teach time:** if the stronger anchor still matches more than one element, the side panel asks the admin which one they meant, by highlighting the candidates.
 - **No match at Teach time:** the step is **not saved**. The side panel says *"Run could not find this. Do it again, or skip it,"* so a lesson never holds a step a run cannot do.
 
-#### Spike result (2026-11-12, `spikes/plan6/match_spike.py`, three runs by the admin on JobLens)
+#### Spike result (2026-11-12, `spikes/plan6/match_spike.py`, run by the admin on JobLens)
 
-Verdict: **SPIKE FAIL**, with every failure explained:
+**Final verdict: SPIKE PASS** (option A, commits `b45ede9` and `2a97ac5`). Every part of the bar passed:
+
+- **The mechanism that passed:** the extension's content script reports each `pointerdown` (capture phase) with the screen point, tag, role and visible name, never values. GOV-AIOS reads the element under that point (`desk._hit`), then takes a snapshot (`web_root`) and climbs to the nearest clickable role (`link`, `button`, `tab`, `radio`). It reads the element 9–17 ms after the press and takes the snapshot 23–54 ms after it. Every read finished **before the release**, with normal quick clicks. The name GOV-AIOS read equalled the name the page reported on every click.
+- **Recorded steps:** `{role: link, name: Discover}`, `{role: tab, name_matches: '^Shortlisted \(\d+\)$'}`, `{role: button, name: Review, index: 0}`, `{role: button, name: "Approve & promote"}` (read, never pressed). All four were found exactly once after Cmd-R.
+- **Anchor:** 2 Review buttons for 2 Shortlisted profiles, each in its own `row`; the recorded Review is the first row's.
+- **A bug found and fixed on the way:** Chrome lists every table cell twice, under its row and again under its column (`AXColumn`). The snapshot saw 4 Reviews for 2 rows. `MacDesktop._snap` no longer goes into `AXColumn`s (`2a97ac5`), so the cells are read once, under their rows. Indexes counted over a table changed with it.
+- A press on empty page space reports no name and is ignored.
+
+Earlier runs, with what each failure taught:
 
 - ✅ **The side panel is not read by mistake.** Chrome shows two web areas (`JobLens` and `chrome-extension://…/sidepanel.html`); `web_root` picked the JobLens page at every check.
 - ✅ **Discover** (`{role: link, name: Discover}`) was recorded and found again after Cmd-R.
