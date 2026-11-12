@@ -130,6 +130,7 @@ box-shadow:none;outline-offset:4px}
 .tpl .state{font-weight:700;color:var(--ok)}
 .pick label{display:flex;gap:10px;align-items:baseline;font-weight:400;padding:8px 0;border-top:1px solid var(--line)}
 code{font-family:var(--mono);background:var(--paper);padding:4px 8px;border-radius:6px;letter-spacing:.08em;overflow-wrap:anywhere}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:1rem}
 @media (max-width:820px){.app{grid-template-columns:minmax(0,1fr);min-height:0}.rail{order:1}main{padding:16px 16px 32px}
 .top{margin:-16px -16px 16px;padding:12px 16px}}
 """
@@ -162,7 +163,7 @@ def _seq(e):
     return s if type(s) is int else None
 
 
-PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "apply_card", "bank_updated")
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "apply_card", "bank_updated", "run_queue")
 
 
 def _runs(entries):
@@ -200,7 +201,7 @@ def _td(v):
 
 def _page(body, head="", rail="", here=None):
     nav = "".join(f"<a href='{h}'{' aria-current=page' if h == here else ''}>{t}</a>"
-                  for h, t in (("/", "Talk"), ("/market", "Marketplace"), ("/studio", "Studio"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
+                  for h, t in (("/", "Home"), ("/apps", "Apps"), ("/studio", "Studio"), ("/market", "Marketplace"), ("/audit", "Audit log"), ("/approvals", "Approvals")))
     return (f"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,"
             f"initial-scale=1'>{head}<title>GOV-AIOS</title><style>{CSS}</style><div class=app>"
             f"<nav class=rail aria-label='GOV-AIOS'>{BRAND}{nav}{rail}</nav><main>{body}</main></div>")
@@ -245,7 +246,7 @@ def _apps_summary(runs, apps):
     return out
 
 
-PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/studio|/claude|/codex|/lesson/[^/]{1,200}")
+PANEL_PATH = re.compile(r"/audit(/.*)?|/approvals|/apps|/totp/setup|/market(/.*)?|/apply/bank|/apply/task/[0-9]{1,2}|/studio|/claude|/codex|/lesson/[^/]{1,200}")
 DOES = {"claude_code": "Every command Claude Code runs is checked by GOV-AIOS first and written to the audit log.",
         "codex": "Shell commands, file edits and plugin calls are checked by GOV-AIOS first and written to the audit "
                  "log. Plugins stay on; each new plugin tool asks you once."}
@@ -299,7 +300,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
                             speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
-                            told=None, voice=None, card=None, run_id=None, fix_spoken=None, notify=_notify)
+                            told=None, voice=None, card=None, run_id=None, fix_spoken=None, notify=_notify,
+                            queue=[])   # (app id, digest at queue time, inputs), in order; memory only
 
     def tell(line):
         panel.convo.append(f"GOV-AIOS -> {line}")
@@ -312,12 +314,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         Ending and taking the run share panel.lock with say()'s run start, so a run cannot start unseen;
         run.stop may block (direct RunLaunch: up to 2 s; via the helper it returns at once): it runs after the lock,
         or goes on `later` when the caller holds the lock."""
-        with panel.lock:
-            sid = panel.session.end(reason)
-            run = panel.run if sid is not None and live() else None
-        if sid is None:
-            return None
+        run = None
         try:
+            with panel.lock:
+                sid = panel.session.end(reason)
+                run = panel.run if sid is not None and live() else None
+                if sid is not None:   # empty even if session_end's audit then fails: a new session must not start it
+                    clear_queue({"emergency_stop": "emergency stop.", "screen_lock": "screen locked."}.get(reason, "the session ended."))
+            if sid is None:
+                return None
             log.append("session_end", session=sid, reason=reason)
         finally:   # a failed audit line must not leave the run going
             if run is not None:
@@ -371,7 +376,61 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if reason:
                 end_session(reason)   # Session.end hands the id out once: a racing request cannot end it twice
         report()
+        with panel.lock:   # checks, pop and start together: a Run typed meanwhile cannot slip in between
+            while (panel.queue and not live() and panel.told is panel.run and panel.session.active()
+                   and not runstate.stopped(home)):
+                with sign_lock:
+                    signed = any(now() - c < SIGNIN_S for c, _ in state["sessions"].values())
+                if not signed:
+                    clear_queue("signed out.")
+                    break
+                fid, digest, vals = panel.queue.pop(0)
+                app = next((a for a in apps() if a.id == fid), None)
+                # digest first: an edited flow is unapproved too, and the edit is the real reason
+                why = ("it is no longer approved." if app is None else "it changed since it was queued."
+                       if app.digest != digest else "it is no longer approved." if not app.approved else None)
+                if why is None:
+                    try:
+                        audited("run_queue", {"flow": fid, "outcome": "started"},
+                                lambda: start_run(app, vals, queued=True))
+                        break
+                    except Exception:
+                        why = "it did not start."
+                log.append("run_queue", flow=fid, outcome="dropped", reason=why)
+                tell(f"{app.name if app else fid} left the queue: {why}")
     panel.tick = tick
+
+    def start_run(hit, vals, queued=False):
+        t = tickets.create(home, hit.id, hit.digest, panel.session.id, vals or None)
+        r = launcher(hit.path, t, vals or None)
+        r.start()
+        panel.run, panel.app, panel.card, panel.run_id = r, hit, None, tickets.run_id(t)
+        tell(f"Starting {hit.name} (queued)." if queued else f"Starting {hit.name}.")
+
+    def clear_queue(why):
+        with panel.lock:
+            try:
+                for fid, _, _ in panel.queue:
+                    log.append("run_queue", flow=fid, outcome="cleared", reason=why)
+            finally:   # emptied even when an audit line fails: nothing may start from a cleared queue
+                was, panel.queue[:] = bool(panel.queue), []
+            if was:
+                tell(f"Queue cleared: {why}")
+
+    def unqueue(fid):
+        """Take the app out of the queue; False when it was not in it."""
+        with panel.lock:
+            i = next((i for i, e in enumerate(panel.queue) if e[0] == fid), None)
+            if i is None:
+                return False
+            log.append("run_queue", flow=fid, outcome="removed")
+            del panel.queue[i]
+            tell(f"{next((a.name for a in apps() if a.id == fid), fid)} taken out of the queue.")
+            return True
+
+    def unqueue_post(f):
+        unqueue(f.get("flow", ""))   # a stale ✕ (the app already started) just goes back
+        return f.get("next") if f.get("next") in ("/", "/apps") else "/"
 
     def apps():
         return list_apps(flows_dir, home) if flows_dir else []
@@ -652,6 +711,12 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             f"<form method=post action=/totp/reset>{hidden(csrf)}<button class=stop>Reset authenticator</button></form>")
         authn = (f"<h2>Your name</h2><form method=post action=/name>{hidden(csrf)}<label for=nm>Your name</label> "
                  f"<input id=nm name=name maxlength=40 value='{escape(panel.name)}'> <button>Save</button></form>") + authn
+        waiting = "<h2>Waiting for approval</h2><ul>" + "".join(
+            f"<li>{escape(a.name)} <span class=m>Needs approval</span>"
+            f"<form method=post action=/approve>{hidden(csrf)}"
+            f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>"
+            f"{delete_form(csrf, 'flow', a.id, '/approvals') if DELETABLE.fullmatch(a.id) else ''}</li>"
+            for a in apps() if not a.approved) + "</ul>"
         bad = "<p class=fail>approvals.json unreadable</p>"
         try:
             d = json.loads(approvals_path.read_text())
@@ -664,7 +729,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         flows, dests = (d or {}).get("flows", {}), (d or {}).get("destinations", {})
         if not (isinstance(d, dict) and isinstance(flows, dict) and isinstance(dests, dict)
                 and all(isinstance(v, list) for v in dests.values())):
-            return _page(f"<h1>Approvals</h1>{bad}{authn}", here="/approvals")
+            return _page(f"<h1>Approvals</h1>{bad}{waiting}{authn}", here="/approvals")
         def form(kind, flow="", dest="", label="Revoke", cls=""):
             return (f"<form method=post action=/revoke><input type=hidden name=csrf value='{escape(csrf)}'>"
                     f"<input type=hidden name=kind value={kind}><input type=hidden name=flow value='{escape(flow)}'>"
@@ -672,13 +737,30 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         fr = "".join(f"<tr>{_td(k)}{_td(v)}<td>{form('flow', str(k), label='Revoke flow')}</td></tr>" for k, v in flows.items())
         dr = "".join(f"<tr>{_td(k)}{_td(d)}<td>{form('destination', str(k), str(d), label='Revoke site')}</td></tr>"
                      for k, v in dests.items() for d in v)
-        return _page(f"<h1>Approvals</h1><h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
+        return _page(f"<h1>Approvals</h1>{waiting}<h2>Flows</h2><table><tr><th>flow</th><th>hash</th><th></th></tr>{fr}</table>"
                      f"<h2>Destinations</h2><table><tr><th>flow</th><th>destination</th><th></th></tr>{dr}</table>"
                      f"{form('all', label='Revoke all', cls=' class=stop')}{authn}", here="/approvals")
 
+    def apps_page(csrf):
+        last = {d["id"]: d["last_time"] for d in _apps_summary(_runs(_entries(log))[0], apps())}
+        def ctl(a):
+            if live() and panel.app.id == a.id:
+                return "<a class=go href='/'>Running…</a>"
+            n = next((i for i, e in enumerate(panel.queue, 1) if e[0] == a.id), None)
+            if n:
+                return (f"Queued #{n}<form method=post action=/unqueue>{hidden(csrf)}<input type=hidden name=flow "
+                        f"value='{escape(a.id)}'><input type=hidden name=next value=/apps><button aria-label='Take {escape(a.name)} out of the queue'>✕</button></form>")
+            say = f"/{slug(a.name)}" if flow_inputs(a.path) else "run " + a.id.replace("_", " ")
+            return (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='{escape(say)}'>"
+                    f"<button class=go>Run</button></form>")
+        cards = "".join(f"<section class=appcard><h2>{escape(a.name)}</h2><p>{escape(a.title)}</p>"
+                        f"<p class=m>{'Last started ' + escape(last[a.id]) if last.get(a.id) else 'Never run'}</p>{ctl(a)}</section>"
+                        for a in apps() if a.approved)
+        cc = "".join(f"<li>{ag.title}<span class=m> Governed: type /{ag.slash}</span></li>"
+                     for ag in agents.AGENTS.values() if cc_roots(ag) is not None)
+        return _page(f"<h1>Apps</h1><div class=grid>{cards}</div><h2>Coding agents</h2><ul>{cc}</ul>", here="/apps")
+
     def talk(csrf):
-        cc_li = "".join(f"<li class=ok>{ag.title}<span class=m>Governed: type /{ag.slash}</span></li>"
-                        for ag in agents.AGENTS.values() if cc_roots(ag) is not None)
         report()   # the page refresh stops once the run is done: show its result on that same load
         s, run, al = panel.session, panel.run, apps()
         with panel.lock:
@@ -686,13 +768,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         ring = f"Session open: {math.ceil(s.remaining() / 60)} min left" if s.active() else "No session"
         pct = round(100 * s.remaining() / SESSION_S) if s.active() else 0
         lines = lambda xs: "<ul>" + "".join(f"<li>{escape(x)}</li>" for x in xs) + "</ul>"
-        talked = "".join(f"<li class='{_tone(x)}'>{escape(x)}</li>" for x in convo)
-        ok = "".join(f"<li class=ok>{escape(a.name)}<span class=m>Can run</span></li>" for a in al if a.approved)
-        drafts = "".join(f"<li class=draft>{escape(a.name)}<span class=m>Needs approval</span>"
-                         f"<form method=post action=/approve>{hidden(csrf)}"
-                         f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>"
-                         f"{delete_form(csrf, 'flow', a.id, '/') if DELETABLE.fullmatch(a.id) else ''}</li>"
-                         for a in al if not a.approved)
+        talked = "".join(f"<li class='{_tone(x)}'>{escape(x)}</li>" for x in reversed(convo))   # newest first
         end = (f"<form method=post action=/end>{hidden(csrf)}<button class=stop>End session</button></form>"
                if s.active() else "")
         steps = (f"<section class=run><h2>{escape(panel.app.name)}</h2>{lines(run.lines())}</section>"
@@ -709,13 +785,14 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                if not s.active() and store.load() is not None else "")
         cmds = "".join(f"<option value='{escape(x)}'>" for x in slashes())
         ans = answer_card(csrf) or task_card(csrf)   # the admin is answering: no reload wipes it, no box steals focus
-        return _page(f"{who}{nodir}<ul class=talk>{talked}</ul>{card(csrf)}{steps}{ans}{tasks_card()}{result_card()}{otp}"
+        return _page(f"{who}{nodir}{otp}"
                      f"<form class=cmd method=post action=/say>{hidden(csrf)}<label class=vh for=cmd>Type a command"
                      f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp or ans else ' autofocus'} "
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
-                     f"<button class=go>Send</button></form>",
-                     '<meta http-equiv="refresh" content="2">' if live() and (not ans or teaching()) else "",
-                     f"<h2>Approved</h2><ul>{ok}{cc_li}</ul><h2>Drafts</h2><ul>{drafts}</ul>", "/")
+                     f"<button class=go>Send</button></form>"
+                     f"{card(csrf)}{ans}{steps}{tasks_card()}{result_card()}<ul class=talk>{talked}</ul>",
+                     '<meta http-equiv="refresh" content="2">' if (live() or panel.queue) and (not ans or teaching()) else "",
+                     here="/")
 
     def setup(csrf, bad):
         if store.load() is not None:
@@ -898,7 +975,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if not ts:
             return ""
         rows = "".join(f"<li><a href='/apply/task/{t['n']}'>{t['n']}. {escape(t['title'][:200])}</a> \u00b7 "
-                       f"{TASK_WORDS[t['status']]}</li>" for t in ts)
+                       f"{TASK_WORDS[t['status']]}</li>" for t in reversed(ts))
         return f"<section class=appcard><h2>JobLens jobs</h2><ul>{rows}</ul></section>"
 
     def task_page(n, csrf):
@@ -1100,17 +1177,26 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if cm:
             claude_start(agents.CODEX if cm[1].lower() == "codex" else agents.CLAUDE, cm[2] or "")
             return "/"
+        uq = re.fullmatch(r"unqueue (.+)", text, re.I)
+        if uq:
+            kind, hit = match(uq[1], apps())
+            if kind not in ("run", "draft") or not unqueue(hit.id):
+                tell("That app is not in the queue.")   # never echo the words: they may hold a code
+            return "/"
         kind, hit = match(text, al := apps())
-        if kind == "run" and live():
-            tell(f"{panel.app.name} is still running.")
-        elif kind == "run" and (bad := invalid_input(hit, vals)):
+        if kind == "run" and (bad := invalid_input(hit, vals)):
             tell(f"That isn't a valid {bad}.")
+        # a done run not yet reported, or apps already waiting, must not be jumped
+        elif kind == "run" and (live() or panel.queue or panel.told is not panel.run):
+            n = next((i for i, e in enumerate(panel.queue, 1) if e[0] == hit.id), None)
+            if n:
+                tell(f"{hit.name} is already queued (#{n}).")
+            else:
+                audited("run_queue", {"flow": hit.id, "outcome": "queued"},
+                        lambda: panel.queue.append((hit.id, hit.digest, vals or None)))
+                tell(f"{hit.name} queued #{len(panel.queue)}.")
         elif kind == "run":
-            t = tickets.create(home, hit.id, hit.digest, panel.session.id, vals or None)
-            r = launcher(hit.path, t, vals or None)
-            r.start()
-            panel.run, panel.app, panel.card, panel.run_id = r, hit, None, tickets.run_id(t)
-            tell(f"Starting {hit.name}.")
+            start_run(hit, vals)
         elif kind == "draft":
             tell(f"{hit.name} is a draft. Get it approved first.")
         elif kind == "ambiguous":
@@ -1132,7 +1218,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             tell(f"{hit.name} is approved.")
         except Stop:
             tell(f"{hit.name} was not approved.")
-        return "/"
+        return "/approvals"
 
     def setup_post(f):
         with panel.lock:   # take-and-clear: two concurrent POSTs cannot both reach the dialog
@@ -1286,7 +1372,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def apps_delete(f):
         """Delete a Studio app (studio_*, check_*) or a draft page no flow uses; its approval goes first."""
         kind, name, back = f.get("kind"), f.get("name", ""), f.get("back")
-        back = back if back in ("/", "/studio") else "/"
+        back = back if back in ("/", "/studio", "/approvals") else "/"
         if not flows_dir:
             return None
         pages = flows_dir.parent / "pages"
@@ -1610,7 +1696,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return "/"
 
     POSTS = {"/terms": terms_post, "/lesson/approve": lesson_approve, "/lesson/discard": lesson_discard,
-             "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/totp/setup": setup_post, "/totp/reset": reset,
+             "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/unqueue": unqueue_post, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new,
              "/apps/delete": apps_delete}
     for _ag in agents.AGENTS.values():
@@ -1788,7 +1874,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 ls = LESSON.fullmatch(u.path)
                 ap = by_slash(u.path[1:])
                 page = (talk(sess[1]) if u.path == "/" else index() if u.path == "/audit"
-                        else approvals(sess[1]) if u.path == "/approvals" else fulllog() if u.path == "/audit/log"
+                        else approvals(sess[1]) if u.path == "/approvals" else apps_page(sess[1]) if u.path == "/apps" else fulllog() if u.path == "/audit/log"
                         else setup(sess[1], u.query == "bad=1") if u.path == "/totp/setup"
                         else bank_page(sess[1]) if u.path == "/apply/bank"
                         else task_page(int(tk[1]), sess[1]) if tk
@@ -1829,6 +1915,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if path == "/signout":   # this browser only; the code session stays open
                 with sign_lock:
                     state["sessions"].pop(sess[2], None)
+                clear_queue("signed out.")
                 return self._redirect("/")
             try:
                 loc = act(f)

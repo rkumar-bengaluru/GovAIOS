@@ -751,8 +751,8 @@ def test_agent_missing_apps_dir(monkeypatch, govaios_home, ui):
     monkeypatch.setattr(web, "make_server", make)
     assert not (govaios_home / "apps").exists()
     assert main(["panel", "--agent"]) == 0
-    # Talk lists no apps (and no "no folder given" note: the folder was given); the existing no-apps line is on /audit
-    assert got["talk"][0] == 200 and "<h2>Approved</h2><ul></ul><h2>Drafts</h2><ul></ul>" in got["talk"][1]
+    # Talk has no app lists (and no "no folder given" note: the folder was given); the existing no-apps line is on /audit
+    assert got["talk"][0] == 200 and "<h2>Approved</h2>" not in got["talk"][1]
     assert "No apps folder given" not in got["talk"][1]
     assert got["audit"][0] == 200 and "No apps yet." in got["audit"][1]
 
