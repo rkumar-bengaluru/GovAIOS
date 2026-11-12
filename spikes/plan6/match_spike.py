@@ -164,6 +164,8 @@ def main():
         if label == APPROVE:
             enter("Pass 2: in Chrome press Cmd-R, open Shortlisted, then click Review on the first profile (the same one)\n"
                   "and leave the pop-up open.")
+        elif label == "Review":
+            enter("Pass 2: in Chrome press Cmd-R (the pop-up closes), then click Shortlisted. Do not click Review.")
         else:
             enter(f"Pass 2: in Chrome open the page where you clicked {label!r}, press Cmd-R and wait for it to load.")
         root = desk.web_root(APP)
