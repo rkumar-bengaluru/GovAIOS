@@ -314,6 +314,13 @@ def test_radio_in_tab_list_is_tab(env, monkeypatch):
     assert n.children[0].role == "tab"
 
 
+def test_table_cells_are_read_once_under_their_rows(env, monkeypatch):
+    n = _snap_tree(env, monkeypatch, {"root": ("AXTable", None, ["row", "col"]), "row": ("AXRow", None, ["c"]),
+                                      "col": ("AXColumn", None, ["c"]), "c": ("AXCell", None, ["b"]),
+                                      "b": ("AXButton", None, [])})
+    assert sum(1 for x in n.walk() if x.role == "button") == 1
+
+
 def test_text_area_role(env, monkeypatch):
     assert _snap_tree(env, monkeypatch, {"root": ("AXTextArea", None, [])}).role == "text_area"
 

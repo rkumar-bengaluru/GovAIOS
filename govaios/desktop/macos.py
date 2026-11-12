@@ -227,6 +227,8 @@ class MacDesktop:
         if neutral == "document" and self._count > 1:
             node.role = "embedded_document"   # iframes (ads); not descended into
             return node
+        if role == "AXColumn":
+            return node   # Chrome lists each table cell under its row AND its column: the rows already hold them all
         if isinstance(kids, (list, tuple)) or hasattr(kids, "count"):
             for k in kids:
                 if self._count >= MAX_NODES:
