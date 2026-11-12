@@ -114,6 +114,17 @@ The admin passed on a review of this design; these rules answer it. Where they d
 - **Ambiguous at Teach time:** if the stronger anchor still matches more than one element, the side panel asks the admin which one they meant, by highlighting the candidates.
 - **No match at Teach time:** the step is **not saved**. The side panel says *"Run could not find this. Do it again, or skip it,"* so a lesson never holds a step a run cannot do.
 
+#### Spike result (2026-11-12, `spikes/plan6/match_spike.py`, three runs by the admin on JobLens)
+
+Verdict: **SPIKE FAIL**, with every failure explained:
+
+- ✅ **The side panel is not read by mistake.** Chrome shows two web areas (`JobLens` and `chrome-extension://…/sidepanel.html`); `web_root` picked the JobLens page at every check.
+- ✅ **Discover** (`{role: link, name: Discover}`) was recorded and found again after Cmd-R.
+- ✅ **Approve & promote** (`{role: button, name: "Approve & promote"}`) was read inside the Review pop-up and found again after Cmd-R + Review. Review opens a pop-up (`role=dialog`, `aria-modal`) on the same address, `/discover`. The page behind it stays readable, and each profile is a table `row`.
+- ❌ **Review was missed by the observer's polling.** It was recorded once, when the admin held the mouse down for a second (`{role: button, name: Review, index: 0}`), and missed on other clicks. A normal click starts and ends between two looks. By the next look the pop-up covers the point, and the button's own label has changed to "Close". **Decision: the element must be read at the moment the mouse goes down.** The observer-only ruling in plan 1 is withdrawn; how to catch that moment is the admin's choice (below).
+- ❌ **Shortlisted** was recorded as `Shortlisted (4)` and found 0 times after the reload. The count is part of the tab's name, and it changes. **Decision:** a name that ends in a count `(n)` is saved as `name_matches: '^Shortlisted \(\d+\)$'` (already supported by `engine.matches`), never as the exact name.
+- Also seen: Review and Close were rated `submit` (today's "every button is submit" guess). That is expected; rule "Which presses are submit-level" replaces it.
+
 ### 3. Connecting the extension (pairing)
 
 - **The 6-digit code is used once.** It is checked like a panel sign-in code (the same verifier, so replays are refused) and exchanged for a long random token. The code is never kept or reused as the token.
