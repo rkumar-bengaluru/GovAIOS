@@ -1,0 +1,23 @@
+workflow:
+  id: teach
+  app: Teach
+  name: "Teach: record a lesson from your presses in Chrome"
+  version: 1
+  # It never launches, navigates or types: Chrome must already be in front. During a lesson it reads only the
+  # element under each press the extension reports, and saves it as a click step.
+
+  browser:
+    application: chrome
+    profile_directory: "Profile 2"
+    account: rupak.kumar.ambasta02@gmail.com
+
+  inputs:
+    lesson: { label: "Lesson", pattern: 'new|[0-9-]{22}-[a-z0-9_]{1,64}\.json' }
+
+  permissions:                          # Rule 9: unlisted = denied. Read only.
+    allow: [read_page, teach]
+    max_element_risk: read
+  destinations: []
+
+  steps:
+    - { id: record, action: record_lesson }

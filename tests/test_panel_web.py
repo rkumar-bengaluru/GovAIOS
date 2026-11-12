@@ -76,6 +76,7 @@ def panel(tmp_path, monkeypatch, ui):
     shutil.copytree(REPO / "pages", tmp_path / "pages")
     shutil.copy(Path(__file__).parent / "data" / "job_apply_link.yaml", flows / "job_apply.yaml")   # a flow with an input
     (flows / "web_sandbox.yaml").unlink()
+    (flows / "teach.yaml").unlink()   # the Teach tests write their own
     for f, app in (("himalayas_job_vetting", "JobLens"), ("morning_inbox_briefing", "Inbox briefing")):
         p = flows / f"{f}.yaml"
         p.write_text(re.sub(r"(?m)^  app: .*\n", "", p.read_text(), count=1).replace("\n  name:", f"\n  app: {app}\n  name:", 1))
