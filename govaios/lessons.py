@@ -30,12 +30,7 @@ _CODE = re.compile(r"\d{4,8}")
 
 def save(home, flow_id, flow_digest, step_id, pages) -> str:
     """Write one lesson (Observer.pages, Node trees); returns its file name. Never follows a link."""
-    if not re.fullmatch(r"[a-z0-9_]{1,64}", flow_id or ""):
-        raise ValueError("bad flow id")
-    d = Path(home) / DIR
-    if d.is_symlink():
-        raise OSError("lessons/ is a symlink")
-    d.mkdir(mode=0o700, exist_ok=True)
+    name = new_name(flow_id)
 
     def url(u):
         s = urlsplit(u)
@@ -43,7 +38,24 @@ def save(home, flow_id, flow_digest, step_id, pages) -> str:
     doc = {"flow": flow_id, "digest": flow_digest, "step": step_id, "at": datetime.now().isoformat(timespec="seconds"),
            "pages": [{"url": url(p["url"]), "title": p["title"], "tree": capture.tree(p["tree"]),
                       "events": p["events"]} for p in pages]}
-    name = f"{datetime.now():%Y%m%d-%H%M%S-%f}-{flow_id}.json"
+    write(home, name, doc)
+    return name
+
+
+def new_name(flow_id) -> str:
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", flow_id or ""):
+        raise ValueError("bad flow id")
+    return f"{datetime.now():%Y%m%d-%H%M%S-%f}-{flow_id}.json"
+
+
+def write(home, name, doc) -> None:
+    """Write (or rewrite) lesson name, 0600, then keep the last KEEP of its flow. Never follows a link."""
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        raise ValueError("bad lesson name")
+    d = Path(home) / DIR
+    if d.is_symlink():
+        raise OSError("lessons/ is a symlink")
+    d.mkdir(mode=0o700, exist_ok=True)
     tmp = d / (name + ".tmp")   # never a half-written lesson under its real name
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -53,9 +65,25 @@ def save(home, flow_id, flow_digest, step_id, pages) -> str:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    for old in sorted(p for p in d.iterdir() if p.name.endswith(f"-{flow_id}.json"))[:-KEEP]:
-        old.unlink()
-    return name
+    flow = name[23:-5]   # after the 22-character time stamp and its dash
+    for old in sorted(p for p in d.iterdir() if p.name.endswith(f"-{flow}.json") and p.name != name)[:-(KEEP - 1)]:
+        old.unlink()   # never the lesson just written, even an old one Teach reopened
+
+
+_PAY = re.compile(r"\b(pay|buy|checkout)\b", re.I)
+_CHANGE = re.compile(r"\b(approve|promote|reject|delete|save|send|submit|apply|confirm)\b", re.I)
+_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand)\b", re.I)
+
+
+def level(role: str, name: str) -> str:
+    """The risk of pressing a recorded element, by the plan's ruling (payment beats submit)."""
+    if role in ("tab", "link", "radio"):
+        return "navigate"
+    if _PAY.search(name):
+        return "payment"
+    if _CHANGE.search(name):
+        return "submit"
+    return "navigate" if _LOOK.match(name) else "submit"
 
 
 def load(home, name) -> dict:

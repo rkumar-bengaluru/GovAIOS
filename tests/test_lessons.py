@@ -250,3 +250,22 @@ def test_attach_without_a_usable_input_is_not_replayed(tmp_path):
     assert p["steps"][0]["kind"] == "attach_file" and not p["steps"][0]["keep"]
     assert lessons._do(p["steps"][0], p) is None
     assert "Attach your CV: No file chosen (not replayed)" in lesson_ui.page("n", les, prop, set(), {}, "")
+
+
+def test_level():
+    assert lessons.level("tab", "Shortlisted (2)") == "navigate"
+    assert lessons.level("button", "Review") == "navigate"
+    assert lessons.level("button", "Approve & promote") == "submit"
+    assert lessons.level("button", "Pay now") == "payment"
+    assert lessons.level("button", "Frobnicate") == "submit"
+    assert lessons.level("button", "Review and submit") == "submit"
+    assert lessons.level("link", "Pay now") == "navigate"
+
+
+def test_write_rewrites_one_lesson_in_place(tmp_path):
+    name = lessons.new_name("teach_new")
+    lessons.write(tmp_path, name, {"flow": "teach_new", "pages": []})
+    lessons.write(tmp_path, name, {"flow": "teach_new", "pages": [1]})
+    assert lessons.load(tmp_path, name)["pages"] == [1]
+    assert [p.name for p in (tmp_path / "lessons").iterdir()] == [name]
+    assert os.stat(tmp_path / "lessons" / name).st_mode & 0o777 == 0o600

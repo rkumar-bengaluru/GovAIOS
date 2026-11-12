@@ -399,6 +399,9 @@ class MacDesktop:
         self.teach_tab_source = self._tab_source
         return self._teach
 
+    def element_at(self, x: float, y: float):
+        return self._hit((x, y))
+
     def _hit(self, pt):
         """Element under pt if it is in the target app and the pinned window, else None (never raises)."""
         err, hit = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), pt[0], pt[1], None)
