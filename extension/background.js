@@ -1,0 +1,55 @@
+const PANEL = "http://127.0.0.1:8765";
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+
+const get = (k) => chrome.storage.local.get(k).then((o) => o[k]);
+const inject = (tabId) => chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }).catch(() => {});
+
+async function api(method, path, body) {
+  const token = await get("token");
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["X-GovAIOS-Token"] = token;
+  try {
+    const r = await fetch(PANEL + path, { method, headers, body: method === "POST" ? JSON.stringify(body || {}) : undefined });
+    if (r.status === 403 && path !== "/ext/pair") await chrome.storage.local.remove("token");   // Disconnected in Studio
+    return { status: r.status, json: await r.json().catch(() => ({})), paired: !!(await get("token")) };
+  } catch (e) {
+    return { status: 0, json: { note: "Cannot reach the panel at 127.0.0.1:8765." }, paired: !!token };
+  }
+}
+
+async function stop() {
+  const tabId = await get("tab");
+  await chrome.storage.local.remove(["tab", "paused"]);
+  if (tabId != null) chrome.tabs.sendMessage(tabId, { stop: true }).catch(() => {});
+}
+
+// The side panel's requests: {call: [method, path, body]}, {teach: true}, {event: body}
+chrome.runtime.onMessage.addListener((m, sender, reply) => {
+  if (sender.tab) {   // a page's content.js: only its press reports, only from the teach tab, never while paused
+    if (m.kind === "down") Promise.all([get("tab"), get("paused")]).then(([tab, paused]) => {
+      if (sender.tab.id === tab && !paused) api("POST", "/ext/event", m);
+    });
+    return;
+  }
+  (async () => {
+    if (m.teach) {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab) return { status: 0, json: { note: "No tab to teach on." } };
+      const r = await api("POST", "/ext/teach", { tab_url: tab.url || "" });
+      if (r.status === 200) { await chrome.storage.local.set({ tab: tab.id, paused: false }); await inject(tab.id); }
+      return r;
+    }
+    if (m.event) {
+      const r = await api("POST", "/ext/event", m.event);
+      if (r.status === 200 && ["pause", "resume"].includes(m.event.kind)) await chrome.storage.local.set({ paused: m.event.kind === "pause" });
+      if (["done", "cancel"].includes(m.event.kind)) await stop();
+      return r;
+    }
+    return api(m.call[0], m.call[1], m.call[2]);
+  })().then(reply);
+  return true;
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, info) => {
+  if (info.status === "complete" && tabId === (await get("tab"))) inject(tabId);
+});
