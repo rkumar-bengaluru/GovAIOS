@@ -1822,7 +1822,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         with panel.lock:   # /ext/teach: the checks command() makes for a run, then the same start
             hit = next((a for a in apps() if a.id == "teach" and a.approved), None)
             if hit is None:
-                return 409, {"note": "Teach is not approved."}
+                return 409, {"note": "Teach is not approved: approve it on the panel's Approvals page first."}
             if live() or panel.queue or panel.told is not panel.run:
                 return 409, {"note": "Another run is live."}
             name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")

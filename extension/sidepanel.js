@@ -4,6 +4,7 @@ const call = (method, path, body) => send({ call: [method, path, body] });
 const show = (id, on) => { $(id).hidden = !on; };
 let lost = false;   // the Teach run never showed up
 let s = null;   // the last /ext/state
+let said = "";   // the last refusal from a button: stays until the next press, or polls would wipe it
 
 async function poll() {
   const r = await call("POST", "/ext/state");
@@ -15,7 +16,7 @@ async function poll() {
   const y = await send({ sync: true, recording: !!s.recording });
   if (y.timeout) lost = true;
   const rec = !!s.recording, open = !rec && !!s.lesson;
-  $("note").textContent = !s.signed_in ? "Sign in to the panel (type your code on Home) to record." : lost ? "The Teach run did not start. Check Home." : y.starting ? "Starting…" : s.note || "";
+  $("note").textContent = !s.signed_in ? "Sign in to the panel (type your code on Home) to record." : lost ? "The Teach run did not start. Check Home." : y.starting ? "Starting…" : s.note || said;
   show("teach", !rec && !open); show("pause", rec && !s.paused); show("resume", rec && s.paused);
   show("done", rec); show("cancel", rec); show("discard", open);
   $("teach").disabled = !s.signed_in;
@@ -25,8 +26,9 @@ async function poll() {
 }
 
 const act = (id, fn) => $(id).addEventListener("click", async () => {
+  said = "";
   const r = await fn();
-  if (r && r.json && r.json.note) $("note").textContent = r.json.note;
+  if (r && r.json && r.json.note) $("note").textContent = said = r.json.note;
   poll();
 });
 const ev = (kind) => () => send({ event: { kind, t: Date.now() } });
