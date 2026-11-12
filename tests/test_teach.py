@@ -518,6 +518,7 @@ def test_record_lesson_feeds_events_and_ends_on_done(tmp_path, monkeypatch):
     r, d, err, audit = record(tmp_path, monkeypatch, [ev("down"), ev("done")])
     assert err is None and audit[-1]["kind"] == "flow_end"
     assert ("pin", "win1") in d.calls and r.pinned and "launch" not in d.calls and d.typed == ""
+    assert d.calls.index("activate") < d.calls.index(("pin", "win1"))   # `open -a` took focus: Chrome first
     evs, name = lesson_events(tmp_path)
     assert [e["label"] for e in evs] == ["Discover"]
     assert any(a["kind"] == "request" and a["action"] == "teach" and a["decision"] == "allow" for a in audit)

@@ -489,6 +489,7 @@ class Runner:
         """Teach app: record the extension's presses (TEACH_IN, appended by the panel) into a lesson. Never launches,
         navigates or types: Chrome must already be in front, and its window is pinned."""
         from .recorder import Recorder   # recorder imports engine
+        self.d.activate(self.app)   # `open -a` put this run in front: give focus back to Chrome, no input posted
         self.d.pin_window(self.d.focused_window_id(self.app))   # Stop if Chrome has no window in front
         self.pinned = True
         self.gate("teach", "read")
