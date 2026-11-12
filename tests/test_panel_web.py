@@ -2483,3 +2483,54 @@ def test_studio_disconnect_ends_open_lesson(panel):
     assert not (panel.home / "extension.json").exists() and not (panel.home / applyfiles.TEACH_OPEN).exists()
     assert not (panel.home / "lessons" / name).exists()
     assert _log(panel.home, "extension")[-1]["outcome"] == "disconnected"
+
+
+def test_ext_state_reads_teach_out_for_the_live_run(panel):
+    from govaios import applyfiles
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    name = "20261112-101010-123456-teach.json"
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OUT, {"run": "stale", "lesson": name, "paused": True, "note": "old", "lines": ["x"]})
+    j = _ext(panel, "/ext/state", token=tok)[1]
+    assert not j["recording"] and not j["paused"] and j["note"] == "" and j["lines"] == [] and j["lesson"] is None   # another run's file
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OUT, {"run": panel.srv.panel.run_id, "lesson": name, "paused": True,
+                                                              "note": "n" * 300, "lines": ["click button Save", 5]})
+    j = _ext(panel, "/ext/state", token=tok)[1]
+    assert j["recording"] and j["paused"] and j["lines"] == ["click button Save"] and j["lesson"] == name and j["note"] == "n" * 200
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OUT, {"run": panel.srv.panel.run_id, "lesson": "../x.json"})
+    assert _ext(panel, "/ext/state", token=tok)[1]["lesson"] is None
+    assert _ext(panel, "/ext/event", {"kind": "down", "x": 10 ** 400, "y": float("nan")}, token=tok)[0] == 200   # no OverflowError
+    last = json.loads((panel.home / applyfiles.TEACH_IN).read_text().splitlines()[-1])
+    assert "x" not in last and "y" not in last
+
+
+def test_ext_discard(panel):
+    from govaios import applyfiles
+    tok = _paired(panel)
+    name = "20261112-101010-123456-teach.json"
+    (panel.home / "lessons").mkdir()
+    (panel.home / "lessons" / name).write_text("{}")
+    (panel.home / "x.json").write_text("{}")
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": "../x.json"})
+    assert _ext(panel, "/ext/discard", {}, token=tok)[0] == 200
+    assert (panel.home / "x.json").exists() and (panel.home / "lessons" / name).exists()   # a bad name deletes nothing
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    assert _ext(panel, "/ext/discard", {}, token=tok)[0] == 200
+    assert not (panel.home / "lessons" / name).exists() and not (panel.home / applyfiles.TEACH_OPEN).exists()
+
+
+def test_ext_discard_refused_while_teach_is_live(panel):
+    from govaios import applyfiles
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    name = "20261112-101010-123456-teach.json"
+    (panel.home / "lessons").mkdir()
+    (panel.home / "lessons" / name).write_text("{}")
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    s, j, _ = _ext(panel, "/ext/discard", {}, token=tok)
+    assert s == 409 and j["note"] == "Press Cancel to end the lesson that is recording."
+    assert (panel.home / "lessons" / name).exists()

@@ -1702,7 +1702,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def drop_open_lesson():
         """Delete the lesson Teach has open (named in TEACH_OPEN, checked, never a path from a request), then the pointer."""
         name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
-        if isinstance(name, str) and lessons._NAME.fullmatch(name):
+        if isinstance(name, str) and lessons._NAME.fullmatch(name) and not (home / lessons.DIR).is_symlink():
             (home / lessons.DIR / name).unlink(missing_ok=True)
         applyfiles.remove(home, applyfiles.TEACH_OPEN)
 
@@ -1737,12 +1737,16 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         out = applyfiles.read_json(home, applyfiles.TEACH_OUT) or {}
         mine = out.get("run") == panel.run_id and live() and panel.app.id == "teach"
         if path == "/ext/state":
-            lesson = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+            lesson = out.get("lesson") if mine and isinstance(out.get("lesson"), str) and lessons._NAME.fullmatch(out["lesson"]) \
+                else (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+            note = out.get("note") if mine and isinstance(out.get("note"), str) else ""
             lines = out.get("lines") if mine and isinstance(out.get("lines"), list) else []
             return 200, {"signed_in": panel.session.active(), "recording": mine, "paused": mine and out.get("paused") is True,
-                         "lesson": lesson if isinstance(lesson, str) else None, "yaml": "", "note": "",
+                         "lesson": lesson if isinstance(lesson, str) else None, "yaml": "", "note": note[:200],
                          "lines": [x[:200] for x in lines[-50:] if isinstance(x, str)]}
         if path == "/ext/discard":
+            if live() and panel.app.id == "teach":
+                return 409, {"note": "Press Cancel to end the lesson that is recording."}
             drop_open_lesson()
             return 200, {}
         if not panel.session.active():
@@ -1756,7 +1760,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             ev = {"run": panel.run_id, "kind": k}
             ev.update({f: body[f][:200] for f in EVENT_STR if isinstance(body.get(f), str)})
             ev.update({f: body[f] for f in EVENT_NUM if isinstance(body.get(f), (int, float)) and not isinstance(body[f], bool)
-                       and math.isfinite(body[f])})
+                       and abs(body[f]) < 1e15})   # False for nan and inf; no OverflowError on a huge int
             applyfiles.append_line(home, applyfiles.TEACH_IN, ev)
             return 200, {}
         with panel.lock:   # /ext/teach: the checks command() makes for a run, then the same start
