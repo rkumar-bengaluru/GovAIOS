@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "GOV-AIOS Teach (spike)",
+  "version": "0.0.1",
+  "permissions": ["sidePanel"],
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "GOV-AIOS Teach" },
+  "background": { "service_worker": "background.js" }
+}
