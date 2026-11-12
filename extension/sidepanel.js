@@ -11,6 +11,7 @@ async function poll() {
   show("main", paired);
   if (!paired) { $("note").textContent = r.status === 0 ? r.json.note : ""; return; }
   s = r.json;
+  if (!s.recording) send({ idle: true });
   const rec = !!s.recording, open = !rec && !!s.lesson;
   $("note").textContent = !s.signed_in ? "Sign in to the panel (type your code on Home) to record." : s.note || "";
   show("teach", !rec && !open); show("pause", rec && !s.paused); show("resume", rec && s.paused);
@@ -43,7 +44,8 @@ act("done", async () => { show("ask", true); $("appname").focus(); });
 act("make", async () => {
   const name = $("appname").value.trim();
   if (!name) return { json: { note: "Type a name for the app." } };
-  await send({ event: { kind: "done", t: Date.now() } });
+  const d = await send({ event: { kind: "done", t: Date.now() } });
+  if (d.status !== 200) return d;
   for (let i = 0; i < 40; i++) {   // the recorder writes the lesson, then ends the run
     const st = await call("GET", "/ext/state");
     if (!st.json.recording) break;

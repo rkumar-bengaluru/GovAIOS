@@ -1,4 +1,5 @@
 const PANEL = "http://127.0.0.1:8765";
+chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });   // keeps the token from content scripts
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
 const get = (k) => chrome.storage.local.get(k).then((o) => o[k]);
@@ -32,6 +33,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     return;
   }
   (async () => {
+    if (m.idle) { if (await get("tab") != null) await stop(); return {}; }   // state says nothing is recording
     if (m.teach) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) return { status: 0, json: { note: "No tab to teach on." } };
@@ -42,7 +44,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     if (m.event) {
       const r = await api("POST", "/ext/event", m.event);
       if (r.status === 200 && ["pause", "resume"].includes(m.event.kind)) await chrome.storage.local.set({ paused: m.event.kind === "pause" });
-      if (["done", "cancel"].includes(m.event.kind)) await stop();
+      if (r.status === 200 && ["done", "cancel"].includes(m.event.kind)) await stop();
       return r;
     }
     return api(m.call[0], m.call[1], m.call[2]);

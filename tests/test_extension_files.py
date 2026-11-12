@@ -39,3 +39,9 @@ def test_no_private_key_in_extension():
     for f in EXT.rglob("*"):
         if f.is_file():
             assert "PRIVATE KEY" not in f.read_text(errors="ignore"), f
+
+
+def test_content_js_trusts_only_real_presses_and_climbs_like_the_recorder():
+    src = (EXT / "content.js").read_text()
+    assert "isTrusted" in src
+    assert 'closest("a,button,[role=button],[role=tab],[role=link],[role=radio],summary")' in src
