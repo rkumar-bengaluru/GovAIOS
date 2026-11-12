@@ -28,7 +28,7 @@ from govaios.approvals import Approvals, pages_used, read_bound
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
 from govaios.audit.verify import verify
-from govaios.panel import lesson as lesson_ui, market, settings, tickets, totp
+from govaios.panel import extlink, lesson as lesson_ui, market, settings, tickets, totp
 from govaios.panel.apps import list_apps, match
 from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
@@ -1339,6 +1339,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 f"stay yours.</p><form method=post action=/studio/compose>{hidden(csrf)}<label>App name <input name=app "
                 f"maxlength=40 required></label>{sel}<button class=go>Save as a Draft app</button></form></section>"
                 if cat else "<p class=note>No draft pages yet. Capture pages with the Web Sandbox first.</p>")
+        if extlink.connected(home):
+            new += (f"<section class=appcard><h2>Chrome extension</h2><p class=m>Connected. Disconnecting also discards an "
+                    f"unfinished lesson.</p><form method=post action=/studio/disconnect>{hidden(csrf)}"
+                    f"<button class=stop>Disconnect</button></form></section>")
         return _page(f"<h1>Studio</h1><p>Pages you captured in the Web Sandbox become draft pages. "
                      f"Compose them into an app here, or start a new automation.</p>"
                      f"{new}<h2>Studio apps</h2><ul>{mine}</ul><h2>Draft pages</h2><ul>{rows}</ul>{form}", here="/studio")
@@ -1695,10 +1699,84 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         tell("Lesson discarded.")
         return "/"
 
+    def drop_open_lesson():
+        """Delete the lesson Teach has open (named in TEACH_OPEN, checked, never a path from a request), then the pointer."""
+        name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+        if isinstance(name, str) and lessons._NAME.fullmatch(name):
+            (home / lessons.DIR / name).unlink(missing_ok=True)
+        applyfiles.remove(home, applyfiles.TEACH_OPEN)
+
+    def studio_disconnect(f):
+        audited("extension", {"outcome": "disconnected"}, lambda: (drop_open_lesson(), extlink.disconnect(home)))
+        tell("Chrome extension disconnected.")
+        return "/studio"
+
+    EVENT_STR, EVENT_NUM = ("name", "role", "tag", "url"), ("x", "y", "t")
+
+    def ext(method, path, hdr, raw):
+        """The Chrome extension's JSON calls: (status, object). Its stored Origin plus the token replace the cookie and CSRF."""
+        origin = hdr.get("Origin") or ""
+        if (method, path) == ("POST", "/ext/pair"):
+            try:
+                code = json.loads(raw).get("code")
+            except (ValueError, AttributeError):
+                return 400, {}
+            tok = extlink.pair(home, code, origin) if isinstance(code, str) else None
+            log.append("extension", action="pair", decision="allow" if tok else "deny")   # never the code or token
+            return (200, {"token": tok}) if tok else (403, {})
+        if (method, path) not in (("GET", "/ext/state"), ("POST", "/ext/teach"), ("POST", "/ext/event"), ("POST", "/ext/discard")):
+            return 404, {}
+        if not extlink.check(home, hdr.get("X-GovAIOS-Token"), origin):
+            return 403, {}
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            return 400, {}
+        if not isinstance(body, dict):
+            return 400, {}
+        out = applyfiles.read_json(home, applyfiles.TEACH_OUT) or {}
+        mine = out.get("run") == panel.run_id and live() and panel.app.id == "teach"
+        if path == "/ext/state":
+            lesson = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+            lines = out.get("lines") if mine and isinstance(out.get("lines"), list) else []
+            return 200, {"signed_in": panel.session.active(), "recording": mine, "paused": mine and out.get("paused") is True,
+                         "lesson": lesson if isinstance(lesson, str) else None, "yaml": "", "note": "",
+                         "lines": [x[:200] for x in lines[-50:] if isinstance(x, str)]}
+        if path == "/ext/discard":
+            drop_open_lesson()
+            return 200, {}
+        if not panel.session.active():
+            return 409, {"note": "Open a session on the panel first."}
+        if path == "/ext/event":
+            k = body.get("kind")
+            if not (live() and panel.app.id == "teach"):
+                return 409, {"note": "No Teach run is live."}
+            if k not in ("down", "pause", "resume", "done", "cancel"):
+                return 400, {}
+            ev = {"run": panel.run_id, "kind": k}
+            ev.update({f: body[f][:200] for f in EVENT_STR if isinstance(body.get(f), str)})
+            ev.update({f: body[f] for f in EVENT_NUM if isinstance(body.get(f), (int, float)) and not isinstance(body[f], bool)
+                       and math.isfinite(body[f])})
+            applyfiles.append_line(home, applyfiles.TEACH_IN, ev)
+            return 200, {}
+        with panel.lock:   # /ext/teach: the checks command() makes for a run, then the same start
+            hit = next((a for a in apps() if a.id == "teach" and a.approved), None)
+            if hit is None:
+                return 409, {"note": "Teach is not approved."}
+            if live() or panel.queue or panel.told is not panel.run:
+                return 409, {"note": "Another run is live."}
+            name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+            vals = {"lesson": name if isinstance(name, str) and lessons._NAME.fullmatch(name) else "new"}
+            if invalid_input(hit, vals):
+                return 409, {"note": "Teach cannot start."}
+            applyfiles.remove(home, applyfiles.TEACH_IN)   # a new run must not replay the last one's events
+            start_run(hit, vals)
+        return 200, {}
+
     POSTS = {"/terms": terms_post, "/lesson/approve": lesson_approve, "/lesson/discard": lesson_discard,
              "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/unqueue": unqueue_post, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new,
-             "/apps/delete": apps_delete}
+             "/apps/delete": apps_delete, "/studio/disconnect": studio_disconnect}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
                       f"/{_ag.slash}/start": start_post(_ag)})
@@ -1724,10 +1802,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     class H(BaseHTTPRequestHandler):
         timeout = 10  # a short body must not hold a thread forever
 
-        def _send(self, status, body="", extra=()):
+        def _send(self, status, body="", extra=(), ctype="text/html; charset=utf-8"):
             data = body.encode() if body else f"{status}".encode()
             self.send_response(status)
-            for k, v in (("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(data))), *SEC, *extra):
+            for k, v in (("Content-Type", ctype), ("Content-Length", str(len(data))), *SEC, *extra):
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
@@ -1856,9 +1934,26 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 state["sessions"][sid] = (now(), secrets.token_urlsafe(32))
             self._redirect("/", (("Set-Cookie", f"s={sid}; HttpOnly; SameSite=Strict; Path=/"), *clear))
 
+        def _ext(self, method, path):
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = -1
+            if not 0 <= n <= 4096:
+                return self._send(400, "{}", ctype="application/json")
+            try:
+                st, obj = ext(method, path, self.headers, self.rfile.read(n))
+                body = json.dumps(obj)
+            except Exception:
+                # fixed body: pair can fail writing its file after the code was spent
+                st, body = 500, "{}"
+            self._send(st, body, ctype="application/json")
+
         @guarded
         def do_GET(self):
             u = urlsplit(self.path)
+            if u.path.startswith("/ext/"):
+                return self._ext("GET", u.path)
             sess = self._session()
             if not sess:
                 if u.path == "/":
@@ -1889,6 +1984,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         @guarded
         def do_POST(self):
             path = urlsplit(self.path).path
+            if path.startswith("/ext/"):
+                return self._ext("POST", path)
             act = POSTS.get(path)
             if act is None and path not in ("/signin", "/signin/code", "/signout"):
                 return self._send(405)

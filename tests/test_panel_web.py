@@ -2384,3 +2384,102 @@ def test_joblens_jobs_newest_first(cc):
     _tasks(cc, rid, [{"n": 1, "title": "One", "status": "done"}, {"n": 2, "title": "Two", "status": "review"}])
     page = cc.get("/")[1]
     assert page.index("/apply/task/2'") < page.index("/apply/task/1'")
+
+
+# --- Chrome extension endpoints (/ext/*) ---
+EXT = "chrome-extension://" + "a" * 32
+
+
+def _ext(P, path, body=None, token=None, origin=EXT, method=None):
+    c = http.client.HTTPConnection("127.0.0.1", P.srv.server_address[1])
+    h = {k: v for k, v in (("Origin", origin), ("X-GovAIOS-Token", token)) if v}
+    c.request(method or ("GET" if body is None else "POST"), path, body=None if body is None else json.dumps(body), headers=h)
+    r = c.getresponse()
+    return r.status, json.loads(r.read() or b"null"), r
+
+
+def _paired(P):
+    # the next step's code: a session code spent just before must not be the one reused (single use)
+    s, j, r = _ext(P, "/ext/pair", {"code": code_at(_secret(P), time.time() + 30)})
+    assert s == 200 and r.getheader("Content-Type") == "application/json" and r.getheader("X-Content-Type-Options")
+    return j["token"]
+
+
+def _approve_teach(P):
+    (P.flows / "teach.yaml").write_text(
+        "workflow:\n  id: teach\n  app: Teach\n  name: Teach a page\n  version: 1\n  inputs:\n"
+        "    lesson: { label: Lesson, pattern: 'new|[0-9-]{22}-[a-z0-9_]{1,64}\\.json' }\n"
+        "  permissions: { allow: [launch_application], max_element_risk: read }\n  steps:\n"
+        "    - { id: launch_chrome, action: launch_application }\n")
+    a = next(a for a in list_apps(P.flows, P.home) if a.id == "teach")
+    Approvals(P.home / "approvals.json").approve_flow(a.id, a.digest)
+
+
+def test_ext_pair_and_state(panel):
+    tok = _paired(panel)
+    s, j, _ = _ext(panel, "/ext/state", token=tok)
+    assert s == 200 and j["signed_in"] is False and j["recording"] is False and j["lesson"] is None and j["yaml"] == ""
+    assert tok not in json.dumps(_log(panel.home))
+
+
+def test_ext_refuses_web_origin(panel):
+    code = code_at(_secret(panel), time.time())
+    assert _ext(panel, "/ext/pair", {"code": code}, origin="http://localhost:8100")[0] == 403
+    tok = _paired(panel)
+    assert _ext(panel, "/ext/state", token=tok, origin="http://localhost:8100")[0] == 403
+
+
+def test_ext_refuses_without_token(panel):
+    _paired(panel)
+    assert _ext(panel, "/ext/state")[0] == 403
+    assert _ext(panel, "/ext/state", token="nope")[0] == 403
+
+
+def test_ext_event_needs_live_teach_run(panel):
+    _open(panel)
+    tok = _paired(panel)
+    s, j, _ = _ext(panel, "/ext/event", {"kind": "down"}, token=tok)
+    assert s == 409 and j["note"]
+    assert _ext(panel, "/ext/teach", {"tab_url": "https://x.example/"}, token=tok)[0] == 409   # Teach not approved
+    _approve_teach(panel)
+    panel.post("/end")
+    s, j, _ = _ext(panel, "/ext/teach", {}, token=tok)
+    assert s == 409 and "session" in j["note"] and not panel.made   # no run session
+
+
+def test_ext_teach_starts_the_teach_app(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    s, _, _ = _ext(panel, "/ext/teach", {"tab_url": "https://x.example/"}, token=tok)
+    assert s == 200 and panel.made[-1].inputs == {"lesson": "new"} and panel.made[-1].started
+    assert _ext(panel, "/ext/teach", {}, token=tok)[0] == 409   # a run is live
+
+
+def test_ext_event_appended_with_run_id(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    s, _, _ = _ext(panel, "/ext/event", {"kind": "down", "x": 3, "y": float("inf"), "name": "n" * 300, "role": "button",
+                                       "value": "secret", "evil": 1}, token=tok)
+    assert s == 200
+    last = json.loads((panel.home / "apply/teach_in.jsonl").read_text().splitlines()[-1])
+    assert last["run"] == panel.srv.panel.run_id and last["kind"] == "down" and last["x"] == 3 and len(last["name"]) == 200
+    assert set(last) <= {"run", "kind", "x", "y", "name", "role", "tag", "url", "t"} and "y" not in last
+    assert _ext(panel, "/ext/event", {"kind": "bogus"}, token=tok)[0] == 400
+    assert _ext(panel, "/ext/event", {"kind": "x" * 5000}, token=tok)[0] == 400   # body over 4096
+
+
+def test_studio_disconnect_ends_open_lesson(panel):
+    from govaios import applyfiles
+    _paired(panel)
+    name = "20261112-101010-123456-teach.json"
+    (panel.home / "lessons").mkdir()
+    (panel.home / "lessons" / name).write_text("{}")
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    assert "action=/studio/disconnect" in panel.get("/studio")[1]
+    assert panel.post("/studio/disconnect")[0] == 303
+    assert not (panel.home / "extension.json").exists() and not (panel.home / applyfiles.TEACH_OPEN).exists()
+    assert not (panel.home / "lessons" / name).exists()
+    assert _log(panel.home, "extension")[-1]["outcome"] == "disconnected"

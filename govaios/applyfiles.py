@@ -16,6 +16,9 @@ CARDS = {"fix": ("continue", "skip"), "review": ("next", "end"), "stopped": ("ne
          "new_page": ("teach", "skip"), "terms": ("checked", "cancel"), "teaching": ("done", "cancel"),
          "lesson": ("approved", "discarded")}
 LESSON_LIVE = "apply/lesson.json"   # Studio: what the admin did so far, one line per event (labels and lengths, never values)
+TEACH_IN = "apply/teach_in.jsonl"      # extension events for the Teach run, one JSON object per line
+TEACH_OUT = "apply/teach_out.json"     # what the Teach run shows the extension
+TEACH_OPEN = "apply/teach_open.json"   # {"lesson": name}: the lesson Teach is adding to
 MAX = 64 * 1024
 
 
@@ -36,6 +39,13 @@ def write_json(home, name, obj):
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(obj, f)
+
+
+def append_line(home, name, obj):
+    p = _dir(home).parent / name
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a") as f:
+        f.write(json.dumps(obj) + "\n")
 
 
 def read_json(home, name):
