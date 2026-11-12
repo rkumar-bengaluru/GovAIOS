@@ -10,6 +10,7 @@ Spike only: reaches into private helpers (macos._attr/_s, studio._walk, desk._ta
 """
 import select
 import sys
+import time
 
 import Quartz as Q
 from ApplicationServices import AXIsProcessTrusted
@@ -89,17 +90,23 @@ def main():
     desk._target = APP
     enter(f"Open {SITE}/ in Chrome Profile 2 with the GOV-AIOS Teach side panel open and 4 profiles in Shortlisted.\n"
           "After Enter, click the JobLens page within 60 s.")
+    print("Now click the JobLens page in Chrome (waiting up to 60 s)...")
+    # AXFocusedApplication fails from Terminal's python (it returns nothing), so Chrome is seen in front by the
+    # window list, as spikes/plan5 does; its focused window is then pinned directly (spike only, no input is sent)
     win = None
-    for _ in range(12):   # focused_window_id waits ~5 s each try
-        try:
-            win = desk.focused_window_id(APP)
-            break
-        except Exception:
-            pass
+    for _ in range(200):
+        wins = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements,
+                                            Q.kCGNullWindowID) or []
+        top = next((w for w in wins if w.get("kCGWindowLayer") == 0), None)
+        if top and top.get("kCGWindowOwnerName") == "Google Chrome":
+            win = _attr(desk._ax_app(APP), "AXFocusedWindow")
+            if win is not None:
+                break
+        time.sleep(0.3)
     if win is None:
         print("Chrome never came to the front. Run again.")
         return 1
-    desk.pin_window(win)
+    desk._window = win
     tab = desk.teach_tab(APP)
     print(f"Pinned Chrome's window; teach tab via {desk.teach_tab_source}.")
 
