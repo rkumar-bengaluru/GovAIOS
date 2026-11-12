@@ -161,6 +161,14 @@ def test_known_page_gaining_an_element_lists_it(tmp_path):
     assert p["yaml"]["page"]["elements"]["jobs"] == {"role": "link", "name": "Jobs", "risk": "navigate"}
 
 
+def test_known_page_lower_rating_never_drops_the_recorders_submit(tmp_path):
+    pages = known_page(tmp_path, {"send": {"role": "button", "name": "Send", "risk": "navigate"}})
+    e = {**ev("click", "button", "Send"), "risk": "submit", "sure": True}
+    [p] = lessons.propose(lesson(tmp_path, page(tree(Node("button", "Send")), [e])), pages, Bank())["pages"]
+    assert p["steps"][0]["kind"] == "hand_over"
+    assert p["yaml"]["page"]["elements"]["send"]["risk"] == "navigate"   # the page file's rating is not rewritten
+
+
 def test_look_alike_nodes_compare_by_identity(tmp_path):
     pages = known_page(tmp_path, {
         "side": {"role": "group", "dom_id": "side", "risk": "read"},

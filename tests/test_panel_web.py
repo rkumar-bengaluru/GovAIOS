@@ -2427,13 +2427,33 @@ def test_ext_refuses_web_origin(panel):
     code = code_at(_secret(panel), time.time())
     assert _ext(panel, "/ext/pair", {"code": code}, origin="http://localhost:8100")[0] == 403
     tok = _paired(panel)
-    assert _ext(panel, "/ext/state", token=tok, origin="http://localhost:8100")[0] == 403
+    assert _ext(panel, "/ext/state", token=tok, origin="http://localhost:8100")[:2] == (401, {"unpaired": True})
 
 
 def test_ext_refuses_without_token(panel):
     _paired(panel)
-    assert _ext(panel, "/ext/state")[0] == 403
-    assert _ext(panel, "/ext/state", token="nope")[0] == 403
+    assert _ext(panel, "/ext/state")[:2] == (401, {"unpaired": True})
+    assert _ext(panel, "/ext/state", token="nope")[:2] == (401, {"unpaired": True})
+
+
+def test_ext_screen_lock_is_403_and_keeps_the_pairing(panel, monkeypatch):
+    from govaios import auth
+    tok = _paired(panel)
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    assert _ext(panel, "/ext/state", token=tok)[0] == 403   # not 401: the extension keeps its token
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert _ext(panel, "/ext/state", token=tok)[0] == 200
+
+
+def test_studio_disconnect_stops_a_live_teach_run(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    assert _ext(panel, "/ext/teach", {}, token=tok)[0] == 200
+    run = panel.made[-1]
+    assert run.started and not run.stops
+    assert panel.post("/studio/disconnect")[0] == 303
+    assert run.stops and not (panel.home / "extension.json").exists()
 
 
 def test_ext_event_needs_live_teach_run(panel):
@@ -2569,6 +2589,28 @@ def _done(P):
     e = _log(P.home, "lesson")[-1]
     assert (e["outcome"], e["flow"], e["target"]) == ("bound", "studio_approve_shortlisted", name)
     return name
+
+
+def test_ext_state_lines_agree_with_the_yaml(panel):
+    from govaios import lessons
+    from govaios.formfill import Bank
+    tok = _paired(panel)
+    name = _teach_lesson(panel)
+    j = _ext(panel, "/ext/state", token=tok)[1]
+    want = lessons.preview(lessons.load(panel.home, name), panel.flows.parent / "pages", Bank())[0]
+    assert j["lines"] == want and want
+
+
+def test_ext_done_retry_after_a_failed_bind(panel, monkeypatch):
+    from govaios.audit import web
+    tok = _paired(panel)
+    _teach_lesson(panel)
+    real = web.read_bound
+    monkeypatch.setattr(web, "read_bound", lambda *a: (_ for _ in ()).throw(ValueError("bad page")))
+    assert _ext(panel, "/ext/done", {"name": "Approve shortlisted"}, token=tok)[0] == 409
+    assert not (panel.flows / "studio_approve_shortlisted.yaml").exists()   # the Draft is removed: the name is free
+    monkeypatch.setattr(web, "read_bound", real)
+    assert _ext(panel, "/ext/done", {"name": "Approve shortlisted"}, token=tok)[0] == 200
 
 
 def test_new_app_lesson_approves_the_draft(panel):

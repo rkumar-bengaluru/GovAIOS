@@ -11,7 +11,7 @@ async function api(method, path, body) {
   if (token) headers["X-GovAIOS-Token"] = token;
   try {
     const r = await fetch(PANEL + path, { method, headers, body: method === "POST" ? JSON.stringify(body || {}) : undefined });
-    if (r.status === 403 && path !== "/ext/pair") await chrome.storage.local.remove("token");   // Disconnected in Studio
+    if (r.status === 401) await chrome.storage.local.remove("token");   // Disconnected in Studio; a locked screen's 403 keeps it
     return { status: r.status, json: await r.json().catch(() => ({})), paired: !!(await get("token")) };
   } catch (e) {
     return { status: 0, json: { note: "Cannot reach the panel at 127.0.0.1:8765." }, paired: !!token };
@@ -27,6 +27,8 @@ async function stop() {
 // The side panel's requests: {call: [method, path, body]}, {teach: true}, {event: body}
 chrome.runtime.onMessage.addListener((m, sender, reply) => {
   if (sender.tab) {   // a page's content.js: only its press reports, only from the teach tab, never while paused
+    const u = new URL(sender.url);
+    if (["localhost", "127.0.0.1"].includes(u.hostname) && u.port === "8765") return;   // never the panel's own pages
     if (m.kind === "down") Promise.all([get("tab"), get("paused")]).then(([tab, paused]) => {
       if (sender.tab.id === tab && !paused) api("POST", "/ext/event", m);
     });
@@ -35,16 +37,19 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
   (async () => {
     if (m.sync) {   // each poll's recording flag; the run takes seconds to start, so stop only once it was seen live
       if (await get("tab") == null) return {};
-      if (m.recording) { await chrome.storage.local.set({ seen: true }); return {}; }
+      if (m.recording) {   // the run is live: only now show the sign and send presses
+        if (!(await get("seen"))) { await chrome.storage.local.set({ seen: true }); await inject(await get("tab")); }
+        return {};
+      }
       if (await get("seen")) { await stop(); return {}; }
       if (Date.now() - (await get("started")) > 30000) { await stop(); return { timeout: true }; }
-      return {};
+      return { starting: true };
     }
     if (m.teach) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) return { status: 0, json: { note: "No tab to teach on." } };
       const r = await api("POST", "/ext/teach", { tab_url: tab.url || "" });
-      if (r.status === 200) { await chrome.storage.local.set({ tab: tab.id, paused: false, seen: false, started: Date.now() }); await inject(tab.id); }
+      if (r.status === 200) await chrome.storage.local.set({ tab: tab.id, paused: false, seen: false, started: Date.now() });
       return r;
     }
     if (m.event) {
@@ -59,5 +64,5 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, info) => {
-  if (info.status === "complete" && tabId === (await get("tab"))) inject(tabId);
+  if (info.status === "complete" && tabId === (await get("tab")) && (await get("seen"))) inject(tabId);
 });

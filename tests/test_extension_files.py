@@ -50,3 +50,13 @@ def test_content_js_trusts_only_real_presses_and_climbs_like_the_recorder():
 def test_background_stops_an_idle_tab_only_after_the_run_was_seen():
     src = (EXT / "background.js").read_text()
     assert "seen" in src and "m.sync" in src and "30000" in src
+
+
+def test_extension_unpairs_only_on_401_and_skips_the_panel():
+    bg, side = (EXT / "background.js").read_text(), (EXT / "sidepanel.js").read_text()
+    assert "r.status === 401" in bg and "=== 403" not in bg and 'u.port === "8765"' in bg
+    assert "r.status !== 401" in side and "s.recording" in side and "Starting" in side
+
+
+def test_content_js_ignores_non_primary_buttons():
+    assert "e.button !== 0" in (EXT / "content.js").read_text()

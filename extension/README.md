@@ -9,6 +9,7 @@ Extension ID (fixed by the `key` in manifest.json): `ngpmppfmaagibjeklnaldekaelg
 2. Load unpacked, choose this `extension/` folder.
 
 ## Pair
-1. In Studio, ask the panel to connect the extension and read the 6-digit code.
+1. Open your authenticator app and read the panel's 6-digit sign-in code (Studio shows no connect code).
+   The code is single use: after Connect, wait for the next code before you sign in on Home.
 2. Click the extension icon, type the code, press Connect.
 3. Sign in to the panel (type your code on Home), open the app's tab, press Teach.

@@ -124,6 +124,16 @@ def test_outside_origin_pauses(tmp_path):
     assert lessons.load(tmp_path, r.name)["pages"] == []
 
 
+def test_the_panels_own_pages_are_outside(tmp_path):
+    for url in ("http://127.0.0.1:8765/", "http://localhost:8765/studio"):
+        desk = Desk(url, {url: [home_tree()]})
+        desk.hit = "discover"
+        r = rec(tmp_path, desk)
+        r.handle(down("Discover", url))
+        assert r.paused and out(tmp_path)["note"] == "Outside sites come later: recording paused."
+        assert lessons.load(tmp_path, r.name)["pages"] == []
+
+
 def test_new_path_starts_a_page(tmp_path):
     desk = Desk(HOME, {HOME: [home_tree()], DISCOVER: [discover_tree(Node("tab", "Shortlisted (2)", handle="t"))]})
     desk.hit = "discover"

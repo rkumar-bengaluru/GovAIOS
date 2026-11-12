@@ -2,6 +2,7 @@
 if (!window.__govaiosTeach) {
   const onDown = (e) => {
     if (!e.isTrusted) return;   // a page's dispatchEvent cannot forge a press
+    if (e.button !== 0) return;   // a right or middle press is not a click
     const t = e.target instanceof Element ? e.target : null;
     // the same climb the recorder makes, so the names match exactly
     const el = t && t.closest("a,button,[role=button],[role=tab],[role=link],[role=radio],summary");

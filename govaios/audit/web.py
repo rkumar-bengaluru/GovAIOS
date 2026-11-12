@@ -1712,6 +1712,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         applyfiles.remove(home, applyfiles.TEACH_OPEN)
 
     def studio_disconnect(f):
+        if live() and panel.app.id == "teach":   # the run would go on recording with no extension
+            stop_run(panel.run)
         audited("extension", {"outcome": "disconnected"}, lambda: (drop_open_lesson(), extlink.disconnect(home)))
         tell("Chrome extension disconnected.")
         return "/studio"
@@ -1729,14 +1731,20 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 raise ValueError("no lesson is open")
         except (ValueError, OSError, TypeError):
             return 409, {"note": "No lesson is open."}
-        try:
-            path = studio.new_automation(flows_dir, app_name, lesson["pages"][0]["url"], approved_browser())
+        with panel.lock:
+            try:
+                path = studio.new_automation(flows_dir, app_name, lesson["pages"][0]["url"], approved_browser())
+            except (ValueError, OSError, KeyError, AttributeError) as e:
+                return 409, {"note": str(e)[:200]}
             fid = path.stem
-            digest = read_bound(path, flows_dir.parent / "pages")[0]
-        except (ValueError, OSError, KeyError, AttributeError) as e:
-            return 409, {"note": str(e)[:200]}
-        audited("lesson", {"flow": fid, "target": name, "outcome": "bound"},
-                lambda: (lessons.bind(home, name, fid, digest, "on_start"), applyfiles.remove(home, applyfiles.TEACH_OPEN)))
+            try:
+                digest = read_bound(path, flows_dir.parent / "pages")[0]
+                audited("lesson", {"flow": fid, "target": name, "outcome": "bound"},
+                        lambda: lessons.bind(home, name, fid, digest, "on_start"))
+            except Exception as e:   # drop the Draft just written, so Make app can retry the same name
+                path.unlink(missing_ok=True)
+                return 409, {"note": str(e)[:200]}
+            applyfiles.remove(home, applyfiles.TEACH_OPEN)
         return 200, {"lesson_url": f"/lesson/{name}"}
 
     def approved_since_bound(fid, name):
@@ -1768,7 +1776,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                                 ("POST", "/ext/done")):
             return 404, {}
         if not extlink.check(home, hdr.get("X-GovAIOS-Token"), origin):
-            return 403, {}
+            return 401, {"unpaired": True}   # only this unpairs the extension; a lock's 403 must not
         try:
             body = json.loads(raw) if raw else {}
         except ValueError:
@@ -1783,8 +1791,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             note = out.get("note") if mine and isinstance(out.get("note"), str) else ""
             lines = out.get("lines") if mine and isinstance(out.get("lines"), list) else []
             try:
-                text = lessons.preview(lessons.load(home, lesson), flows_dir.parent / "pages",
-                                       load_bank(home / applyfiles.BANK, agents.user_home()))[1]
+                lines, text = lessons.preview(lessons.load(home, lesson), flows_dir.parent / "pages",
+                                              load_bank(home / applyfiles.BANK, agents.user_home()))
             except Exception:   # no lesson, no apps folder, a bad bank: nothing to show yet
                 text = ""
             return 200, {"signed_in": panel.session.active(), "recording": mine, "paused": mine and out.get("paused") is True,

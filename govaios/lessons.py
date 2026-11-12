@@ -233,7 +233,8 @@ def propose(lesson, pages_dir, bank) -> dict:
                 text += f" via the button {evs[i - 1].get('label') or '?'!r}"   # the button replay clicks
             if kind == "click" and not k:
                 line = {"kind": "click", "label": "not sure what this was", "target": None, "keep": False}
-            elif kind == "click" and look["elements"][k].get("risk") in ("submit", "payment"):
+            elif kind == "click" and max((r for r in (look["elements"][k].get("risk"), ev.get("risk")) if r in RISK_ORDER),
+                                         key=RISK_ORDER.index, default=None) in ("submit", "payment"):   # the higher rating
                 line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
             elif kind == "click":
                 line = {"kind": "click", "label": text, "target": target,

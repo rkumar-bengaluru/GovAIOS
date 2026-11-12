@@ -7,14 +7,15 @@ let s = null;   // the last /ext/state
 
 async function poll() {
   const r = await call("GET", "/ext/state");
-  const paired = r.paired && r.status !== 403;
+  const paired = r.paired && r.status !== 401;
   show("pair", !paired);
   show("main", paired);
   if (!paired) { $("note").textContent = r.status === 0 ? r.json.note : ""; return; }
   s = r.json;
-  if ((await send({ sync: true, recording: !!s.recording })).timeout) lost = true;
+  const y = await send({ sync: true, recording: !!s.recording });
+  if (y.timeout) lost = true;
   const rec = !!s.recording, open = !rec && !!s.lesson;
-  $("note").textContent = !s.signed_in ? "Sign in to the panel (type your code on Home) to record." : lost ? "The Teach run did not start. Check Home." : s.note || "";
+  $("note").textContent = !s.signed_in ? "Sign in to the panel (type your code on Home) to record." : lost ? "The Teach run did not start. Check Home." : y.starting ? "Starting…" : s.note || "";
   show("teach", !rec && !open); show("pause", rec && !s.paused); show("resume", rec && s.paused);
   show("done", rec); show("cancel", rec); show("discard", open);
   $("teach").disabled = !s.signed_in;
@@ -33,7 +34,7 @@ const ev = (kind) => () => send({ event: { kind, t: Date.now() } });
 act("connect", async () => {
   const r = await call("POST", "/ext/pair", { code: $("code").value.trim() });
   if (r.status === 200 && r.json.token) await chrome.storage.local.set({ token: r.json.token });
-  else r.json.note = "That code did not work.";
+  else r.json.note = r.status === 0 ? "The panel is not reachable at 127.0.0.1:8765." : "That code did not work.";
   return r;
 });
 act("teach", () => { lost = false; return send({ teach: true }); });
@@ -45,8 +46,10 @@ act("done", async () => { show("ask", true); $("appname").focus(); });
 act("make", async () => {
   const name = $("appname").value.trim();
   if (!name) return { json: { note: "Type a name for the app." } };
-  const d = await send({ event: { kind: "done", t: Date.now() } });
-  if (d.status !== 200) return d;
+  if (s && s.recording) {   // a retry after /ext/done refused: the run has already ended
+    const d = await send({ event: { kind: "done", t: Date.now() } });
+    if (d.status !== 200) return d;
+  }
   for (let i = 0; i < 40; i++) {   // the recorder writes the lesson, then ends the run
     const st = await call("GET", "/ext/state");
     if (!st.json.recording) break;

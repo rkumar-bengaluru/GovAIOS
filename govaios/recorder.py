@@ -15,6 +15,7 @@ FLOW = "teach_new"
 CLICKABLE = ("link", "button", "tab", "radio")
 COUNT = re.compile(r"^(.*\S) \(\d+\)$")   # "Shortlisted (4)": the count changes, so it is never part of the step
 OWN = ("localhost", "127.0.0.1")   # own apps only in this plan
+PANEL_PORT = 8765
 MISMATCH = "Run could not find this. Do it again, or skip it."
 OUTSIDE = "Outside sites come later: recording paused."
 UNSAVED = "Could not save this step. Do it again."
@@ -97,7 +98,7 @@ class Recorder:
     def _down(self, ev):
         url = self.desk.current_url(self.app)
         s = urlsplit(url)
-        if s.scheme != "http" or s.hostname not in OWN:
+        if s.scheme != "http" or s.hostname not in OWN or s.port == PANEL_PORT:   # never the panel's own pages
             self.paused, self.note, self.at = True, OUTSIDE, None
             return
         if _key(ev.get("url")) != _key(url) or ev.get("x") is None or ev.get("y") is None:
