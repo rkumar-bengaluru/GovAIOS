@@ -2394,7 +2394,7 @@ EXT = "chrome-extension://" + "a" * 32
 def _ext(P, path, body=None, token=None, origin=EXT, method=None):
     c = http.client.HTTPConnection("127.0.0.1", P.srv.server_address[1])
     h = {k: v for k, v in (("Origin", origin), ("X-GovAIOS-Token", token)) if v}
-    c.request(method or ("GET" if body is None else "POST"), path, body=None if body is None else json.dumps(body), headers=h)
+    c.request(method or "POST", path, body=json.dumps({} if body is None else body), headers=h)
     r = c.getresponse()
     return r.status, json.loads(r.read() or b"null"), r
 
@@ -2434,6 +2434,12 @@ def test_ext_refuses_without_token(panel):
     _paired(panel)
     assert _ext(panel, "/ext/state")[:2] == (401, {"unpaired": True})
     assert _ext(panel, "/ext/state", token="nope")[:2] == (401, {"unpaired": True})
+
+
+def test_ext_state_is_a_post(panel):
+    tok = _paired(panel)   # Chrome sends no Origin on the extension's GETs: a GET would unpair it
+    assert _ext(panel, "/ext/state", token=tok, method="GET")[0] == 404
+    assert _ext(panel, "/ext/state", token=tok)[0] == 200
 
 
 def test_ext_screen_lock_is_403_and_keeps_the_pairing(panel, monkeypatch):

@@ -1772,7 +1772,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             tok = extlink.pair(home, code, origin) if isinstance(code, str) else None
             log.append("extension", action="pair", decision="allow" if tok else "deny")   # never the code or token
             return (200, {"token": tok}) if tok else (403, {})
-        if (method, path) not in (("GET", "/ext/state"), ("POST", "/ext/teach"), ("POST", "/ext/event"), ("POST", "/ext/discard"),
+        if (method, path) not in (("POST", "/ext/state"), ("POST", "/ext/teach"), ("POST", "/ext/event"), ("POST", "/ext/discard"),
                                 ("POST", "/ext/done")):
             return 404, {}
         if not extlink.check(home, hdr.get("X-GovAIOS-Token"), origin):
@@ -1785,7 +1785,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return 400, {}
         out = applyfiles.read_json(home, applyfiles.TEACH_OUT) or {}
         mine = out.get("run") == panel.run_id and live() and panel.app.id == "teach"
-        if path == "/ext/state":
+        if path == "/ext/state":   # a POST: Chrome sends no Origin on the extension's GETs, so check() would unpair it
             lesson = out.get("lesson") if mine and isinstance(out.get("lesson"), str) and lessons._NAME.fullmatch(out["lesson"]) \
                 else (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
             note = out.get("note") if mine and isinstance(out.get("note"), str) else ""

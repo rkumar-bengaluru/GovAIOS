@@ -6,11 +6,11 @@ let lost = false;   // the Teach run never showed up
 let s = null;   // the last /ext/state
 
 async function poll() {
-  const r = await call("GET", "/ext/state");
+  const r = await call("POST", "/ext/state");
   const paired = r.paired && r.status !== 401;
   show("pair", !paired);
   show("main", paired);
-  if (!paired) { $("note").textContent = r.status === 0 ? r.json.note : ""; return; }
+  if (!paired) { if (r.status === 0) $("note").textContent = r.json.note; return; }   // keep "That code did not work."
   s = r.json;
   const y = await send({ sync: true, recording: !!s.recording });
   if (y.timeout) lost = true;
@@ -51,7 +51,7 @@ act("make", async () => {
     if (d.status !== 200) return d;
   }
   for (let i = 0; i < 40; i++) {   // the recorder writes the lesson, then ends the run
-    const st = await call("GET", "/ext/state");
+    const st = await call("POST", "/ext/state");
     if (!st.json.recording) break;
     await new Promise((ok) => setTimeout(ok, 500));
   }
