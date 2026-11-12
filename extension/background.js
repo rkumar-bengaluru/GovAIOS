@@ -20,7 +20,7 @@ async function api(method, path, body) {
 
 async function stop() {
   const tabId = await get("tab");
-  await chrome.storage.local.remove(["tab", "paused"]);
+  await chrome.storage.local.remove(["tab", "paused", "seen", "started"]);
   if (tabId != null) chrome.tabs.sendMessage(tabId, { stop: true }).catch(() => {});
 }
 
@@ -33,12 +33,18 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     return;
   }
   (async () => {
-    if (m.idle) { if (await get("tab") != null) await stop(); return {}; }   // state says nothing is recording
+    if (m.sync) {   // each poll's recording flag; the run takes seconds to start, so stop only once it was seen live
+      if (await get("tab") == null) return {};
+      if (m.recording) { await chrome.storage.local.set({ seen: true }); return {}; }
+      if (await get("seen")) { await stop(); return {}; }
+      if (Date.now() - (await get("started")) > 30000) { await stop(); return { timeout: true }; }
+      return {};
+    }
     if (m.teach) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) return { status: 0, json: { note: "No tab to teach on." } };
       const r = await api("POST", "/ext/teach", { tab_url: tab.url || "" });
-      if (r.status === 200) { await chrome.storage.local.set({ tab: tab.id, paused: false }); await inject(tab.id); }
+      if (r.status === 200) { await chrome.storage.local.set({ tab: tab.id, paused: false, seen: false, started: Date.now() }); await inject(tab.id); }
       return r;
     }
     if (m.event) {

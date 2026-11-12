@@ -45,3 +45,8 @@ def test_content_js_trusts_only_real_presses_and_climbs_like_the_recorder():
     src = (EXT / "content.js").read_text()
     assert "isTrusted" in src
     assert 'closest("a,button,[role=button],[role=tab],[role=link],[role=radio],summary")' in src
+
+
+def test_background_stops_an_idle_tab_only_after_the_run_was_seen():
+    src = (EXT / "background.js").read_text()
+    assert "seen" in src and "m.sync" in src and "30000" in src

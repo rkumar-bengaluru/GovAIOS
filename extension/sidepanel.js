@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 const send = (m) => chrome.runtime.sendMessage(m);
 const call = (method, path, body) => send({ call: [method, path, body] });
 const show = (id, on) => { $(id).hidden = !on; };
+let lost = false;   // the Teach run never showed up
 let s = null;   // the last /ext/state
 
 async function poll() {
@@ -11,9 +12,9 @@ async function poll() {
   show("main", paired);
   if (!paired) { $("note").textContent = r.status === 0 ? r.json.note : ""; return; }
   s = r.json;
-  if (!s.recording) send({ idle: true });
+  if ((await send({ sync: true, recording: !!s.recording })).timeout) lost = true;
   const rec = !!s.recording, open = !rec && !!s.lesson;
-  $("note").textContent = !s.signed_in ? "Sign in to the panel (type your code on Home) to record." : s.note || "";
+  $("note").textContent = !s.signed_in ? "Sign in to the panel (type your code on Home) to record." : lost ? "The Teach run did not start. Check Home." : s.note || "";
   show("teach", !rec && !open); show("pause", rec && !s.paused); show("resume", rec && s.paused);
   show("done", rec); show("cancel", rec); show("discard", open);
   $("teach").disabled = !s.signed_in;
@@ -35,7 +36,7 @@ act("connect", async () => {
   else r.json.note = "That code did not work.";
   return r;
 });
-act("teach", () => send({ teach: true }));
+act("teach", () => { lost = false; return send({ teach: true }); });
 act("pause", ev("pause"));
 act("resume", ev("resume"));
 act("cancel", ev("cancel"));
