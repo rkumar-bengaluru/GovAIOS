@@ -32,6 +32,7 @@ from govaios.panel import extlink, lesson as lesson_ui, market, settings, ticket
 from govaios.panel.apps import list_apps, match
 from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
+from govaios.recorder import FLOW as TEACH_FLOW
 
 COLS = ["kind", "flow", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason",
         "response_code", "listing_id", "auth", "command", "file_hash", "source"]
@@ -1640,7 +1641,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         except (ValueError, OSError, KeyError, TypeError):
             return None
         fid, sandbox, pages_dir = lesson.get("flow"), lesson.get("flow") in lessons.SANDBOX, flows_dir.parent / "pages"
-        raw = None
+        raw, new_app = None, False
         from govaios.engine import REPO
         if any(Path(x).resolve().is_relative_to(REPO.resolve()) for x in (pages_dir, *([app.path] if app else []))):
             tell("These are the shipped files inside GOV-AIOS: a lesson never changes them. Start the panel on "
@@ -1654,7 +1655,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if d is None or d != lesson.get("digest"):
                 tell(f"{app.name if app else fid} changed since this lesson; teach it again")
                 return back
-            if not Approvals(approvals_path).flow_ok(app.id, d):   # revoked: a lesson never re-approves it
+            # a new app's first approval is its lesson's; revoked: a lesson never re-approves it
+            new_app = (lesson.get("new_app") is True and app.id not in Approvals(approvals_path).snapshot()["flows"]
+                       and not approved_since_bound(app.id, name))
+            if not new_app and not Approvals(approvals_path).flow_ok(app.id, d):
                 tell(f"Approve {app.name} first, then add what it learned.")
                 return back
         if f.get("p") != lesson_ui.digest(proposal):
@@ -1666,7 +1670,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
-        ok, how = auth.prove(f"Add what GOV-AIOS learned to {app.name if app else 'Studio'}", home)
+        ok, how = auth.prove(f"Approve the new app {app.name} and what GOV-AIOS learned" if new_app
+                             else f"Add what GOV-AIOS learned to {app.name if app else 'Studio'}", home)
         who = {"flow": fid, "target": name, "approver": "admin", "channel": "touch_id", "auth": how}
         if not ok:
             log.append("lesson", decision="deny", **who)
@@ -1711,6 +1716,39 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         tell("Chrome extension disconnected.")
         return "/studio"
 
+    def ext_done(app_name):
+        """The recorder is done: make the lesson's new Draft app, then bind the lesson to its start page."""
+        if not isinstance(app_name, str):
+            return 400, {}
+        if live() and panel.app.id == "teach":   # the recorder may still be writing the lesson
+            return 409, {"note": "Press Done in the extension, then wait for the lesson to close."}
+        name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+        try:
+            lesson = lessons.load(home, name)
+            if lesson.get("flow") != TEACH_FLOW or lesson.get("new_app") is not True or not lesson.get("pages"):
+                raise ValueError("no lesson is open")
+        except (ValueError, OSError, TypeError):
+            return 409, {"note": "No lesson is open."}
+        try:
+            path = studio.new_automation(flows_dir, app_name, lesson["pages"][0]["url"], approved_browser())
+            fid = path.stem
+            digest = read_bound(path, flows_dir.parent / "pages")[0]
+        except (ValueError, OSError, KeyError, AttributeError) as e:
+            return 409, {"note": str(e)[:200]}
+        audited("lesson", {"flow": fid, "target": name, "outcome": "bound"},
+                lambda: (lessons.bind(home, name, fid, digest, "on_start"), applyfiles.remove(home, applyfiles.TEACH_OPEN)))
+        return 200, {"lesson_url": f"/lesson/{name}"}
+
+    def approved_since_bound(fid, name):
+        """True unless the audit shows lesson name bound to app fid and the app not approved since (revoked counts)."""
+        bound = False
+        for e, _ in _entries(log):
+            if e and e.get("kind") == "lesson" and e.get("outcome") == "bound" and e.get("target") == name:
+                bound = e.get("flow") == fid
+            elif bound and e and e.get("kind") == "flow_approval" and e.get("flow") == fid and e.get("decision") == "allow":
+                return True
+        return not bound
+
     EVENT_STR, EVENT_NUM = ("name", "role", "tag", "url"), ("x", "y", "t")
 
     def ext(method, path, hdr, raw):
@@ -1724,7 +1762,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             tok = extlink.pair(home, code, origin) if isinstance(code, str) else None
             log.append("extension", action="pair", decision="allow" if tok else "deny")   # never the code or token
             return (200, {"token": tok}) if tok else (403, {})
-        if (method, path) not in (("GET", "/ext/state"), ("POST", "/ext/teach"), ("POST", "/ext/event"), ("POST", "/ext/discard")):
+        if (method, path) not in (("GET", "/ext/state"), ("POST", "/ext/teach"), ("POST", "/ext/event"), ("POST", "/ext/discard"),
+                                ("POST", "/ext/done")):
             return 404, {}
         if not extlink.check(home, hdr.get("X-GovAIOS-Token"), origin):
             return 403, {}
@@ -1741,14 +1780,21 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 else (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
             note = out.get("note") if mine and isinstance(out.get("note"), str) else ""
             lines = out.get("lines") if mine and isinstance(out.get("lines"), list) else []
+            try:
+                text = lessons.preview(lessons.load(home, lesson), flows_dir.parent / "pages",
+                                       load_bank(home / applyfiles.BANK, agents.user_home()))[1]
+            except Exception:   # no lesson, no apps folder, a bad bank: nothing to show yet
+                text = ""
             return 200, {"signed_in": panel.session.active(), "recording": mine, "paused": mine and out.get("paused") is True,
-                         "lesson": lesson if isinstance(lesson, str) else None, "yaml": "", "note": note[:200],
+                         "lesson": lesson if isinstance(lesson, str) else None, "yaml": text, "note": note[:200],
                          "lines": [x[:200] for x in lines[-50:] if isinstance(x, str)]}
         if path == "/ext/discard":
             if live() and panel.app.id == "teach":
                 return 409, {"note": "Press Cancel to end the lesson that is recording."}
             drop_open_lesson()
             return 200, {}
+        if path == "/ext/done":
+            return ext_done(body.get("name"))
         if not panel.session.active():
             return 409, {"note": "Open a session on the panel first."}
         if path == "/ext/event":

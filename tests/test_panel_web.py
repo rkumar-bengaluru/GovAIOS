@@ -2534,3 +2534,75 @@ def test_ext_discard_refused_while_teach_is_live(panel):
     s, j, _ = _ext(panel, "/ext/discard", {}, token=tok)
     assert s == 409 and j["note"] == "Press Cancel to end the lesson that is recording."
     assert (panel.home / "lessons" / name).exists()
+
+
+def _teach_lesson(P):
+    """The recorder's open lesson after Done on JobLens (two pages, the last press a submit); returns its name."""
+    from govaios import applyfiles, capture, lessons
+    from govaios.desktop import Node
+    home = Node("document", "JobLens", children=[Node("heading", "Applications"), Node("link", "Discover")])
+    disc = Node("document", "JobLens", children=[Node("heading", "Discover"), Node("button", "Review")])
+
+    def click(name, risk="navigate"):
+        return {"kind": "click", "spec": {"role": "link" if name == "Discover" else "button", "name": name},
+                "label": name, "value": "", "secure": False, "submit": risk != "navigate", "risk": risk, "sure": True}
+    name = lessons.new_name("teach_new")
+    lessons.write(P.home, name, {"flow": "teach_new", "digest": None, "step": None, "at": "2026-11-12T10:00:00", "new_app": True,
+                                 "pages": [{"url": "http://localhost:8100/", "title": "JobLens · Applications",
+                                            "tree": capture.tree(home), "events": [click("Discover")]},
+                                           {"url": "http://localhost:8100/discover", "title": "JobLens · Discover",
+                                            "tree": capture.tree(disc), "events": [click("Review"), click("Approve & promote", "submit")]}]})
+    applyfiles.write_json(P.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    return name
+
+
+def _done(P):
+    from govaios import applyfiles
+    tok = _paired(P)
+    assert _ext(P, "/ext/done", {"name": "Approve shortlisted"}, token=tok)[0] == 409   # no lesson open
+    name = _teach_lesson(P)
+    assert "joblens_applications" in _ext(P, "/ext/state", token=tok)[1]["yaml"]
+    s, j, _ = _ext(P, "/ext/done", {"name": "Approve shortlisted"}, token=tok)
+    assert s == 200 and j == {"lesson_url": f"/lesson/{name}"} and not (P.home / applyfiles.TEACH_OPEN).exists()
+    assert (P.flows / "studio_approve_shortlisted.yaml").exists()
+    e = _log(P.home, "lesson")[-1]
+    assert (e["outcome"], e["flow"], e["target"]) == ("bound", "studio_approve_shortlisted", name)
+    return name
+
+
+def test_new_app_lesson_approves_the_draft(panel):
+    name = _done(panel)
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    text = "Approve the new app Approve shortlisted and what GOV-AIOS learned"
+    assert panel.asked.count(text) == 1 and panel.asked[-1] == text
+    app = next(a for a in list_apps(panel.flows, panel.home) if a.id == "studio_approve_shortlisted")
+    assert app.approved and Approvals(panel.home / "approvals.json").flow_ok(app.id, app.digest)
+
+
+def test_new_app_lesson_refused_if_draft_edited(panel):
+    name = _done(panel)
+    p = panel.flows / "studio_approve_shortlisted.yaml"
+    p.write_text(p.read_text() + "# edited\n")
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "changed since this lesson" in _tells(panel)[-1] and not any("new app" in a for a in panel.asked)
+    assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_new_app_rule_needs_never_approved(panel):
+    name = _done(panel)
+    panel.post("/approve", flow="studio_approve_shortlisted")
+    assert Approvals(panel.home / "approvals.json").snapshot()["flows"].get("studio_approve_shortlisted")
+    panel.post("/revoke", kind="flow", flow="studio_approve_shortlisted")
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "Approve Approve shortlisted first" in _tells(panel)[-1] and not any("new app" in a for a in panel.asked)
+    assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_ext_done_refused_while_teach_is_live(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    _teach_lesson(panel)
+    s, j, _ = _ext(panel, "/ext/done", {"name": "Approve shortlisted"}, token=tok)
+    assert s == 409 and j["note"] and not (panel.flows / "studio_approve_shortlisted.yaml").exists()
