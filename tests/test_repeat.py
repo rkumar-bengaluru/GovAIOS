@@ -227,3 +227,9 @@ def test_later_lesson_never_reuses_a_repeat_sub_step_id():
     line = {"kind": "click", "target": "p.ok", "keep": True}
     new = lessons._cases({"pages": [{"id": "p", "steps": [line] * 4}]}, set(), set(ids), {})["p"]["do"]
     assert not {s["id"] for s in new} & ids
+
+
+def test_item_label_prefers_a_cell_over_the_rows_whole_text():
+    btn = N("button", "Review")
+    row = N("row", "Ada Lovelace " + "long " * 80, children=[btn, N("cell", "Ada")])
+    assert engine.item_label(row, btn) == "Ada"

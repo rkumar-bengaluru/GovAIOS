@@ -28,7 +28,7 @@ def main(argv=None, sleep=time.sleep):
     ap.add_argument("--n", type=int, default=4, choices=range(1, 11))
     n = ap.parse_args(argv).n
     c = get(BASE + "/counts")
-    if not isinstance(c, dict):
+    if not isinstance(c, dict) or "shortlisted" not in c:
         print("JobLens not reachable at 127.0.0.1:8100 (is it running?)", file=sys.stderr)
         return 2
     before = c["shortlisted"]

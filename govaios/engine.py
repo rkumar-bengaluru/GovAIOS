@@ -114,8 +114,10 @@ def item_target(item, spec, page):
 
 
 def item_label(item, target):
-    """The item's first name other than the target's: for audit and messages only, never its identity."""
-    return next((n.name for n in item.walk() if n is not target and n.name), "")[:200]
+    """The item's first cell or heading name, else its first other name (not the item's own, often its whole text,
+    nor the target's): for audit and messages only, never its identity."""
+    named = [n for n in item.walk() if n is not item and n is not target and n.name]
+    return next((n.name for n in named if n.role in ("cell", "heading")), named[0].name if named else "")[:200]
 
 
 def field_value(node, spec):

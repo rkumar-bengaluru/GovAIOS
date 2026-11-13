@@ -60,3 +60,9 @@ def test_refill_fails_when_screened_out(monkeypatch, capsys):
 def test_refill_waits_past_new(monkeypatch, capsys):
     rc, _, out, _, polls = run(monkeypatch, capsys, {1: ["new", "shortlisted"]}, [0, 1], n=1)
     assert rc == 0 and polls[1] == 2 and "1 shortlisted r1" in out
+
+
+def test_refill_counts_without_shortlisted_is_unexpected_not_a_traceback(monkeypatch, capsys):
+    monkeypatch.setattr(refill, "get", lambda url: {"other": 1})
+    assert refill.main(["--n", "1"], sleep=lambda s: None) == 2
+    assert "not reachable" in capsys.readouterr().err
