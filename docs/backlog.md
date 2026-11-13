@@ -179,3 +179,5 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 
 - **Try it runs with no inputs**: an app that needs inputs (job_apply's url) stops with "bad run input".
 - **Try it does not apply the lesson's bank ops**: fill-from-bank steps use the real bank as it is now.
+- **Repeat "first N" form**: a cap of "first N" for lists that do not shrink (Repeat now stops on an empty list).
+- **Side panel says "Repeat is offered after Done"**: it never sets a cap; the lesson page stays the only place.
