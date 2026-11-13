@@ -432,6 +432,7 @@ def test_end_at_review_ends_the_run(tmp_path):
     assert str(err) == "ended by admin"
     assert [t["status"] for t in tasks] == ["done", "waiting"]
     assert d.calls.count("new_tab") == 1
+    assert "raise_pinned" not in d.calls   # Chrome isn't brought back for a run that is ending
 
 
 @pytest.mark.usefixtures("env")

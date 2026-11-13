@@ -1078,7 +1078,8 @@ class Runner:
         choice = reply.get("card")
         if choice not in CARDS[kind]:
             raise Stop("bad reply")
-        self._act("raise_pinned", self.d.raise_pinned)
+        if choice != "end":   # End stops the run: no window is needed, and a failed raise would hide "ended by admin"
+            self._act("raise_pinned", self.d.raise_pinned)
         return choice
 
     def teach(self, step_id, offered=False):
