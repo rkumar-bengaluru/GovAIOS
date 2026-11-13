@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "GOV-AIOS Teach",
+  "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzU675e4ByVk0vUMwR1kNNUPkmSoMHbq2uBnK0Ly7qi5nCWogai9P+P4lUSKhFgA5b65IIW30w2uK/nBWUzhsh0HQfSBhdkt6T+3QhQmBaMEGll0h+80H/PZi38+av7VMg2g4e7qelkZpl/boNOcpNg7kZ54qsTKhbfBhFpdU3K5+HUWQ5662CUjn6xcT9YZ1NflyWfgmMOjw88Yu4JQFWmIwfPbE3mWaqNHY3J3caApyVLB4BDGpYOXnHAwkG5ob0cncg7hk4zkh4+smeHm2365U9KA9lpgvAasN1VDS5UbwfUsN8wRR5TygJ2y1MqaBYCGqXosnmebc7RYjZJQxzQIDAQAB",
+  "permissions": ["sidePanel", "storage", "scripting", "tabs"],
+  "host_permissions": ["http://127.0.0.1:8765/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "GOV-AIOS Teach" },
+  "background": { "service_worker": "background.js" }
+}

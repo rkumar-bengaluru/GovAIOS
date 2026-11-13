@@ -28,10 +28,11 @@ from govaios.approvals import Approvals, pages_used, read_bound
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
 from govaios.audit.verify import verify
-from govaios.panel import lesson as lesson_ui, market, settings, tickets, totp
+from govaios.panel import extlink, lesson as lesson_ui, market, settings, tickets, totp
 from govaios.panel.apps import list_apps, match
 from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
+from govaios.recorder import FLOW as TEACH_FLOW
 
 COLS = ["kind", "flow", "step", "action", "target", "decision", "approver", "channel", "outcome", "reason",
         "response_code", "listing_id", "auth", "command", "file_hash", "source"]
@@ -711,10 +712,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             f"<form method=post action=/totp/reset>{hidden(csrf)}<button class=stop>Reset authenticator</button></form>")
         authn = (f"<h2>Your name</h2><form method=post action=/name>{hidden(csrf)}<label for=nm>Your name</label> "
                  f"<input id=nm name=name maxlength=40 value='{escape(panel.name)}'> <button>Save</button></form>") + authn
+        def approve_form(a):   # a Draft made by Teach is approved with its lesson, never bare (it has no steps yet)
+            name = waiting_lesson(a.id)
+            return (f"<a class=go href='/lesson/{name}'>Approve it with what I learned</a>" if name else
+                    f"<form method=post action=/approve>{hidden(csrf)}"
+                    f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>")
         waiting = "<h2>Waiting for approval</h2><ul>" + "".join(
-            f"<li>{escape(a.name)} <span class=m>Needs approval</span>"
-            f"<form method=post action=/approve>{hidden(csrf)}"
-            f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>"
+            f"<li>{escape(a.name)} <span class=m>Needs approval</span>{approve_form(a)}"
             f"{delete_form(csrf, 'flow', a.id, '/approvals') if DELETABLE.fullmatch(a.id) else ''}</li>"
             for a in apps() if not a.approved) + "</ul>"
         bad = "<p class=fail>approvals.json unreadable</p>"
@@ -754,7 +758,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='{escape(say)}'>"
                     f"<button class=go>Run</button></form>")
         cards = "".join(f"<section class=appcard><h2>{escape(a.name)}</h2><p>{escape(a.title)}</p>"
-                        f"<p class=m>{'Last started ' + escape(last[a.id]) if last.get(a.id) else 'Never run'}</p>{ctl(a)}</section>"
+                        f"<p class=m>{'Last started ' + escape(last[a.id]) if last.get(a.id) else 'Never run'}</p>{ctl(a)}"
+                        f"{delete_form(csrf, 'flow', a.id, '/apps') if DELETABLE.fullmatch(a.id) else ''}</section>"
                         for a in apps() if a.approved)
         cc = "".join(f"<li>{ag.title}<span class=m> Governed: type /{ag.slash}</span></li>"
                      for ag in agents.AGENTS.values() if cc_roots(ag) is not None)
@@ -1339,6 +1344,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 f"stay yours.</p><form method=post action=/studio/compose>{hidden(csrf)}<label>App name <input name=app "
                 f"maxlength=40 required></label>{sel}<button class=go>Save as a Draft app</button></form></section>"
                 if cat else "<p class=note>No draft pages yet. Capture pages with the Web Sandbox first.</p>")
+        if extlink.connected(home):
+            new += (f"<section class=appcard><h2>Chrome extension</h2><p class=m>Connected. Disconnecting also discards an "
+                    f"unfinished lesson.</p><form method=post action=/studio/disconnect>{hidden(csrf)}"
+                    f"<button class=stop>Disconnect</button></form></section>")
         return _page(f"<h1>Studio</h1><p>Pages you captured in the Web Sandbox become draft pages. "
                      f"Compose them into an app here, or start a new automation.</p>"
                      f"{new}<h2>Studio apps</h2><ul>{mine}</ul><h2>Draft pages</h2><ul>{rows}</ul>{form}", here="/studio")
@@ -1372,7 +1381,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def apps_delete(f):
         """Delete a Studio app (studio_*, check_*) or a draft page no flow uses; its approval goes first."""
         kind, name, back = f.get("kind"), f.get("name", ""), f.get("back")
-        back = back if back in ("/", "/studio", "/approvals") else "/"
+        back = back if back in ("/", "/studio", "/approvals", "/apps") else "/"
         if not flows_dir:
             return None
         pages = flows_dir.parent / "pages"
@@ -1382,6 +1391,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 wid = yaml.safe_load(path.read_text())["workflow"]["id"]
             except Exception:
                 wid = name
+            if live() and panel.app.id == wid:
+                tell("Stop that app's run first, then delete it.")
+                return back
             apply = lambda: (Approvals(approvals_path).revoke_flow(wid), path.unlink())   # noqa: E731
         elif kind == "page" and PAGE_ID.fullmatch(name):
             path = pages / f"{name}.yaml"
@@ -1406,7 +1418,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if path.is_symlink() or not path.is_file():
             tell("Studio: nothing to delete there.")
             return back
-        audited("setting", {"field": "delete", "target": path.name}, apply)
+        fields = {"field": "delete", "target": path.name}
+        if kind == "flow":   # an app goes only with Touch ID
+            ok, how = auth.prove(f"Delete the app {name}", home)
+            fields.update(approver="admin", channel="touch_id", auth=how)
+            if not ok:
+                log.append("setting", decision="deny", **fields)
+                tell("Touch ID is busy. Try again." if how in ("busy", "none") else "Not deleted.")
+                return back
+        audited("setting", fields, apply)
         tell(f"{path.name} is deleted.")
         return back
 
@@ -1636,7 +1656,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         except (ValueError, OSError, KeyError, TypeError):
             return None
         fid, sandbox, pages_dir = lesson.get("flow"), lesson.get("flow") in lessons.SANDBOX, flows_dir.parent / "pages"
-        raw = None
+        raw, new_app = None, False
         from govaios.engine import REPO
         if any(Path(x).resolve().is_relative_to(REPO.resolve()) for x in (pages_dir, *([app.path] if app else []))):
             tell("These are the shipped files inside GOV-AIOS: a lesson never changes them. Start the panel on "
@@ -1650,7 +1670,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if d is None or d != lesson.get("digest"):
                 tell(f"{app.name if app else fid} changed since this lesson; teach it again")
                 return back
-            if not Approvals(approvals_path).flow_ok(app.id, d):   # revoked: a lesson never re-approves it
+            # a new app's first approval is its lesson's; revoked: a lesson never re-approves it
+            new_app = (lesson.get("new_app") is True and app.id not in Approvals(approvals_path).snapshot()["flows"]
+                       and not approved_since_bound(app.id, name))
+            if not new_app and not Approvals(approvals_path).flow_ok(app.id, d):
                 tell(f"Approve {app.name} first, then add what it learned.")
                 return back
         if f.get("p") != lesson_ui.digest(proposal):
@@ -1662,7 +1685,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
-        ok, how = auth.prove(f"Add what GOV-AIOS learned to {app.name if app else 'Studio'}", home)
+        ok, how = auth.prove(f"Approve the new app {app.name} and what GOV-AIOS learned" if new_app
+                             else f"Add what GOV-AIOS learned to {app.name if app else 'Studio'}", home)
         who = {"flow": fid, "target": name, "approver": "admin", "channel": "touch_id", "auth": how}
         if not ok:
             log.append("lesson", decision="deny", **who)
@@ -1695,10 +1719,153 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         tell("Lesson discarded.")
         return "/"
 
+    def drop_open_lesson():
+        """Delete the lesson Teach has open (named in TEACH_OPEN, checked, never a path from a request), then the pointer."""
+        name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+        if isinstance(name, str) and lessons._NAME.fullmatch(name) and not (home / lessons.DIR).is_symlink():
+            (home / lessons.DIR / name).unlink(missing_ok=True)
+        applyfiles.remove(home, applyfiles.TEACH_OPEN)
+
+    def studio_disconnect(f):
+        if live() and panel.app.id == "teach":   # the run would go on recording with no extension
+            stop_run(panel.run)
+        audited("extension", {"outcome": "disconnected"}, lambda: (drop_open_lesson(), extlink.disconnect(home)))
+        tell("Chrome extension disconnected.")
+        return "/studio"
+
+    def ext_done(app_name):
+        """The recorder is done: make the lesson's new Draft app, then bind the lesson to its start page."""
+        if not isinstance(app_name, str):
+            return 400, {}
+        if live() and panel.app.id == "teach":   # the recorder may still be writing the lesson
+            return 409, {"note": "Press Done in the extension, then wait for the lesson to close."}
+        name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+        try:
+            lesson = lessons.load(home, name)
+            if lesson.get("flow") != TEACH_FLOW or lesson.get("new_app") is not True or not lesson.get("pages"):
+                raise ValueError("no lesson is open")
+        except (ValueError, OSError, TypeError):
+            return 409, {"note": "No lesson is open."}
+        with panel.lock:
+            try:
+                path = studio.new_automation(flows_dir, app_name, lesson["pages"][0]["url"], approved_browser())
+            except (ValueError, OSError, KeyError, AttributeError) as e:
+                return 409, {"note": str(e)[:200]}
+            fid = path.stem
+            try:
+                digest = read_bound(path, flows_dir.parent / "pages")[0]
+                audited("lesson", {"flow": fid, "target": name, "outcome": "bound"},
+                        lambda: lessons.bind(home, name, fid, digest, "on_start"))
+            except Exception as e:   # drop the Draft just written, so Make app can retry the same name
+                path.unlink(missing_ok=True)
+                return 409, {"note": str(e)[:200]}
+            applyfiles.remove(home, applyfiles.TEACH_OPEN)
+        return 200, {"lesson_url": f"/lesson/{name}"}
+
+    def waiting_lesson(fid):
+        """The newest new-app lesson bound to Draft fid and not yet approved with it, or None."""
+        d = home / lessons.DIR
+        if not d.is_dir() or d.is_symlink():
+            return None
+        for p in sorted(d.glob("*.json"), reverse=True):
+            try:
+                ok = lessons.load(home, p.name).get("flow") == fid
+            except (ValueError, OSError):
+                continue
+            if ok and not approved_since_bound(fid, p.name):
+                return p.name
+        return None
+
+    def approved_since_bound(fid, name):
+        """True unless the audit shows lesson name bound to app fid and the app not approved since (revoked counts)."""
+        bound = False
+        for e, _ in _entries(log):
+            if e and e.get("kind") == "lesson" and e.get("outcome") == "bound" and e.get("target") == name:
+                bound = e.get("flow") == fid
+            elif bound and e and e.get("flow") == fid and (
+                    (e.get("kind") == "flow_approval" and e.get("decision") == "allow")
+                    or (e.get("kind") == "lesson" and e.get("outcome") == "approved")):   # a lesson's approval too
+                return True
+        return not bound
+
+    EVENT_STR, EVENT_NUM = ("name", "role", "tag", "url"), ("x", "y", "t")
+
+    def ext(method, path, hdr, raw):
+        """The Chrome extension's JSON calls: (status, object). Its stored Origin plus the token replace the cookie and CSRF."""
+        origin = hdr.get("Origin") or ""
+        if (method, path) == ("POST", "/ext/pair"):
+            try:
+                code = json.loads(raw).get("code")
+            except (ValueError, AttributeError):
+                return 400, {}
+            tok = extlink.pair(home, code, origin) if isinstance(code, str) else None
+            log.append("extension", action="pair", decision="allow" if tok else "deny")   # never the code or token
+            return (200, {"token": tok}) if tok else (403, {})
+        if (method, path) not in (("POST", "/ext/state"), ("POST", "/ext/teach"), ("POST", "/ext/event"), ("POST", "/ext/discard"),
+                                ("POST", "/ext/done")):
+            return 404, {}
+        if not extlink.check(home, hdr.get("X-GovAIOS-Token"), origin):
+            return 401, {"unpaired": True}   # only this unpairs the extension; a lock's 403 must not
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            return 400, {}
+        if not isinstance(body, dict):
+            return 400, {}
+        out = applyfiles.read_json(home, applyfiles.TEACH_OUT) or {}
+        mine = out.get("run") == panel.run_id and live() and panel.app.id == "teach"
+        if path == "/ext/state":   # a POST: Chrome sends no Origin on the extension's GETs, so check() would unpair it
+            lesson = out.get("lesson") if mine and isinstance(out.get("lesson"), str) and lessons._NAME.fullmatch(out["lesson"]) \
+                else (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+            note = out.get("note") if mine and isinstance(out.get("note"), str) else ""
+            lines = out.get("lines") if mine and isinstance(out.get("lines"), list) else []
+            try:
+                lines, text = lessons.preview(lessons.load(home, lesson), flows_dir.parent / "pages",
+                                              load_bank(home / applyfiles.BANK, agents.user_home()))
+            except Exception:   # no lesson, no apps folder, a bad bank: nothing to show yet
+                text = ""
+            return 200, {"signed_in": panel.session.active(), "recording": mine, "paused": mine and out.get("paused") is True,
+                         "lesson": lesson if isinstance(lesson, str) else None, "yaml": text, "note": note[:200],
+                         "lines": [x[:200] for x in lines[-50:] if isinstance(x, str)]}
+        if path == "/ext/discard":
+            if live() and panel.app.id == "teach":
+                return 409, {"note": "Press Cancel to end the lesson that is recording."}
+            drop_open_lesson()
+            return 200, {}
+        if path == "/ext/done":
+            return ext_done(body.get("name"))
+        if not panel.session.active():
+            return 409, {"note": "Open a session on the panel first."}
+        if path == "/ext/event":
+            k = body.get("kind")
+            if not (live() and panel.app.id == "teach"):
+                return 409, {"note": "No Teach run is live."}
+            if k not in ("down", "pause", "resume", "done", "cancel"):
+                return 400, {}
+            ev = {"run": panel.run_id, "kind": k}
+            ev.update({f: body[f][:200] for f in EVENT_STR if isinstance(body.get(f), str)})
+            ev.update({f: body[f] for f in EVENT_NUM if isinstance(body.get(f), (int, float)) and not isinstance(body[f], bool)
+                       and abs(body[f]) < 1e15})   # False for nan and inf; no OverflowError on a huge int
+            applyfiles.append_line(home, applyfiles.TEACH_IN, ev)
+            return 200, {}
+        with panel.lock:   # /ext/teach: the checks command() makes for a run, then the same start
+            hit = next((a for a in apps() if a.id == "teach" and a.approved), None)
+            if hit is None:
+                return 409, {"note": "Teach is not approved: approve it on the panel's Approvals page first."}
+            if live() or panel.queue or panel.told is not panel.run:
+                return 409, {"note": "Another run is live."}
+            name = (applyfiles.read_json(home, applyfiles.TEACH_OPEN) or {}).get("lesson")
+            vals = {"lesson": name if isinstance(name, str) and lessons._NAME.fullmatch(name) else "new"}
+            if invalid_input(hit, vals):
+                return 409, {"note": "Teach cannot start."}
+            applyfiles.remove(home, applyfiles.TEACH_IN)   # a new run must not replay the last one's events
+            start_run(hit, vals)
+        return 200, {}
+
     POSTS = {"/terms": terms_post, "/lesson/approve": lesson_approve, "/lesson/discard": lesson_discard,
              "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/unqueue": unqueue_post, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new,
-             "/apps/delete": apps_delete}
+             "/apps/delete": apps_delete, "/studio/disconnect": studio_disconnect}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),
                       f"/{_ag.slash}/start": start_post(_ag)})
@@ -1724,10 +1891,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     class H(BaseHTTPRequestHandler):
         timeout = 10  # a short body must not hold a thread forever
 
-        def _send(self, status, body="", extra=()):
+        def _send(self, status, body="", extra=(), ctype="text/html; charset=utf-8"):
             data = body.encode() if body else f"{status}".encode()
             self.send_response(status)
-            for k, v in (("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(data))), *SEC, *extra):
+            for k, v in (("Content-Type", ctype), ("Content-Length", str(len(data))), *SEC, *extra):
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
@@ -1856,9 +2023,26 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 state["sessions"][sid] = (now(), secrets.token_urlsafe(32))
             self._redirect("/", (("Set-Cookie", f"s={sid}; HttpOnly; SameSite=Strict; Path=/"), *clear))
 
+        def _ext(self, method, path):
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = -1
+            if not 0 <= n <= 4096:
+                return self._send(400, "{}", ctype="application/json")
+            try:
+                st, obj = ext(method, path, self.headers, self.rfile.read(n))
+                body = json.dumps(obj)
+            except Exception:
+                # fixed body: pair can fail writing its file after the code was spent
+                st, body = 500, "{}"
+            self._send(st, body, ctype="application/json")
+
         @guarded
         def do_GET(self):
             u = urlsplit(self.path)
+            if u.path.startswith("/ext/"):
+                return self._ext("GET", u.path)
             sess = self._session()
             if not sess:
                 if u.path == "/":
@@ -1889,6 +2073,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         @guarded
         def do_POST(self):
             path = urlsplit(self.path).path
+            if path.startswith("/ext/"):
+                return self._ext("POST", path)
             act = POSTS.get(path)
             if act is None and path not in ("/signin", "/signin/code", "/signout"):
                 return self._send(405)

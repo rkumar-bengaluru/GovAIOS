@@ -39,3 +39,15 @@ def test_read_json_rejects_large_or_bad(tmp_path):
     assert af.read_json(tmp_path, af.ASK) is None
     p.write_text("[1]")
     assert af.read_json(tmp_path, af.ASK) is None
+
+
+def test_append_line_appends_0600_and_refuses_symlink(tmp_path):
+    af.append_line(tmp_path, af.TEACH_IN, {"a": 1})
+    af.append_line(tmp_path, af.TEACH_IN, {"b": 2})
+    assert (tmp_path / af.TEACH_IN).read_text() == '{"a": 1}\n{"b": 2}\n'
+    assert stat.S_IMODE(os.stat(tmp_path / af.TEACH_IN).st_mode) == 0o600
+    (tmp_path / af.TEACH_IN).unlink()
+    (tmp_path / "t").write_text("x")
+    (tmp_path / af.TEACH_IN).symlink_to(tmp_path / "t")
+    with pytest.raises(OSError):
+        af.append_line(tmp_path, af.TEACH_IN, {"c": 3})

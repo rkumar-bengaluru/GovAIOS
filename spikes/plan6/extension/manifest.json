@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "GOV-AIOS Teach (spike)",
+  "version": "0.0.2",
+  "permissions": ["sidePanel"],
+  "host_permissions": ["http://127.0.0.1:8799/*"],
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "GOV-AIOS Teach" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{ "matches": ["http://localhost:8100/*"], "js": ["content.js"], "run_at": "document_start" }]
+}

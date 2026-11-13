@@ -161,6 +161,14 @@ def test_known_page_gaining_an_element_lists_it(tmp_path):
     assert p["yaml"]["page"]["elements"]["jobs"] == {"role": "link", "name": "Jobs", "risk": "navigate"}
 
 
+def test_known_page_lower_rating_never_drops_the_recorders_submit(tmp_path):
+    pages = known_page(tmp_path, {"send": {"role": "button", "name": "Send", "risk": "navigate"}})
+    e = {**ev("click", "button", "Send"), "risk": "submit", "sure": True}
+    [p] = lessons.propose(lesson(tmp_path, page(tree(Node("button", "Send")), [e])), pages, Bank())["pages"]
+    assert p["steps"][0]["kind"] == "hand_over"
+    assert p["yaml"]["page"]["elements"]["send"]["risk"] == "navigate"   # the page file's rating is not rewritten
+
+
 def test_look_alike_nodes_compare_by_identity(tmp_path):
     pages = known_page(tmp_path, {
         "side": {"role": "group", "dom_id": "side", "risk": "read"},
@@ -250,3 +258,92 @@ def test_attach_without_a_usable_input_is_not_replayed(tmp_path):
     assert p["steps"][0]["kind"] == "attach_file" and not p["steps"][0]["keep"]
     assert lessons._do(p["steps"][0], p) is None
     assert "Attach your CV: No file chosen (not replayed)" in lesson_ui.page("n", les, prop, set(), {}, "")
+
+
+def test_level():
+    assert lessons.level("tab", "Shortlisted (2)") == "navigate"
+    assert lessons.level("button", "Review") == "navigate"
+    assert lessons.level("button", "Approve & promote") == "submit"
+    assert lessons.level("button", "Pay now") == "payment"
+    assert lessons.level("button", "Frobnicate") == "submit"
+    assert lessons.level("button", "Review and submit") == "submit"
+    assert lessons.level("link", "Pay now") == "navigate"
+
+
+def test_write_rewrites_one_lesson_in_place(tmp_path):
+    name = lessons.new_name("teach_new")
+    lessons.write(tmp_path, name, {"flow": "teach_new", "pages": []})
+    lessons.write(tmp_path, name, {"flow": "teach_new", "pages": [1]})
+    assert lessons.load(tmp_path, name)["pages"] == [1]
+    assert [p.name for p in (tmp_path / "lessons").iterdir()] == [name]
+    assert os.stat(tmp_path / "lessons" / name).st_mode & 0o777 == 0o600
+
+
+def test_leftover_tmp_does_not_block_a_write(tmp_path):
+    name = lessons.new_name("teach_new")
+    (tmp_path / "lessons").mkdir()
+    (tmp_path / "lessons" / (name + ".tmp")).write_text("half")
+    lessons.write(tmp_path, name, {"flow": "teach_new", "pages": []})
+    assert lessons.load(tmp_path, name)["pages"] == []
+
+
+def joblens(tmp_path):
+    """An extension lesson on JobLens (the recorder's doc), bound to a new_automation app; returns (lesson, app path)."""
+    import shutil
+    from govaios import capture, studio
+    from govaios.approvals import read_bound
+    from govaios.engine import REPO
+    shutil.copytree(REPO / "pages", tmp_path / "pages")
+    (tmp_path / "flows").mkdir()
+    app = studio.new_automation(tmp_path / "flows", "Approve shortlisted", "http://localhost:8100/",
+                                {"profile_directory": "Default", "account": "a@x.example"})
+    home = Node("document", "JobLens", children=[Node("heading", "Applications"), Node("link", "Discover")])
+    disc = Node("document", "JobLens", children=[
+        Node("heading", "Discover"), Node("tab", "Shortlisted (2)"),
+        *[Node("row", "", children=[Node("cell", c), Node("button", "Review")]) for c in ("Acme", "Globex")]])
+
+    def click(spec, label, risk="navigate"):
+        return {"kind": "click", "spec": spec, "label": label, "value": "", "secure": False, "submit": risk != "navigate",
+                "risk": risk, "sure": True}
+    name = lessons.new_name("teach_new")
+    lessons.write(tmp_path, name, {"flow": "teach_new", "digest": None, "step": None, "at": "2026-11-12T10:00:00",
+                                   "new_app": True, "pages": [
+        {"url": "http://localhost:8100/", "title": "JobLens · Applications", "tree": capture.tree(home),
+         "events": [click({"role": "link", "name": "Discover"}, "Discover")]},
+        {"url": "http://localhost:8100/discover", "title": "JobLens · Discover", "tree": capture.tree(disc),
+         "events": [click({"role": "tab", "name_matches": "^Shortlisted \\(\\d+\\)$"}, "Shortlisted"),
+                    click({"role": "button", "name": "Review", "index": 0}, "Review"),
+                    # pressed in a pop-up: not in the page's first snapshot, so only the recorder's reading is sure
+                    click({"role": "button", "name": "Approve & promote"}, "Approve & promote", "submit")]}]})
+    lessons.bind(tmp_path, name, "studio_approve_shortlisted", read_bound(app, tmp_path / "pages")[0], "on_start")
+    return lessons.load(tmp_path, name), app
+
+
+def test_joblens_lesson_builds_two_cases(tmp_path):
+    from govaios import studio
+    from govaios.approvals import read_bound
+    les, app = joblens(tmp_path)
+    assert (les["flow"], les["step"], les["new_app"]) == ("studio_approve_shortlisted", "on_start", True)
+    d, raw = read_bound(app, tmp_path / "pages")
+    assert les["digest"] == d
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+    new = prop["pages"][1]["id"]
+    assert list(on) == ["joblens_applications", new, "unknown"]
+    assert on["joblens_applications"] == {"do": [{"id": "learned_joblens_applications_1", "action": "click",
+                                                  "target": "joblens_applications.discover"}], "then": "again"}
+    assert [s["action"] for s in on[new]["do"]] == ["click", "click", "hand_over"] and on[new]["then"] == "end"
+    assert [s.get("target") for s in on[new]["do"]] == [f"{new}.shortlisted", f"{new}.button_review", None]
+    pg = prop["pages"][1]["yaml"]["page"]
+    assert [pg["elements"][a] for a in pg["identification"]["anchors"]][0]["name"] == "Discover"
+    assert not lessons._identifies(pg, studio._as_nodes(les["pages"][0]["tree"])[0])   # never the home page
+
+
+def test_preview_lines_and_yaml(tmp_path):
+    les, _ = joblens(tmp_path)
+    lines, text = lessons.preview(les, tmp_path / "pages", Bank())
+    assert lines == ["JobLens · Applications: click Discover", "JobLens · Discover: click Shortlisted",
+                     "JobLens · Discover: click Review", "JobLens · Discover: you press Approve & promote"]
+    cases = yaml.safe_load(text)
+    assert list(cases) == ["joblens_applications", "localhost_joblens"] and cases["localhost_joblens"]["then"] == "end"

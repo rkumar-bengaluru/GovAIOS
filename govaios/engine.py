@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from . import auth, capture, runstate, studio, terms
 from .agents import user_home
-from .applyfiles import ASK, BANK, CARDS, LESSON_LIVE, REPLY, RESULT, SANDBOX, TASKS, read_json, remove, write_json
+from .applyfiles import ASK, BANK, CARDS, LESSON_LIVE, REPLY, RESULT, SANDBOX, TASKS, TEACH_IN, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
                        read_form, restricted)
 from .audit.log import AuditLog, url_for_audit
@@ -357,6 +357,13 @@ class Runner:
     def page_element(self, ref):
         """Element by schema ref, only after its page is identified (never on an unknown page)."""
         page_id = ref.split(".")[0]
+        on = self.ctx.get("learned_on")
+        if on and on[0] == page_id and self.d.current_url(self.app) == on[1]:
+            # a taught pop-up hides the page's anchors: within its own case, the same URL and title is the same page
+            root = self.snapshot()
+            if root is not None and re.search(self.pages[page_id]["identification"].get("title_matches", ""), root.name):
+                self._audit("verify", outcome=page_id)
+                return self.element(ref, root)
         page, root = self.wait_for_page([page_id], 10)
         if not page:
             raise Stop(f"not on {page_id}")
@@ -485,6 +492,50 @@ class Runner:
         self.d.pin_window(window)   # refuses if focus left that window during the check
         self.pinned = True   # teach observes only this window
 
+    def do_record_lesson(self, s):
+        """Teach app: record the extension's presses (TEACH_IN, appended by the panel) into a lesson. Never launches,
+        navigates or types: Chrome must already be in front, and its window is pinned."""
+        from .recorder import Recorder   # recorder imports engine
+        self.d.activate(self.app)   # `open -a` put this run in front: give focus back to Chrome, no input posted
+        self.d.pin_window(self.d.focused_window_id(self.app))   # Stop if Chrome has no window in front
+        self.pinned = True
+        self.gate("teach", "read")
+        lesson = self.inputs["lesson"]
+        rec = Recorder(self.d, self.app, self.home, self.run_id, None if lesson == "new" else lesson)
+        pos, last, check = 0, time.monotonic(), 0
+        while not (rec.done or rec.cancelled):
+            now = time.monotonic()
+            if now >= check:
+                if runstate.stopped(self.home):
+                    raise Stop("emergency stop")
+                if auth.screen_locked():
+                    raise Stop("screen_locked")
+                check = now + 0.5
+            try:
+                fd = os.open(self.home / TEACH_IN, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                data = b""
+            else:
+                with os.fdopen(fd, "rb") as f:
+                    f.seek(pos)
+                    data = f.read()
+            data = data[:data.rfind(b"\n") + 1]   # a partial last line waits for its newline
+            pos += len(data)
+            for line in data.splitlines():
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("run") == self.run_id:
+                    rec.handle(ev)
+                    last = now
+            if rec.paused:
+                last = now   # idle time counts only while recording
+            elif now - last > TEACH_IDLE_S:
+                break   # what was recorded so far is kept
+            time.sleep(0.01)
+        self._audit("lesson", outcome="cancelled" if rec.cancelled else "recorded", target=rec.name)
+
     def do_navigate(self, s):
         value = self.inputs[s["value_from"].removeprefix("input.")] if "value_from" in s else s["value"]
         self._go(value)
@@ -509,7 +560,11 @@ class Runner:
                     raise Stop("too many learned pages in a row")
                 self.gate("read_page", "read", destination=self.d.current_url(self.app))
                 self.ctx["page"] = page
-                self.steps(what["do"])                   # each step through its own gate (click: risk ceiling)
+                self.ctx["learned_on"] = (page, self.d.current_url(self.app))
+                try:
+                    self.steps(what["do"])               # each step through its own gate (click: risk ceiling)
+                finally:
+                    self.ctx.pop("learned_on", None)
                 self.step = s["id"]
                 if what["then"] == "end":
                     return ("end",)

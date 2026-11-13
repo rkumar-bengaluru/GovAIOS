@@ -15,6 +15,10 @@ PAGES = {
         "send": {"role": "button", "name": "Send", "risk": "submit"}}},
     "page_b": {"title_matches": "^Step B$", "elements": {"done": {"role": "button", "name": "Done", "risk": "navigate"}}},
     "page_c": {"title_matches": "^Step C$", "elements": {"go": {"role": "button", "name": "Go", "risk": "navigate"}}},
+    "page_d": {"title_matches": "^Step D$", "anchors": ["head"], "elements": {
+        "head": {"role": "heading", "name": "Discover", "risk": "read"},
+        "open": {"role": "button", "name": "Open", "risk": "navigate"},
+        "close": {"role": "button", "name": "Close", "risk": "navigate"}}},
 }
 
 
@@ -30,8 +34,16 @@ class Desk(FakeDesktop):
         self.calls.append(("click", node.name))
         assert node.name != "Send", "a submit-rated element was clicked"
         self.title = {"Next": "Step B", "Go": "Step A"}.get(node.name, self.title)
+        if node.name in ("Open", "Close"):   # Open shows a pop-up that hides the heading (as JobLens's Review does)
+            self.popup = node.name == "Open"
+            self.url = SITE + "/elsewhere" if self.popup and self.moves else self.url
+
+    popup = moves = False
 
     def web_root(self, app):
+        if self.title == "Step D":
+            return N("document", "Step D", children=[N("button", "Close")] if self.popup
+                     else [N("heading", "Discover"), N("button", "Open")])
         kids = {"Step A": [N("button", "Next"), N("button", "Send")], "Step B": [N("button", "Done")],
                 "Step C": [N("button", "Go")]}[self.title]
         return N("document", self.title, children=kids)
@@ -42,7 +54,8 @@ def make(tmp_path, steps, risk="navigate"):
     flows.mkdir(parents=True), pages.mkdir()
     for pid, p in PAGES.items():
         (pages / f"{pid}.yaml").write_text(yaml.safe_dump({"page": {
-            "id": pid, "identification": {"title_matches": p["title_matches"]}, "elements": p["elements"]}}))
+            "id": pid, "identification": {"title_matches": p["title_matches"], "anchors": p.get("anchors", [])},
+            "elements": p["elements"]}}))
     f = flows / "teach.yaml"
     f.write_text(yaml.safe_dump({"workflow": {
         "id": "teach", "app": "Teach", "version": 1, "browser": {"application": "chrome", "account": "x"},
@@ -51,12 +64,13 @@ def make(tmp_path, steps, risk="navigate"):
     return f, pages
 
 
-def run(tmp_path, monkeypatch, steps, risk="navigate", ctx=None):
+def run(tmp_path, monkeypatch, steps, risk="navigate", ctx=None, desk=None):
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
     monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
     f, _ = make(tmp_path, steps, risk)
     d = Desk()
+    d.__dict__.update(desk or {})
     r = Runner(f, d, tmp_path)
     r.approvals.approve_flow("teach", r.digest)
     r.approvals.approve_destination("teach", SITE)
@@ -81,6 +95,22 @@ def test_learned_case_clicks_then_reclassifies(tmp_path, monkeypatch):
     assert ("click", "Next") in d.calls and ("click", "Done") in d.calls
     assert r.ctx["page"] == "page_b" and r.audit_lines[-1]["kind"] == "flow_end"
     assert any(e.get("step") == "learned_page_a_1" and e.get("action") == "click" for e in r.audit_lines)
+
+
+@pytest.mark.parametrize("moves", [False, True])
+def test_learned_click_inside_a_pop_up_on_the_same_url(tmp_path, monkeypatch, moves):
+    steps = [{"id": "where", "action": "classify_page", "timeout_seconds": 0,
+              "on_match": {"page_d": {"do": [{"id": "learned_page_d_1", "action": "click", "target": "page_d.open"},
+                                             {"id": "learned_page_d_2", "action": "click", "target": "page_d.close"}],
+                                      "then": "end"}, "unknown": "stop_and_report"}}]
+    monkeypatch.setattr(engine.Runner, "wait_for_page", lambda self, c, t: engine.Runner.current_page(self, c))
+    if moves:   # the URL changed: the full page check runs, and the hidden heading stops it
+        with pytest.raises(Stop, match="not on page_d"):
+            run(tmp_path, monkeypatch, steps, desk={"title": "Step D", "moves": True})
+        return
+    r, d = run(tmp_path, monkeypatch, steps, desk={"title": "Step D"})
+    assert [c for c in d.calls if c[0] == "click"] == [("click", "Open"), ("click", "Close")]
+    assert r.audit_lines[-1]["kind"] == "flow_end"
 
 
 def test_learned_end_finishes_the_job(tmp_path, monkeypatch):
@@ -456,3 +486,101 @@ def test_learned_attach_runs_without_a_fill_before_it(tmp_path, monkeypatch):
         {"action": "attach_file", "target": "page_a.file", "check": "page_a.file"}, then="end")}}]
     r, d = run(tmp_path, monkeypatch, steps, risk="modify")
     assert ("choose_file",) in d.calls and r.audit_lines[-1]["kind"] == "flow_end"
+
+
+# ---------- Teach extension: the Teach app records the extension's presses ----------
+
+from govaios import lessons
+from govaios.engine import REPO
+
+TEACH_FLOW = REPO / "flows" / "teach.yaml"
+OWN = "http://localhost:8100/"
+
+
+class RecDesk(FakeDesktop):
+    def __init__(self):
+        super().__init__([])
+        self.url = OWN
+
+    def current_url(self, app):
+        return self.url
+
+    def element_at(self, x, y):
+        return "discover"
+
+    def web_root(self, app):
+        return N("document", "JobLens", children=[N("heading", "Applications"), N("link", "Discover", handle="discover")])
+
+    def same(self, a, b):
+        return a == b
+
+
+def ev(kind, run="r1", **k):
+    return {"run": run, "kind": kind, "x": 10, "y": 20, "name": "Discover", "role": "link", "tag": "a", "url": OWN,
+            "t": 1, **k}
+
+
+def record(tmp_path, monkeypatch, lines, sleep=lambda s: None):
+    monkeypatch.setattr(engine.time, "sleep", sleep)
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
+    monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
+    (tmp_path / "apply").mkdir()
+    (tmp_path / applyfiles.TEACH_IN).write_text("".join(x if isinstance(x, str) else json.dumps(x) + "\n" for x in lines))
+    d = RecDesk()
+    r = Runner(TEACH_FLOW, d, tmp_path, inputs={"lesson": "new"})
+    r.approvals.approve_flow("teach", r.digest)
+    r.run_id = "r1"
+    err = None
+    try:
+        r.run()
+    except Stop as e:
+        err = e
+    audit = [json.loads(x) for x in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    return r, d, err, audit
+
+
+def lesson_events(tmp_path):
+    (name,) = lessons_written(tmp_path)
+    return [e for p in lessons.load(tmp_path, name)["pages"] for e in p["events"]], name
+
+
+def test_record_lesson_feeds_events_and_ends_on_done(tmp_path, monkeypatch):
+    r, d, err, audit = record(tmp_path, monkeypatch, [ev("down"), ev("done")])
+    assert err is None and audit[-1]["kind"] == "flow_end"
+    assert ("pin", "win1") in d.calls and r.pinned and "launch" not in d.calls and d.typed == ""
+    assert d.calls.index("activate") < d.calls.index(("pin", "win1"))   # `open -a` took focus: Chrome first
+    evs, name = lesson_events(tmp_path)
+    assert [e["label"] for e in evs] == ["Discover"]
+    assert any(a["kind"] == "request" and a["action"] == "teach" and a["decision"] == "allow" for a in audit)
+    assert [(a["outcome"], a["target"]) for a in audit if a["kind"] == "lesson"] == [("recorded", name)]
+
+
+def test_record_lesson_stops_on_emergency_stop(tmp_path, monkeypatch):
+    r, d, err, audit = record(tmp_path, monkeypatch, [ev("down")], sleep=lambda s: (tmp_path / "STOPPED").touch())
+    assert str(err) == "emergency stop" and audit[-1]["kind"] == "stop"
+    assert not any(a["kind"] == "lesson" for a in audit)
+
+
+def test_record_lesson_ignores_other_run_lines(tmp_path, monkeypatch):
+    r, d, err, audit = record(tmp_path, monkeypatch, [ev("down", run="r0"), "garbled\n", ev("cancel", run="r0"),
+                                                      ev("done"), '{"run": "r1", "kind": "down"'])   # partial last line
+    assert err is None
+    evs, name = lesson_events(tmp_path)
+    assert evs == []
+    assert [(a["outcome"], a["target"]) for a in audit if a["kind"] == "lesson"] == [("recorded", name)]
+
+
+def test_record_lesson_cancel_is_audited_as_cancelled(tmp_path, monkeypatch):
+    r, d, err, audit = record(tmp_path, monkeypatch, [ev("down"), ev("cancel")])
+    assert err is None and lessons_written(tmp_path) == []
+    assert [a["outcome"] for a in audit if a["kind"] == "lesson"] == ["cancelled"]
+
+
+def test_teach_flow_loads_and_checks(tmp_path):
+    r = Runner(TEACH_FLOW, FakeDesktop(), tmp_path, inputs={"lesson": "new"})
+    wf = r.flow
+    assert wf["id"] == "teach" and wf["app"] == "Teach" and wf["destinations"] == []
+    assert wf["permissions"] == {"allow": ["read_page", "teach"], "max_element_risk": "read"}
+    assert wf["steps"] == [{"id": "record", "action": "record_lesson"}] and hasattr(Runner, "do_record_lesson")
+    assert wf["browser"] == yaml.safe_load((REPO / "flows" / "web_sandbox.yaml").read_text())["workflow"]["browser"]
+    assert engine.re.fullmatch(wf["inputs"]["lesson"]["pattern"], lessons.new_name("teach_new"))

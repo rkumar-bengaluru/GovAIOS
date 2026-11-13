@@ -76,6 +76,7 @@ def panel(tmp_path, monkeypatch, ui):
     shutil.copytree(REPO / "pages", tmp_path / "pages")
     shutil.copy(Path(__file__).parent / "data" / "job_apply_link.yaml", flows / "job_apply.yaml")   # a flow with an input
     (flows / "web_sandbox.yaml").unlink()
+    (flows / "teach.yaml").unlink()   # the Teach tests write their own
     for f, app in (("himalayas_job_vetting", "JobLens"), ("morning_inbox_briefing", "Inbox briefing")):
         p = flows / f"{f}.yaml"
         p.write_text(re.sub(r"(?m)^  app: .*\n", "", p.read_text(), count=1).replace("\n  name:", f"\n  app: {app}\n  name:", 1))
@@ -2200,6 +2201,23 @@ def test_delete_only_studio_and_check_apps(cc):
     assert cc.req("/apps/delete", "POST", body={"kind": "flow", "name": "check_x"})[0] == 403   # no session
 
 
+def test_delete_app_needs_touch_id_and_shows_on_apps(cc):
+    from govaios import studio
+    studio.new_automation(cc.flows, "Acme", "https://acme.example", {"application": "chrome", "profile_directory": "P", "account": "a@x.y"})
+    app = next(a for a in list_apps(cc.flows, cc.home) if a.id == "studio_acme")
+    Approvals(cc.home / "approvals.json").approve_flow(app.id, app.digest)
+    assert "name=name value='studio_acme'><input type=hidden name=back value='/apps'>" in cc.get("/apps")[1]
+    cc.answers["prove"] = False
+    cc.post("/apps/delete", kind="flow", name="studio_acme", back="/apps")
+    assert (cc.flows / "studio_acme.yaml").exists() and cc.asked[-1] == "Delete the app studio_acme"
+    assert _log(cc.home, "setting")[-1]["decision"] == "deny"
+    cc.answers["prove"] = True
+    cc.post("/apps/delete", kind="flow", name="studio_acme", back="/apps")
+    assert not (cc.flows / "studio_acme.yaml").exists()
+    e = _log(cc.home, "setting")[-1]
+    assert (e["field"], e["channel"], e["auth"]) == ("delete", "touch_id", "biometric")
+
+
 def test_delete_symlink_refused(cc, tmp_path):
     (cc.home / "t.yaml").write_text("x")
     (cc.flows / "studio_link.yaml").symlink_to(cc.home / "t.yaml")
@@ -2384,3 +2402,297 @@ def test_joblens_jobs_newest_first(cc):
     _tasks(cc, rid, [{"n": 1, "title": "One", "status": "done"}, {"n": 2, "title": "Two", "status": "review"}])
     page = cc.get("/")[1]
     assert page.index("/apply/task/2'") < page.index("/apply/task/1'")
+
+
+# --- Chrome extension endpoints (/ext/*) ---
+EXT = "chrome-extension://" + "a" * 32
+
+
+def _ext(P, path, body=None, token=None, origin=EXT, method=None):
+    c = http.client.HTTPConnection("127.0.0.1", P.srv.server_address[1])
+    h = {k: v for k, v in (("Origin", origin), ("X-GovAIOS-Token", token)) if v}
+    c.request(method or "POST", path, body=json.dumps({} if body is None else body), headers=h)
+    r = c.getresponse()
+    return r.status, json.loads(r.read() or b"null"), r
+
+
+def _paired(P):
+    # the next step's code: a session code spent just before must not be the one reused (single use)
+    s, j, r = _ext(P, "/ext/pair", {"code": code_at(_secret(P), time.time() + 30)})
+    assert s == 200 and r.getheader("Content-Type") == "application/json" and r.getheader("X-Content-Type-Options")
+    return j["token"]
+
+
+def _approve_teach(P):
+    (P.flows / "teach.yaml").write_text(
+        "workflow:\n  id: teach\n  app: Teach\n  name: Teach a page\n  version: 1\n  inputs:\n"
+        "    lesson: { label: Lesson, pattern: 'new|[0-9-]{22}-[a-z0-9_]{1,64}\\.json' }\n"
+        "  permissions: { allow: [launch_application], max_element_risk: read }\n  steps:\n"
+        "    - { id: launch_chrome, action: launch_application }\n")
+    a = next(a for a in list_apps(P.flows, P.home) if a.id == "teach")
+    Approvals(P.home / "approvals.json").approve_flow(a.id, a.digest)
+
+
+def test_ext_pair_and_state(panel):
+    tok = _paired(panel)
+    s, j, _ = _ext(panel, "/ext/state", token=tok)
+    assert s == 200 and j["signed_in"] is False and j["recording"] is False and j["lesson"] is None and j["yaml"] == ""
+    assert tok not in json.dumps(_log(panel.home))
+
+
+def test_ext_refuses_web_origin(panel):
+    code = code_at(_secret(panel), time.time())
+    assert _ext(panel, "/ext/pair", {"code": code}, origin="http://localhost:8100")[0] == 403
+    tok = _paired(panel)
+    assert _ext(panel, "/ext/state", token=tok, origin="http://localhost:8100")[:2] == (401, {"unpaired": True})
+
+
+def test_ext_refuses_without_token(panel):
+    _paired(panel)
+    assert _ext(panel, "/ext/state")[:2] == (401, {"unpaired": True})
+    assert _ext(panel, "/ext/state", token="nope")[:2] == (401, {"unpaired": True})
+
+
+def test_ext_state_is_a_post(panel):
+    tok = _paired(panel)   # Chrome sends no Origin on the extension's GETs: a GET would unpair it
+    assert _ext(panel, "/ext/state", token=tok, method="GET")[0] == 404
+    assert _ext(panel, "/ext/state", token=tok)[0] == 200
+
+
+def test_ext_screen_lock_is_403_and_keeps_the_pairing(panel, monkeypatch):
+    from govaios import auth
+    tok = _paired(panel)
+    monkeypatch.setattr(auth, "screen_locked", lambda: True)
+    assert _ext(panel, "/ext/state", token=tok)[0] == 403   # not 401: the extension keeps its token
+    monkeypatch.setattr(auth, "screen_locked", lambda: False)
+    assert _ext(panel, "/ext/state", token=tok)[0] == 200
+
+
+def test_studio_disconnect_stops_a_live_teach_run(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    assert _ext(panel, "/ext/teach", {}, token=tok)[0] == 200
+    run = panel.made[-1]
+    assert run.started and not run.stops
+    assert panel.post("/studio/disconnect")[0] == 303
+    assert run.stops and not (panel.home / "extension.json").exists()
+
+
+def test_ext_event_needs_live_teach_run(panel):
+    _open(panel)
+    tok = _paired(panel)
+    s, j, _ = _ext(panel, "/ext/event", {"kind": "down"}, token=tok)
+    assert s == 409 and j["note"]
+    assert _ext(panel, "/ext/teach", {"tab_url": "https://x.example/"}, token=tok)[0] == 409   # Teach not approved
+    _approve_teach(panel)
+    panel.post("/end")
+    s, j, _ = _ext(panel, "/ext/teach", {}, token=tok)
+    assert s == 409 and "session" in j["note"] and not panel.made   # no run session
+
+
+def test_ext_teach_starts_the_teach_app(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    s, _, _ = _ext(panel, "/ext/teach", {"tab_url": "https://x.example/"}, token=tok)
+    assert s == 200 and panel.made[-1].inputs == {"lesson": "new"} and panel.made[-1].started
+    assert _ext(panel, "/ext/teach", {}, token=tok)[0] == 409   # a run is live
+
+
+def test_ext_event_appended_with_run_id(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    s, _, _ = _ext(panel, "/ext/event", {"kind": "down", "x": 3, "y": float("inf"), "name": "n" * 300, "role": "button",
+                                       "value": "secret", "evil": 1}, token=tok)
+    assert s == 200
+    last = json.loads((panel.home / "apply/teach_in.jsonl").read_text().splitlines()[-1])
+    assert last["run"] == panel.srv.panel.run_id and last["kind"] == "down" and last["x"] == 3 and len(last["name"]) == 200
+    assert set(last) <= {"run", "kind", "x", "y", "name", "role", "tag", "url", "t"} and "y" not in last
+    assert _ext(panel, "/ext/event", {"kind": "bogus"}, token=tok)[0] == 400
+    assert _ext(panel, "/ext/event", {"kind": "x" * 5000}, token=tok)[0] == 400   # body over 4096
+
+
+def test_studio_disconnect_ends_open_lesson(panel):
+    from govaios import applyfiles
+    _paired(panel)
+    name = "20261112-101010-123456-teach.json"
+    (panel.home / "lessons").mkdir()
+    (panel.home / "lessons" / name).write_text("{}")
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    assert "action=/studio/disconnect" in panel.get("/studio")[1]
+    assert panel.post("/studio/disconnect")[0] == 303
+    assert not (panel.home / "extension.json").exists() and not (panel.home / applyfiles.TEACH_OPEN).exists()
+    assert not (panel.home / "lessons" / name).exists()
+    assert _log(panel.home, "extension")[-1]["outcome"] == "disconnected"
+
+
+def test_ext_state_reads_teach_out_for_the_live_run(panel):
+    from govaios import applyfiles
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    name = "20261112-101010-123456-teach.json"
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OUT, {"run": "stale", "lesson": name, "paused": True, "note": "old", "lines": ["x"]})
+    j = _ext(panel, "/ext/state", token=tok)[1]
+    assert not j["recording"] and not j["paused"] and j["note"] == "" and j["lines"] == [] and j["lesson"] is None   # another run's file
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OUT, {"run": panel.srv.panel.run_id, "lesson": name, "paused": True,
+                                                              "note": "n" * 300, "lines": ["click button Save", 5]})
+    j = _ext(panel, "/ext/state", token=tok)[1]
+    assert j["recording"] and j["paused"] and j["lines"] == ["click button Save"] and j["lesson"] == name and j["note"] == "n" * 200
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OUT, {"run": panel.srv.panel.run_id, "lesson": "../x.json"})
+    assert _ext(panel, "/ext/state", token=tok)[1]["lesson"] is None
+    assert _ext(panel, "/ext/event", {"kind": "down", "x": 10 ** 400, "y": float("nan")}, token=tok)[0] == 200   # no OverflowError
+    last = json.loads((panel.home / applyfiles.TEACH_IN).read_text().splitlines()[-1])
+    assert "x" not in last and "y" not in last
+
+
+def test_ext_discard(panel):
+    from govaios import applyfiles
+    tok = _paired(panel)
+    name = "20261112-101010-123456-teach.json"
+    (panel.home / "lessons").mkdir()
+    (panel.home / "lessons" / name).write_text("{}")
+    (panel.home / "x.json").write_text("{}")
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": "../x.json"})
+    assert _ext(panel, "/ext/discard", {}, token=tok)[0] == 200
+    assert (panel.home / "x.json").exists() and (panel.home / "lessons" / name).exists()   # a bad name deletes nothing
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    assert _ext(panel, "/ext/discard", {}, token=tok)[0] == 200
+    assert not (panel.home / "lessons" / name).exists() and not (panel.home / applyfiles.TEACH_OPEN).exists()
+
+
+def test_ext_discard_refused_while_teach_is_live(panel):
+    from govaios import applyfiles
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    name = "20261112-101010-123456-teach.json"
+    (panel.home / "lessons").mkdir()
+    (panel.home / "lessons" / name).write_text("{}")
+    applyfiles.write_json(panel.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    s, j, _ = _ext(panel, "/ext/discard", {}, token=tok)
+    assert s == 409 and j["note"] == "Press Cancel to end the lesson that is recording."
+    assert (panel.home / "lessons" / name).exists()
+
+
+def _teach_lesson(P):
+    """The recorder's open lesson after Done on JobLens (two pages, the last press a submit); returns its name."""
+    from govaios import applyfiles, capture, lessons
+    from govaios.desktop import Node
+    home = Node("document", "JobLens", children=[Node("heading", "Applications"), Node("link", "Discover")])
+    disc = Node("document", "JobLens", children=[Node("heading", "Discover"), Node("button", "Review")])
+
+    def click(name, risk="navigate"):
+        return {"kind": "click", "spec": {"role": "link" if name == "Discover" else "button", "name": name},
+                "label": name, "value": "", "secure": False, "submit": risk != "navigate", "risk": risk, "sure": True}
+    name = lessons.new_name("teach_new")
+    lessons.write(P.home, name, {"flow": "teach_new", "digest": None, "step": None, "at": "2026-11-12T10:00:00", "new_app": True,
+                                 "pages": [{"url": "http://localhost:8100/", "title": "JobLens · Applications",
+                                            "tree": capture.tree(home), "events": [click("Discover")]},
+                                           {"url": "http://localhost:8100/discover", "title": "JobLens · Discover",
+                                            "tree": capture.tree(disc), "events": [click("Review"), click("Approve & promote", "submit")]}]})
+    applyfiles.write_json(P.home, applyfiles.TEACH_OPEN, {"lesson": name})
+    return name
+
+
+def _done(P):
+    from govaios import applyfiles
+    tok = _paired(P)
+    assert _ext(P, "/ext/done", {"name": "Approve shortlisted"}, token=tok)[0] == 409   # no lesson open
+    name = _teach_lesson(P)
+    assert "joblens_applications" in _ext(P, "/ext/state", token=tok)[1]["yaml"]
+    s, j, _ = _ext(P, "/ext/done", {"name": "Approve shortlisted"}, token=tok)
+    assert s == 200 and j == {"lesson_url": f"/lesson/{name}"} and not (P.home / applyfiles.TEACH_OPEN).exists()
+    assert (P.flows / "studio_approve_shortlisted.yaml").exists()
+    e = _log(P.home, "lesson")[-1]
+    assert (e["outcome"], e["flow"], e["target"]) == ("bound", "studio_approve_shortlisted", name)
+    return name
+
+
+def test_ext_state_lines_agree_with_the_yaml(panel):
+    from govaios import lessons
+    from govaios.formfill import Bank
+    tok = _paired(panel)
+    name = _teach_lesson(panel)
+    j = _ext(panel, "/ext/state", token=tok)[1]
+    want = lessons.preview(lessons.load(panel.home, name), panel.flows.parent / "pages", Bank())[0]
+    assert j["lines"] == want and want
+
+
+def test_ext_done_retry_after_a_failed_bind(panel, monkeypatch):
+    from govaios.audit import web
+    tok = _paired(panel)
+    _teach_lesson(panel)
+    real = web.read_bound
+    monkeypatch.setattr(web, "read_bound", lambda *a: (_ for _ in ()).throw(ValueError("bad page")))
+    assert _ext(panel, "/ext/done", {"name": "Approve shortlisted"}, token=tok)[0] == 409
+    assert not (panel.flows / "studio_approve_shortlisted.yaml").exists()   # the Draft is removed: the name is free
+    monkeypatch.setattr(web, "read_bound", real)
+    assert _ext(panel, "/ext/done", {"name": "Approve shortlisted"}, token=tok)[0] == 200
+
+
+def test_new_app_lesson_approves_the_draft(panel):
+    name = _done(panel)
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    text = "Approve the new app Approve shortlisted and what GOV-AIOS learned"
+    assert panel.asked.count(text) == 1 and panel.asked[-1] == text
+    app = next(a for a in list_apps(panel.flows, panel.home) if a.id == "studio_approve_shortlisted")
+    assert app.approved and Approvals(panel.home / "approvals.json").flow_ok(app.id, app.digest)
+
+
+def test_new_app_lesson_refused_if_draft_edited(panel):
+    name = _done(panel)
+    p = panel.flows / "studio_approve_shortlisted.yaml"
+    p.write_text(p.read_text() + "# edited\n")
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "changed since this lesson" in _tells(panel)[-1] and not any("new app" in a for a in panel.asked)
+    assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_approvals_sends_a_teach_draft_to_its_lesson(panel):
+    name = _done(panel)
+    page = panel.get("/approvals")[1]
+    assert f"href='/lesson/{name}'>Approve it with what I learned</a>" in page
+    assert "name=flow value='studio_approve_shortlisted'><button>Approve" not in page
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "studio_approve_shortlisted" in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_new_app_rule_needs_never_approved(panel):
+    name = _done(panel)
+    panel.post("/approve", flow="studio_approve_shortlisted")
+    assert Approvals(panel.home / "approvals.json").snapshot()["flows"].get("studio_approve_shortlisted")
+    panel.post("/revoke", kind="flow", flow="studio_approve_shortlisted")
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "Approve Approve shortlisted first" in _tells(panel)[-1] and not any("new app" in a for a in panel.asked)
+    assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_ext_done_refused_while_teach_is_live(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    _teach_lesson(panel)
+    s, j, _ = _ext(panel, "/ext/done", {"name": "Approve shortlisted"}, token=tok)
+    assert s == 409 and j["note"] and not (panel.flows / "studio_approve_shortlisted.yaml").exists()
+
+
+def test_new_app_lesson_never_re_approves_after_revoke(panel):
+    name = _done(panel)
+    pages = panel.flows.parent / "pages"
+    before = {f: f.read_bytes() for f in (*panel.flows.glob("*.yaml"), *pages.glob("*.yaml"))}
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert Approvals(panel.home / "approvals.json").snapshot()["flows"].get("studio_approve_shortlisted")
+    panel.post("/revoke", kind="flow", flow="studio_approve_shortlisted")
+    for f in (*panel.flows.glob("*.yaml"), *pages.glob("*.yaml")):   # the app's bytes as they were when bound
+        f.unlink() if f not in before else f.write_bytes(before[f])
+    n = len(panel.asked)
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "Approve Approve shortlisted first" in _tells(panel)[-1] and len(panel.asked) == n
+    assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]

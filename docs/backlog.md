@@ -161,3 +161,16 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 - If an audit write fails as a session ends, the queue is cleared but the session_end line can be missing.
 - /apps re-reads the whole audit log on each load; App.title has no unit test; Home order tests anchor on strings.
 - tests/test_web_sandbox.py::test_full_lesson_returns_to_the_sandbox_card flaked once in a full run.
+
+## Teach extension, plan 2 leftovers (2026-11-12, branch `feat/teach-extension-build`)
+
+- **Resume on another page** adds a step that opens that page (rule 7); today Resume there is refused.
+- **Edit a step's level** in the side panel (plan 3, with the press grant).
+- **Recording starts only through the side panel's poll**: if the panel is closed before the run goes live, nothing is recorded.
+- **Disconnect mid-press**: a press being handled as the run stops can leave an orphan lesson file (no TEACH_OPEN).
+- **Recorder**: a malformed port in the page address raises; a pause on an outside site stores that site; page key keeps `user:pass@`; an empty-space press doesn't clear a stale note.
+- **Teach run input**: TEACH_IN read unbounded per pass; `run_id` None would accept lines without `run`; idle end untested.
+- **Pairing**: `pair()` can't say "locked out"; pair audit written after the file; no bad-code or wrong-Host tests.
+- **Panel**: `/ext/state` runs `propose` on every poll (watch latency); malformed lesson JSON gives 500 in `/ext/done`; the new-app audit scan trusts unsigned lines (Touch ID still required).
+- **Extension**: a page can hide the ● Recording sign; "did not start" note stays until the next Teach.
+- **Flaky test**: `test_teach_records_lesson_and_stops_task` (observer path) fails about 1 in 3 runs.

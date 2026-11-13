@@ -90,13 +90,123 @@ The admin agreed on 2026-11-12: "yes, let it press Approve & promote on my own a
 - **Running stays AX-driven**; the risk levels are the existing ones (`read`, `navigate`, `modify`, `submit`, `payment` in `govaios/policy.py`).
 - Single admin per laptop; no accounts.
 
+## Rules settled after the design review (2026-11-12)
+
+The admin passed on a review of this design; these rules answer it. Where they differ from a line above, these win. *All are my calls unless marked as the admin's.*
+
+### 1. Repeats
+
+- **An item** is the list entry (row, card or list item in the accessibility tree) that contains the target of the repeat's first step: the profile card holding **Review**.
+- **Each round re-finds the list**: go to the list page, take the **first** item that still has the first step's target, do the steps. Never an index kept from the round before: on a shrinking list an index skips items.
+- **None left** means the list page is shown (its page check passes) and no item has the target, including an empty-state message ("No profiles"). Only the items on the page as shown count: no paging, filtering or scrolling to find more.
+- **N is a cap on successes** (default 10). The cap stops a repeat that never shrinks.
+- **A failure on one item stops the run** and reports which item failed, by the item's visible label (the profile's name), with the rounds that succeeded before it. It is not retried or skipped.
+- **The audit log** gets one entry per round with the item's label and outcome, as clicks are logged today: the admin's own data, unmasked in dev mode.
+- In the flow this is one new repeat step whose rounds re-find the list as above. It is not today's `select_items` + `for_each_item`, which pick items up front.
+
+### 2. Matching what the extension sees to what a run clicks
+
+- **The mechanism:** the extension reports each action with the element's role, accessible name and on-screen box. GOV-AIOS reads the tab's accessibility tree at that moment (as `govaios/observer.py` does) and records the matching accessibility element as the step's target, in the page-file form runs already use.
+- **A spike comes first, with this bar to pass. All of it must pass on JobLens before anything else is built:**
+  - It matches **Discover**, **Shortlisted**, **Review** and **Approve & promote** (all four, not one of them).
+  - Each match is still found by the engine after a fresh load of the same page (the page reloaded between Teach and Run).
+  - When two elements share a role and name (every card's **Review**), it records a stronger anchor: the containing item, or the nearest heading. The run then finds the intended one, and the repeat's "first item that has Review" works.
+- **Ambiguous at Teach time:** if the stronger anchor still matches more than one element, the side panel asks the admin which one they meant, by highlighting the candidates.
+- **No match at Teach time:** the step is **not saved**. The side panel says *"Run could not find this. Do it again, or skip it,"* so a lesson never holds a step a run cannot do.
+
+#### Spike result (2026-11-12, `spikes/plan6/match_spike.py`, run by the admin on JobLens)
+
+**Final verdict: SPIKE PASS** (option A, commits `b45ede9` and `2a97ac5`). Every part of the bar passed:
+
+- **The mechanism that passed:** the extension's content script reports each `pointerdown` (capture phase) with the screen point, tag, role and visible name, never values. GOV-AIOS reads the element under that point (`desk._hit`), then takes a snapshot (`web_root`) and climbs to the nearest clickable role (`link`, `button`, `tab`, `radio`). It reads the element 9–17 ms after the press and takes the snapshot 23–54 ms after it. Every read finished **before the release**, with normal quick clicks. The name GOV-AIOS read equalled the name the page reported on every click.
+- **Recorded steps:** `{role: link, name: Discover}`, `{role: tab, name_matches: '^Shortlisted \(\d+\)$'}`, `{role: button, name: Review, index: 0}`, `{role: button, name: "Approve & promote"}` (read, never pressed). All four were found exactly once after Cmd-R.
+- **Anchor:** 2 Review buttons for 2 Shortlisted profiles, each in its own `row`; the recorded Review is the first row's.
+- **A bug found and fixed on the way:** Chrome lists every table cell twice, under its row and again under its column (`AXColumn`). The snapshot saw 4 Reviews for 2 rows. `MacDesktop._snap` no longer goes into `AXColumn`s (`2a97ac5`), so the cells are read once, under their rows. Indexes counted over a table changed with it.
+- A press on empty page space reports no name and is ignored.
+
+Earlier runs, with what each failure taught:
+
+- ✅ **The side panel is not read by mistake.** Chrome shows two web areas (`JobLens` and `chrome-extension://…/sidepanel.html`); `web_root` picked the JobLens page at every check.
+- ✅ **Discover** (`{role: link, name: Discover}`) was recorded and found again after Cmd-R.
+- ✅ **Approve & promote** (`{role: button, name: "Approve & promote"}`) was read inside the Review pop-up and found again after Cmd-R + Review. Review opens a pop-up (`role=dialog`, `aria-modal`) on the same address, `/discover`. The page behind it stays readable, and each profile is a table `row`.
+- ❌ **Review was missed by the observer's polling.** It was recorded once, when the admin held the mouse down for a second (`{role: button, name: Review, index: 0}`), and missed on other clicks. A normal click starts and ends between two looks. By the next look the pop-up covers the point, and the button's own label has changed to "Close". **Decision: the element must be read at the moment the mouse goes down.** The observer-only ruling in plan 1 is withdrawn; how to catch that moment is the admin's choice (below).
+- ❌ **Shortlisted** was recorded as `Shortlisted (4)` and found 0 times after the reload. The count is part of the tab's name, and it changes. **Decision:** a name that ends in a count `(n)` is saved as `name_matches: '^Shortlisted \(\d+\)$'` (already supported by `engine.matches`), never as the exact name.
+- Also seen: Review and Close were rated `submit` (today's "every button is submit" guess). That is expected; rule "Which presses are submit-level" replaces it.
+
+### 3. Connecting the extension (pairing)
+
+- **The 6-digit code is used once.** It is checked like a panel sign-in code (the same verifier, so replays are refused) and exchanged for a long random token. The code is never kept or reused as the token.
+- **The panel keeps only a hash of the token**, beside its other state. The extension keeps the token in its own storage, out of reach of web pages.
+- **Only the extension talks to the panel's extension endpoints:** every call carries the token in a header (not a cookie), and the panel also checks that the call comes from the extension ID recorded at pairing (`chrome-extension://<id>`). The extension's ID is fixed by a key in its manifest, so it is the same after a reload.
+- **The extension talks only to `http://127.0.0.1:8765`**, a fixed address. Any other address, including other localhost ports, is refused. If the panel is not running, the side panel says so and records nothing.
+- **Pages cannot reach it:** recording runs in the extension's content script, which sends events only to the extension's own background worker. It never listens to messages from the page, and the page never sees what was recorded.
+- **One connection at a time:** connecting again, from another Chrome profile or after reinstalling, replaces the old connection and invalidates its token.
+- **Disconnect** (in Studio) deletes the token hash on the panel and the token in the extension the next time it calls. It also **ends any open lesson, and the lesson's recording is deleted**: a disconnected extension can never resume it.
+
+### 4. The Touch IDs a new app meets: separate, never merged
+
+1. **Try it** (optional): one Touch ID tied to the exact draft. It allows that one Try-it run only.
+2. **Approve**: one Touch ID for the whole lesson. It writes the pages, steps and bank changes and approves the app's new version (today's `approve_lesson`).
+3. **First-run press grant** (only for an app that presses submit-level buttons on the admin's own apps): one Touch ID on its first run, just before the first press, listing every such button by name. It is stored apart from the approval, tied to the app's digest, and asked once per version.
+
+Approve never implies the press grant, and the press grant is never asked twice for the same version. The Touch ID prompt names which of the three it is.
+
+### 5. Try it
+
+- **It runs on the real pages and real data.** Before it starts, the side panel says what it will open, for example *"Try it will open one real profile on JobLens. It will not approve it."*
+- **It stops before any submit-level or payment-level click**, never after it, naming the button: *"Try it stops here: the real run will press Approve & promote."*
+- **A second safety net:** Try it also stops before any button whose name looks change-making (the list in "Which presses are submit-level"), even if the step was marked `navigate`. A mis-rated step cannot change data during Try it.
+
+### 6. Where an unfinished lesson lives
+
+- **The panel writes each recorded event to the lesson file on disk as it arrives** (under `lessons/`, 0600, as today). The extension holds only the lesson's id. A panel restart or a Chrome restart loses nothing already recorded.
+- **There is one open lesson at a time.** After a pause or a session end, **Resume** in the side panel continues that same lesson, on whatever tab the admin presses it in. Studio also lists the open lesson with **Resume** and **Discard**.
+
+### 7. Pause
+
+- **Pause removes the detour from the lesson; it does not hide it.** Nothing is recorded while paused, no page visited while paused becomes part of the lesson, and no terms question is asked while paused.
+- **On Resume**, if the tab is on a different page from where the admin paused, the lesson gains a step that opens that page by its address (without the query part, as lessons store addresses today). If the page is on an outside site, its terms question is asked first.
+
+### 8. Add to an app
+
+- **Teach this page** (from a stopped run) adds the new steps at the step where the run stopped.
+- **Add to an app** (at Done) adds them **at the end** by default. The admin can pick an earlier point ("after step: open Shortlisted") from the app's steps, listed in the side panel.
+
+### 9. Typed text
+
+- **The side panel uses `lessons.py`'s answer-bank logic** (its proposal of bank fields); it does not add a second one. The admin's choice for a field is recorded in the step and wins on later runs.
+- **"Always this text"** keeps the literal value. Later changes to the bank do not affect it.
+- **"From my answer bank"** reads the bank on every run, so changes to the bank are picked up.
+- **"Asked at Run"** becomes an input the Run form asks for, as apps with inputs do today.
+
+### 10. Page reuse
+
+- **The match key is the page file's own identification** (its `title_matches` and `anchors`), as runs already use for checking which page they are on.
+- **Exactly one known page matches:** it is reused, with no question.
+- **More than one matches, or none matches but a known page has the same site and path:** the side panel asks *"This looks like JobLens · Shortlisted. Reuse it?"*, listing the candidates, or **New page**.
+- **None matches and no path is shared:** it is a new page.
+
+### 11. The page count toward 100
+
+- **The count** is the number of approved page files, each counted once, however many apps use it.
+- **Renaming a page** changes its shown name, not its file id, so it is not counted twice.
+- **Drafts and pages waiting for approval** are shown beside the count ("+3 waiting") but are not counted.
+- Studio shows the count per site and the total.
+
+## Build order
+
+1. **Spike:** matching on JobLens Shortlisted, with the bar in rule 2. If it fails, stop and come back to the admin.
+2. **Pairing**, and pausing and resuming when the panel session ends (rules 3 and 6).
+3. **The first lesson without the repeat:** Teach, the side panel's steps, the YAML tab, Done, New app, Approve.
+4. **Repeat** (rule 1).
+5. **The first-run press grant and Try it** (rules 4 and 5), plus the test-only script that refills Shortlisted.
+6. **Teach this page, terms and waiver, Studio grouping, page reuse and the page count** (rules 8, 10 and 11).
+
+The first lesson works end to end after step 5.
+
 ## Left to the builder
 
-- **How a click seen by the extension becomes an accessibility element the engine can find.** The extension sees the page's DOM; runs see Chrome's accessibility tree. One approach: the extension reports each action with its element's role, accessible name and on-screen box, and GOV-AIOS reads the tab's accessibility tree at that moment (as `govaios/observer.py` does today) and matches the element there. Prove the chosen approach with a short spike on the JobLens Shortlisted page before building on it.
 - How the extension gets permission to watch pages (all sites, or asked per site), as long as the anti-goals hold.
-- The pairing details (what the 6-digit code is exchanged for, where it is kept, how it is revoked).
-- How "repeat until none are left, at most N" is expressed in the flow (today's `select_items` + `for_each_item` pick items up front, which does not fit a list that shrinks as you act on it).
-- How the run asks for the first-run grant (a Home card, as other run questions are) and where the grant is stored.
-- Lesson file shape for a new app (today's `lessons.save` needs an existing flow id).
+- The flow syntax of the new repeat step, and how the run asks for the first-run grant (a Home card, as other run questions are) and where the grant is stored, within rules 1 and 4.
+- The lesson file shape for a new app (today's `lessons.save` needs an existing flow id).
 - The side panel's look, following the panel's existing style.
-- The order of building, as long as the first lesson above works end to end first.

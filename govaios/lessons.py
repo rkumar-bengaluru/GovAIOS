@@ -30,12 +30,7 @@ _CODE = re.compile(r"\d{4,8}")
 
 def save(home, flow_id, flow_digest, step_id, pages) -> str:
     """Write one lesson (Observer.pages, Node trees); returns its file name. Never follows a link."""
-    if not re.fullmatch(r"[a-z0-9_]{1,64}", flow_id or ""):
-        raise ValueError("bad flow id")
-    d = Path(home) / DIR
-    if d.is_symlink():
-        raise OSError("lessons/ is a symlink")
-    d.mkdir(mode=0o700, exist_ok=True)
+    name = new_name(flow_id)
 
     def url(u):
         s = urlsplit(u)
@@ -43,19 +38,59 @@ def save(home, flow_id, flow_digest, step_id, pages) -> str:
     doc = {"flow": flow_id, "digest": flow_digest, "step": step_id, "at": datetime.now().isoformat(timespec="seconds"),
            "pages": [{"url": url(p["url"]), "title": p["title"], "tree": capture.tree(p["tree"]),
                       "events": p["events"]} for p in pages]}
-    name = f"{datetime.now():%Y%m%d-%H%M%S-%f}-{flow_id}.json"
-    tmp = d / (name + ".tmp")   # never a half-written lesson under its real name
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    write(home, name, doc)
+    return name
+
+
+def new_name(flow_id) -> str:
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", flow_id or ""):
+        raise ValueError("bad flow id")
+    return f"{datetime.now():%Y%m%d-%H%M%S-%f}-{flow_id}.json"
+
+
+def write(home, name, doc) -> None:
+    """Write (or rewrite) lesson name, 0600, then keep the last KEEP of its flow. Never follows a link."""
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        raise ValueError("bad lesson name")
+    d = Path(home) / DIR
+    if d.is_symlink():
+        raise OSError("lessons/ is a symlink")
+    d.mkdir(mode=0o700, exist_ok=True)
+    # never a half-written lesson under its real name; a fresh 0600 temp each time, so a crash's leftover never blocks
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(json.dumps(doc, ensure_ascii=False, indent=1).encode())
         os.replace(tmp, d / name)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        Path(tmp).unlink(missing_ok=True)
         raise
-    for old in sorted(p for p in d.iterdir() if p.name.endswith(f"-{flow_id}.json"))[:-KEEP]:
-        old.unlink()
-    return name
+    flow = name[23:-5]   # after the 22-character time stamp and its dash
+    for old in sorted(p for p in d.iterdir() if p.name.endswith(f"-{flow}.json") and p.name != name)[:-(KEEP - 1)]:
+        old.unlink()   # never the lesson just written, even an old one Teach reopened
+
+
+def bind(home, name, flow_id, digest, step) -> None:
+    """Point lesson name at the app it now belongs to (an extension lesson, once Done made its app)."""
+    doc = load(home, name)
+    doc.update(flow=flow_id, digest=digest, step=step)
+    write(home, name, doc)
+
+
+_PAY = re.compile(r"\b(pay|buy|checkout)\b", re.I)
+_CHANGE = re.compile(r"\b(approve|promote|reject|delete|save|send|submit|apply|confirm)\b", re.I)
+_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand)\b", re.I)
+
+
+def level(role: str, name: str) -> str:
+    """The risk of pressing a recorded element, by the plan's ruling (payment beats submit)."""
+    if role in ("tab", "link", "radio"):
+        return "navigate"
+    if _PAY.search(name):
+        return "payment"
+    if _CHANGE.search(name):
+        return "submit"
+    return "navigate" if _LOOK.match(name) else "submit"
 
 
 def load(home, name) -> dict:
@@ -187,6 +222,10 @@ def propose(lesson, pages_dir, bank) -> dict:
                 k, chk, sure = _attach(look, page, root, evs, i, new)
             else:
                 k, sure = _key_for(look, root, spec, label) if kind == "click" and spec else (None, False)
+                if k:   # the recorder's own reading, made when pressed: the stored tree is only the page's first
+                    sure = ev.get("sure", sure)
+                    if "risk" in ev and (new or k not in page["elements"]):   # a known page's rating is kept
+                        look["elements"][k]["risk"] = ev["risk"]
             target = f"{pid}.{k}" if k else None
             line, keep = None, sure and not (kind == "click" and any(s["kind"] == "hand_over" for s in steps))
             text = label + ("" if sure else " (check this target)")   # off until the admin checks it
@@ -194,7 +233,8 @@ def propose(lesson, pages_dir, bank) -> dict:
                 text += f" via the button {evs[i - 1].get('label') or '?'!r}"   # the button replay clicks
             if kind == "click" and not k:
                 line = {"kind": "click", "label": "not sure what this was", "target": None, "keep": False}
-            elif kind == "click" and look["elements"][k].get("risk") == "submit":
+            elif kind == "click" and max((r for r in (look["elements"][k].get("risk"), ev.get("risk")) if r in RISK_ORDER),
+                                         key=RISK_ORDER.index, default=None) in ("submit", "payment"):   # the higher rating
                 line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
             elif kind == "click":
                 line = {"kind": "click", "label": text, "target": target,
@@ -298,6 +338,35 @@ def _site(url):
     return f"https://{u.hostname.lower()}" + (f":{port}" if port not in (None, 443) else "")
 
 
+def _cases(proposal, deleted, ids, on):
+    """The on_match cases a proposal adds to a step whose cases are on; ids: the flow's step ids (grown here)."""
+    out, last = {}, len(proposal["pages"]) - 1
+    for i, p in enumerate(proposal["pages"]):
+        if p["id"] in on or p["id"] in out:   # the flow already handles this page: its own case stays
+            continue
+        do = []
+        for j, line in enumerate(p["steps"]):
+            s = _do(line, p) if line["keep"] and (i, j) not in deleted else None
+            if s:
+                k = len(do) + 1
+                while f"learned_{p['id']}_{k}" in ids:
+                    k += 1
+                ids.add(f"learned_{p['id']}_{k}")
+                do.append({"id": f"learned_{p['id']}_{k}", **s})
+        if do:
+            out[p["id"]] = {"do": do, "then": "end" if i == last else "again"}
+    return out
+
+
+def preview(lesson, pages_dir, bank) -> tuple[list[str], str]:
+    """What the extension shows while teaching: a line per kept click or hand-over, and the cases' YAML."""
+    proposal = propose(lesson, pages_dir, bank)
+    lines = [f"{lp['title']}: {'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
+             for p, lp in zip(proposal["pages"], lesson["pages"]) for s in p["steps"]
+             if s["keep"] and s["target"] and s["kind"] in ("click", "hand_over")]   # never the closing hand-over
+    return lines, yaml.safe_dump(_cases(proposal, set(), set(), {}), sort_keys=False)
+
+
 def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path) -> dict:
     """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
     "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
@@ -328,22 +397,10 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     step = _find(wf["steps"], lesson.get("step"))
     if step is None or step.get("action") != "classify_page":
         raise ValueError("the step this lesson belongs to is gone; teach it again")
-    on, ids, last, n = step.setdefault("on_match", {}), set(_ids(wf["steps"])), len(proposal["pages"]) - 1, 0
-    for i, p in enumerate(proposal["pages"]):
-        if p["id"] in on:   # the flow already handles this page: its own case stays
-            continue
-        do = []
-        for j, line in enumerate(p["steps"]):
-            s = _do(line, p) if line["keep"] and (i, j) not in deleted else None
-            if s:
-                k = len(do) + 1
-                while f"learned_{p['id']}_{k}" in ids:
-                    k += 1
-                ids.add(f"learned_{p['id']}_{k}")
-                do.append({"id": f"learned_{p['id']}_{k}", **s})
-        if do:
-            on[p["id"]] = {"do": do, "then": "end" if i == last else "again"}
-            n += len(do)
+    on = step.setdefault("on_match", {})
+    cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on)
+    on.update(cases)
+    n = sum(len(c["do"]) for c in cases.values())
     if "unknown" in on:
         on["unknown"] = on.pop("unknown")   # stays the last case, as written by hand
     dests = wf.setdefault("destinations", [])
