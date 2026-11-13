@@ -29,7 +29,8 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 
 
 NO_DEST = object()
-LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over")   # what a taught page may do (Studio lessons)
+LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat")   # what a taught page may do (Studio lessons)
+ITEM_ROLES = ("row", "article")   # what a repeat round works on: one list item
 MAX_LEARNED = 10   # learned pages run within one classify_page call
 FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
@@ -94,6 +95,22 @@ def find_all(root, spec, page):
     return hits
 
 
+def item_candidates(root, spec, page):
+    """List items (innermost) holding exactly one match of spec without its index, in walk order."""
+    spec = {k: v for k, v in spec.items() if k != "index"}
+    held = [n for n in root.walk() if n.role in ITEM_ROLES and len(find_all(n, spec, page)) == 1]
+    return [n for n in held if not any(m is not n and any(x is m for x in n.walk()) for m in held)]
+
+
+def item_target(item, spec, page):
+    return find_all(item, {k: v for k, v in spec.items() if k != "index"}, page)[0]
+
+
+def item_label(item, target):
+    """The item's first name other than the target's: for audit and messages only, never its identity."""
+    return next((n.name for n in item.walk() if n is not target and n.name), "")[:200]
+
+
 def field_value(node, spec):
     v = node.text() if spec.get("text") else (node.name or node.text())
     for suffix in spec.get("strip_suffix", []):
@@ -139,12 +156,34 @@ def check_learned(steps):
                         raise Stop(f"learned steps: {d.get('action')} not allowed")
                     ids.append(d["id"])
                     learned.add(d["id"])
+                    if d["action"] == "repeat":
+                        check_repeat(d)
+                        for x in d["steps"]:
+                            ids.append(x["id"])
+                            learned.add(x["id"])
 
     learned = set()
     walk(steps)
     for i in sorted(learned):
         if ids.count(i) > 1:
             raise Stop(f"duplicate step id: {i}")
+
+
+def check_repeat(d):
+    m = d.get("max")
+    if type(m) is not int or not 1 <= m <= 100:
+        raise Stop("learned steps: repeat max must be 1 to 100")
+    if not isinstance(d.get("steps"), list) or not d["steps"]:
+        raise Stop("learned steps: repeat has no steps")
+    for x in d["steps"]:
+        if not isinstance(x, dict) or not x.get("id"):
+            raise Stop("learned steps: a step without an id")
+        if x.get("action") == "repeat":
+            raise Stop("learned steps: a repeat cannot hold a repeat")
+        if x.get("action") not in LEARNED_ACTIONS:
+            raise Stop(f"learned steps: {x.get('action')} not allowed")
+    if d["steps"][0].get("action") != "click" or d["steps"][0].get("target") != d.get("item"):
+        raise Stop("learned steps: a repeat's first step must click its item")
 
 
 def approval_question(f, deliver):
@@ -356,18 +395,35 @@ class Runner:
 
     def page_element(self, ref):
         """Element by schema ref, only after its page is identified (never on an unknown page)."""
-        page_id = ref.split(".")[0]
+        return self.element(ref, self.page_root(ref.split(".")[0]))
+
+    def page_root(self, page_id):
+        """A fresh snapshot, only once it is identified as page_id."""
         on = self.ctx.get("learned_on")
         if on and on[0] == page_id and self.d.current_url(self.app) == on[1]:
             # a taught pop-up hides the page's anchors: within its own case, the same URL and title is the same page
             root = self.snapshot()
             if root is not None and re.search(self.pages[page_id]["identification"].get("title_matches", ""), root.name):
                 self._audit("verify", outcome=page_id)
-                return self.element(ref, root)
+                return root
         page, root = self.wait_for_page([page_id], 10)
         if not page:
             raise Stop(f"not on {page_id}")
-        return self.element(ref, root)
+        return root
+
+    def items(self, ref):
+        """(page_id, el_id, the list items holding ref's element) on a fresh, identified snapshot."""
+        page_id, el_id = ref.split(".")
+        page = self.pages[page_id]
+        return page_id, el_id, item_candidates(self.page_root(page_id), page["elements"][el_id], page)
+
+    def round_element(self, ref):
+        """The round's click target: ref's element inside the first list item (never the taught index)."""
+        page_id, el_id, cands = self.items(ref)
+        if not cands:
+            raise Stop(f"{ref}: no list item left")
+        spec = self.pages[page_id]["elements"][el_id]
+        return item_target(cands[0], spec, self.pages[page_id]), spec
 
     def element(self, ref, root):
         page_id, el_id = ref.split(".")
@@ -783,12 +839,47 @@ class Runner:
             raise Stop("revoked")
         self.approvals.grant_presses(self.flow["id"], self.digest)
 
+    def do_repeat(self, s):
+        """A taught round on the first list item still holding s["item"], until none are left or s["max"] rounds."""
+        k, label = 0, None
+        try:
+            while k < s["max"]:
+                page_id, el_id, cands = self.items(s["item"])
+                if not cands:
+                    break
+                c, page = len(cands), self.pages[page_id]
+                label = item_label(cands[0], item_target(cands[0], page["elements"][el_id], page))
+                self.ctx["round"] = (page_id, el_id)
+                try:
+                    self.steps(s["steps"])   # steps[0] clicks the item (do_click finds it in the first candidate)
+                finally:
+                    self.ctx.pop("round", None)
+                    self.step = s["id"]
+                deadline = time.time() + 10   # the item leaves once the app answers: wait as page checks wait
+                while len(self.items(s["item"])[2]) >= c:
+                    if time.time() > deadline:
+                        raise Stop(f"{label} is still on the list after its round")
+                    time.sleep(1)
+                k += 1
+                self._audit("repeat", target=label, outcome="done")
+        except Stop as e:
+            self._audit("repeat", target=label, outcome="error")
+            if _ends_run(e):   # emergency stop, revoked...: keep the message the run's own checks look for
+                raise
+            raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
+        self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
+
     def do_click(self, s):
         tgt = self.ref(s["target"])
-        if tgt.startswith("current_item."):
-            node, spec = self._current_item_node(tgt.split(".", 1)[1])
-        else:
-            node, spec = self.page_element(tgt)
+        rnd = self.ctx.get("round")
+        is_round = rnd is not None and tgt == ".".join(rnd)
+
+        def locate():
+            if tgt.startswith("current_item."):
+                return self._current_item_node(tgt.split(".", 1)[1])
+            return self.round_element(tgt) if is_round else self.page_element(tgt)
+
+        node, spec = locate()
         if tgt.startswith("current_item."):
             ref = "{}.{}[{}].{}".format(*self.ctx["item_spec"], self.ctx["n"], tgt.split(".", 1)[1])
         else:
@@ -816,8 +907,7 @@ class Runner:
                 self._go(url)
             else:
                 self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
-                node, spec = (self._current_item_node(tgt.split(".", 1)[1]) if tgt.startswith("current_item.")
-                              else self.page_element(tgt))   # positions changed after scrolling
+                node, spec = locate()   # positions changed after scrolling
                 self._act("click", self.d.click, node, target=ref)
             if "verify_page" not in s:
                 return
