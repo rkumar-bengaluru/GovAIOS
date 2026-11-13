@@ -2,12 +2,23 @@
 import re
 from urllib.parse import urlsplit
 
+OWN_HOSTS = ("localhost", "127.0.0.1")   # the admin's own apps
+PANEL_PORT = 8765                        # the panel's own pages are never an app
 RISK_ORDER = ["read", "navigate", "modify", "submit", "payment"]
 
 
 def origin(url):
     u = urlsplit(url)
     return f"{u.scheme}://{u.netloc}"
+
+
+def own(url):
+    """An http(s) page of the admin's own app: localhost or 127.0.0.1, never the panel's port."""
+    try:
+        u = urlsplit(url or "")
+        return u.scheme in ("http", "https") and u.hostname in OWN_HOSTS and u.port != PANEL_PORT
+    except ValueError:
+        return False
 
 
 def decide(request, flow, approvals):
@@ -18,6 +29,9 @@ def decide(request, flow, approvals):
         return "deny"                                     # Rule 9: unlisted = denied
     if request["action"] == "attach_file":
         return "ask"                                      # every time; gate remembers only destinations
+    if request["action"] == "click" and (request["risk"] == "payment" or (
+            request["risk"] == "submit" and not (own(request.get("destination")) and request.get("granted")))):
+        return "deny"                                     # payment is never pressed; a submit needs the press grant
     if request["action"] == "click" and \
             RISK_ORDER.index(request["risk"]) > RISK_ORDER.index(perms["max_element_risk"]):
         return "deny"                                     # README §7: element risk ceiling

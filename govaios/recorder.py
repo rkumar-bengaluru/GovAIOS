@@ -7,6 +7,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from . import capture, lessons, studio
+from .policy import OWN_HOSTS, PANEL_PORT
 from .applyfiles import TEACH_OPEN, TEACH_OUT, remove, write_json
 from .engine import find_all
 from .formfill import FIELD_ROLES
@@ -14,8 +15,7 @@ from .formfill import FIELD_ROLES
 FLOW = "teach_new"
 CLICKABLE = ("link", "button", "tab", "radio")
 COUNT = re.compile(r"^(.*\S) \(\d+\)$")   # "Shortlisted (4)": the count changes, so it is never part of the step
-OWN = ("localhost", "127.0.0.1")   # own apps only in this plan
-PANEL_PORT = 8765
+OWN, PANEL_PORT = OWN_HOSTS, PANEL_PORT   # one source: policy
 MISMATCH = "Run could not find this. Do it again, or skip it."
 OUTSIDE = "Outside sites come later: recording paused."
 UNSAVED = "Could not save this step. Do it again."

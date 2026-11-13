@@ -47,11 +47,6 @@ def test_lookalike_domain_denied(appr):
     assert decide({**NAV, "destination": "https://himalayas.app.evil.example/"}, FLOW, appr) == "deny"
 
 
-def test_payment_always_asks(appr):
-    pay = {"permissions": {"allow": ["click"], "max_element_risk": "payment"}, "id": "p"}
-    assert decide({"action": "click", "risk": "payment"}, pay, appr) == "ask"
-
-
 def test_attach_file_always_asks(appr):
     f = {**FLOW, "permissions": {**FLOW["permissions"], "allow": ["attach_file"]}}
     req = {"action": "attach_file", "risk": "modify"}
@@ -59,3 +54,34 @@ def test_attach_file_always_asks(appr):
     appr.approve_destination("f", "https://himalayas.app")
     assert decide(req, f, appr) == "ask"
     assert decide(req, FLOW, appr) == "deny"   # not allow-listed: deny wins
+
+
+SUB = {"id": "f", "permissions": {"allow": ["click"], "max_element_risk": "submit"},
+       "destinations": ["http://localhost:8100"]}
+
+
+def _click(risk, dest=None, **k):
+    return {"action": "click", "risk": risk, **({"destination": dest} if dest else {}), **k}
+
+
+def test_payment_click_is_denied_never_asked(appr):
+    flow = {**SUB, "permissions": {"allow": ["click"], "max_element_risk": "payment"}}
+    assert decide(_click("payment"), flow, appr) == "deny"
+
+
+def test_submit_click_on_own_app_needs_grant(appr):
+    appr.approve_destination("f", "http://localhost:8100")
+    d = "http://localhost:8100/discover"
+    assert decide(_click("submit", d, granted=False), SUB, appr) == "deny"
+    assert decide(_click("submit", d, granted=True), SUB, appr) == "allow"
+
+
+def test_submit_click_outside_own_apps_is_denied_even_with_grant(appr):
+    flow = {**SUB, "destinations": ["https://boards.greenhouse.io"]}
+    assert decide(_click("submit", "https://boards.greenhouse.io/x", granted=True), flow, appr) == "deny"
+
+
+def test_own_url():
+    from govaios.policy import own
+    assert own("http://127.0.0.1:8100/")
+    assert not any(own(u) for u in ("http://127.0.0.1:8765/", "https://localhost.evil.com/", "file:///x"))

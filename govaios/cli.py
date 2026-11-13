@@ -8,6 +8,7 @@ import time
 import sys
 
 from . import identity, sandbox
+from .policy import PANEL_PORT
 
 PROFILES = {"doctor": None, "audit-ui": sandbox.UI_PROFILE, "panel": sandbox.UI_PROFILE, "deliver": sandbox.DELIVER_PROFILE}   # every other subcommand: RUN_PROFILE (row 22)
 
@@ -311,7 +312,7 @@ def _selftest(args) -> int:
     return 0
 
 
-AGENT_PORT = 8765   # test seam: the agent port is not a CLI flag
+AGENT_PORT = PANEL_PORT   # test seam: the agent port is not a CLI flag
 
 
 def main(argv: list[str] | None = None) -> int:

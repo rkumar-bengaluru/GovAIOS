@@ -63,13 +63,20 @@ class Approvals:
             data = json.loads(self.path.read_text())
         except FileNotFoundError:
             data = {}
-        return {"flows": data.get("flows", {}), "destinations": data.get("destinations", {})}
+        return {"flows": data.get("flows", {}), "destinations": data.get("destinations", {}),
+                "presses": data.get("presses", {})}
 
     def flow_ok(self, flow_id, digest):
         return self.snapshot()["flows"].get(flow_id) == digest
 
     def destination_ok(self, flow_id, org):
         return org in self.snapshot()["destinations"].get(flow_id, [])
+
+    def press_ok(self, flow_id, digest):
+        return self.snapshot()["presses"].get(flow_id) == digest
+
+    def grant_presses(self, flow_id, digest):
+        self._update(lambda d: d["presses"].__setitem__(flow_id, digest))
 
     def approve_flow(self, flow_id, digest):
         self._update(lambda d: d["flows"].__setitem__(flow_id, digest))
@@ -78,13 +85,13 @@ class Approvals:
         self._update(lambda d: d["destinations"].setdefault(flow_id, []).append(org))
 
     def revoke_flow(self, flow_id):
-        self._update(lambda d: d["flows"].pop(flow_id, None))
+        self._update(lambda d: (d["flows"].pop(flow_id, None), d["presses"].pop(flow_id, None)))
 
     def revoke_destination(self, flow_id, org):
         self._update(lambda d: d["destinations"].get(flow_id, []).remove(org) if self._has(d, flow_id, org) else None)
 
     def revoke_all(self):
-        self._update(lambda d: (d["flows"].clear(), d["destinations"].clear()))
+        self._update(lambda d: (d["flows"].clear(), d["destinations"].clear(), d["presses"].clear()))
 
     @staticmethod
     def _has(d, flow_id, org):

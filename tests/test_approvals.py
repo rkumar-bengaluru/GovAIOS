@@ -62,7 +62,7 @@ def test_revoke_destination_and_all(tmp_path):
     assert not a.destination_ok("f", "https://x") and a.destination_ok("f", "https://y")
     a.approve_flow("f", "h")
     a.revoke_all()
-    assert a.snapshot() == {"flows": {}, "destinations": {}}
+    assert a.snapshot() == {"flows": {}, "destinations": {}, "presses": {}}
 
 
 def test_write_is_atomic(tmp_path, monkeypatch):
@@ -80,3 +80,11 @@ def test_write_is_atomic(tmp_path, monkeypatch):
 def test_pages_used_skips_current_page():
     flow = {"steps": [{"target": "current_page.next"}, {"target": "current_item.title"}, {"target": "p.x"}]}
     assert pages_used(flow) == {"p"}
+
+
+def test_press_grant_is_tied_to_the_digest(tmp_path):
+    a = Approvals(tmp_path / "approvals.json")
+    a.grant_presses("a", "d1")
+    assert a.press_ok("a", "d1") and not a.press_ok("a", "d2")
+    a.revoke_flow("a")
+    assert not a.press_ok("a", "d1")

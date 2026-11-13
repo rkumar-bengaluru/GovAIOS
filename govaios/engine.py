@@ -22,7 +22,7 @@ from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, loa
 from .audit.log import AuditLog, url_for_audit
 from .delivery import TARGETS, check_block
 from .approvals import Approvals, pages_used, read_bound
-from .policy import RISK_ORDER, decide, origin
+from .policy import RISK_ORDER, decide, origin, own
 from .runstate import Stop
 
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
@@ -282,7 +282,7 @@ class Runner:
         return ok, how
 
     # governance gate for every side effect
-    def gate(self, action, risk, target=None, destination=NO_DEST, question=None, keep=True):
+    def gate(self, action, risk, target=None, destination=NO_DEST, question=None, keep=True, granted=False):
         """keep=False: a first-contact approval holds for this call only, never remembered (teach)."""
         if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
             raise Stop("emergency stop")
@@ -296,7 +296,7 @@ class Runner:
         if destination is NO_DEST:
             destination = None
         dest = url_for_audit(destination) if destination else None
-        verdict = decide({"action": action, "risk": risk, "destination": destination}, self.flow, self.approvals)
+        verdict = decide({"action": action, "risk": risk, "destination": destination, "granted": granted}, self.flow, self.approvals)
         asked, how, remember = verdict == "ask", None, False
         if asked:
             q = f"Flow '{self.flow['id']}' wants to {action}"
@@ -745,6 +745,40 @@ class Runner:
         """Audit ref for a target; `current_page.<el>` names the page the run classified."""
         return f"{self.ctx['page']}.{target.split('.', 1)[1]}" if target.startswith("current_page.") else target
 
+    def submit_buttons(self):
+        """Sorted names of the submit-risk elements any click step targets, nested steps and learned cases included."""
+        names = set()
+
+        def spec_of(t):
+            page, _, el = t.partition(".")
+            pages = self.pages.values() if page == "current_page" else [self.pages.get(page, {"elements": {}})]
+            return [p["elements"][el] for p in pages if el in p.get("elements", {})]
+
+        def walk(steps):
+            for s in steps:
+                if s.get("action") == "click":
+                    for e in spec_of(s.get("target", "")):
+                        if e.get("risk") == "submit":
+                            names.add(e.get("name") or e.get("name_matches", "").strip("^$"))
+                walk(s.get("steps", []))
+                for v in s.get("on_match", {}).values():
+                    if isinstance(v, dict) and isinstance(v.get("do"), list):
+                        walk(v["do"])
+
+        walk(self.flow["steps"])
+        return sorted(names)
+
+    def _press_grant(self, url):
+        """One Touch ID lets this version of the app press its own submit buttons."""
+        names = ", ".join(self.submit_buttons())
+        ok, how = self.ask(f"Let '{self.flow.get('app') or self.flow['id']}' press {names} on {origin(url)}?",
+                           f"{self.flow['id']}: press {names}")
+        self._audit("press_grant", flow_hash=self.digest, decision="allow" if ok else "deny",
+                    approver="admin", channel="touch_id", auth=how, reason=names)
+        if not ok:
+            raise Stop("press grant busy" if how == "busy" else "press grant refused")
+        self.approvals.grant_presses(self.flow["id"], self.digest)
+
     def do_click(self, s):
         tgt = self.ref(s["target"])
         if tgt.startswith("current_item."):
@@ -755,7 +789,15 @@ class Runner:
             ref = "{}.{}[{}].{}".format(*self.ctx["item_spec"], self.ctx["n"], tgt.split(".", 1)[1])
         else:
             ref = tgt
-        self.gate("click", spec["risk"], target=ref)
+        if spec["risk"] == "submit":
+            url = self.d.current_url(self.app)
+            fid = self.flow["id"]
+            if own(url) and not self.approvals.press_ok(fid, self.digest):
+                self._press_grant(url)
+            self.gate("click", "submit", target=ref, destination=url,
+                      granted=self.approvals.press_ok(fid, self.digest))
+        else:
+            self.gate("click", spec["risk"], target=ref)
         before = self.d.current_url(self.app)
         # open_link: go to the link's own address instead of clicking it (JobLens's two-line titles defeat the
         # click-point check); same site only, so it never reaches a destination the click could not

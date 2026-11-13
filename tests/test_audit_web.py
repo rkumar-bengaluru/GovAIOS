@@ -154,7 +154,7 @@ def test_revoke_all(web):
     home, _, get = web
     Approvals(home / "approvals.json").approve_destination("demo_flow", "org1")
     assert get.req("/revoke", "POST", cookie=get.sid, body={"csrf": _csrf(get), "kind": "all"})[0] == 303
-    assert Approvals(home / "approvals.json").snapshot() == {"flows": {}, "destinations": {}}
+    assert Approvals(home / "approvals.json").snapshot() == {"flows": {}, "destinations": {}, "presses": {}}
     assert _revokes(home)[0]["reason"] == "all"
 
 
