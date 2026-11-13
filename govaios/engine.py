@@ -945,8 +945,13 @@ class Runner:
         before = self.d.current_url(self.app)
         # open_link: go to the link's own address instead of clicking it (JobLens's two-line titles defeat the
         # click-point check); same site only, so it never reaches a destination the click could not
-        url = self.d.link_url(node) if s.get("open_link") else None
-        if url and origin(url) != origin(before):
+        # a learned link on an outside site is opened the same way: a click there can be held by a full-page ad
+        learned_link = str(s.get("id", "")).startswith("learned_") and getattr(node, "role", "") == "link" \
+            and not own(before or "")
+        url = self.d.link_url(node) if s.get("open_link") or learned_link else None
+        here, there = urlsplit(before or ""), urlsplit(url or "")
+        if url and (origin(url) != origin(before) or there.scheme not in ("http", "https")
+                    or (there.path, there.query) == (here.path, here.query)):   # "#top", javascript: stay clicks
             url = None
         for attempt in range(2):                         # one bounded retry (Rule 10)
             if url:
