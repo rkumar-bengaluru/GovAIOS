@@ -90,6 +90,16 @@ def test_spec_checked_against_its_own_snapshot(tmp_path):
     assert e["risk"] == "navigate" and e["submit"] is False
 
 
+def test_icon_glyph_in_the_tree_name_still_matches(tmp_path):
+    tree = Node("document", "Shop", children=[Node("link", "\uf07a Add to cart", handle="add")])
+    desk = Desk(HOME, {HOME: [tree]})
+    desk.hit = "add"
+    r = rec(tmp_path, desk)
+    r.handle(down("Add to cart"))   # the page's innerText has no glyph: it comes from CSS ::before
+    (e,) = lessons.load(tmp_path, r.name)["pages"][0]["events"]
+    assert e["spec"] == {"role": "link", "name": "\uf07a Add to cart"} and out(tmp_path)["note"] == ""
+
+
 def test_name_mismatch_not_saved(tmp_path):
     desk = Desk(DISCOVER, {DISCOVER: [discover_tree(Node("button", "Skip", handle="s"))]})
     desk.hit = "s"

@@ -21,6 +21,11 @@ OUTSIDE = "This site's terms are not marked allowed in Studio: recording paused.
 UNSAVED = "Could not save this step. Do it again."
 
 
+def _plain(name):
+    """A name as the page's own text has it: icon-font glyphs (CSS ::before, Unicode private use) dropped."""
+    return re.sub(r"\s+", " ", re.sub("[\ue000-\uf8ff]", "", name or "")).strip()
+
+
 def _key(url):
     s = urlsplit(url or "")
     return f"{s.scheme}://{s.netloc}{s.path}"
@@ -114,7 +119,7 @@ class Recorder:
             n = up.get(id(n))
         if n is None:
             return   # empty space
-        if n.name != ev.get("name"):   # rule 2: what GOV-AIOS reads must be what the page reported
+        if _plain(n.name) != _plain(ev.get("name")):   # rule 2: what GOV-AIOS reads must be what the page reported
             self.note = MISMATCH
             return
         spec = _spec(root, n)
