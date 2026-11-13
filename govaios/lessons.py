@@ -370,6 +370,8 @@ def _cases(proposal, deleted, ids, on, repeats=None):
             if j == at and (not line["keep"] or (i, j) in deleted):
                 raise ValueError("the Repeat needs its first line kept")
             s = _do(line, p) if line["keep"] and (i, j) not in deleted else None
+            if s and at is not None and j >= at and s["action"] == "hand_over":
+                raise ValueError("a repeat cannot include a hand-over")
             if s:
                 n += 1
                 while f"learned_{p['id']}_{n}" in ids:
@@ -430,6 +432,8 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     can = repeatable(proposal, lesson)
     if any(i not in can for i in repeats or {}):
         raise ValueError("this page has no list to repeat on")
+    if any(proposal["pages"][i]["id"] in on for i in repeats or {}):
+        raise ValueError("this page is already in the app; Repeat not added")
     cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on, {i: (can[i], c) for i, c in (repeats or {}).items()})
     on.update(cases)
     n = sum(len(c["do"]) for c in cases.values())

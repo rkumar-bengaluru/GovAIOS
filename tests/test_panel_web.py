@@ -2738,9 +2738,23 @@ def test_approve_with_repeat_writes_it(cc):
     before = ja.path.read_bytes()
     cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "0"})
     assert ja.path.read_bytes() == before and _tells(cc)[-1].startswith("GOV-AIOS -> Not approved:")
-    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "5"})
+    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "5", "del:0:2": "1"})
     wf = yaml.safe_load(ja.path.read_text())["workflow"]
     on = next(s for s in wf["steps"] if s["id"] == "on_form")["on_match"]
     do = next(c["do"] for c in on.values()
               if isinstance(c, dict) and any(d["action"] == "repeat" for d in c.get("do", [])))
     assert [d["action"] for d in do] == ["click", "repeat"] and do[1]["max"] == 5
+
+
+def test_no_repeat_offer_on_a_page_the_flow_has():
+    from govaios import capture
+    from govaios.desktop import Node
+    from govaios.panel import lesson as pl
+    t = Node("document", "T", children=[Node("row", "", children=[Node("button", "Review")])])
+    prop = {"pages": [{"id": "p", "steps": [{"kind": "click", "label": "Review", "target": "p.b", "keep": True}],
+                       "added": [], "new": False,
+                       "yaml": {"page": {"elements": {"b": {"role": "button", "name": "Review", "index": 0}}}}}],
+            "bank": []}
+    les = {"pages": [{"title": "T", "url": "https://a.example/", "tree": capture.tree(t)}]}
+    assert "name='cap:0'" in pl.page("n", les, prop, set(), {}, "")
+    assert "name='cap:0'" not in pl.page("n", les, prop, {"p"}, {}, "")

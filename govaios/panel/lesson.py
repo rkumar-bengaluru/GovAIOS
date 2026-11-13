@@ -76,7 +76,7 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
             else:
                 rows.append(f"<li>{text} <label><input type=checkbox name='del:{i}:{j}' value=1> Delete</label></li>")
         offer = ""
-        if (j := can.get(i)) is not None:
+        if (j := can.get(i)) is not None and p["id"] not in flow_cases:
             offer = (f"<p class=note><label><input type=checkbox name='rep:{i}' value=1> Repeat from "
                      f"“{escape(str(p['steps'][j]['label'])[:200])}” for every item on this list, until none are left, "
                      f"at most <input required name='cap:{i}' type=number min=1 max=100 value=10> times.</label></p>")

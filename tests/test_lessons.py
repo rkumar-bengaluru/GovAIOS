@@ -1,4 +1,5 @@
 """Studio lessons: saved recordings become a proposed change (pages, steps, bank ops); nothing is written."""
+import copy
 import os
 
 import pytest
@@ -453,3 +454,26 @@ def test_build_wraps_the_round_in_repeat(tmp_path):
         lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {0: 10})
     with pytest.raises(ValueError):   # the first repeated line deleted
         lessons.build(les, prop, {(1, 1)}, {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+
+
+def test_repeat_refusals_and_same_bytes(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = joblens(tmp_path)
+    _, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+
+    def build(prop=prop, **kw):
+        return lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", **kw)
+    a, b = build(repeats={1: 10}), build(repeats={1: 10})   # tick, untick, tick: same flow, same digest
+    assert build(repeats={1: 10})["flow"] == a["flow"] and a["flow"] == b["flow"] and a["digest"] == b["digest"]
+    assert build()["flow"] != a["flow"]
+    hand = copy.deepcopy(prop)
+    hand["pages"][1]["steps"].append({"kind": "hand_over", "label": "You check", "target": None, "keep": True})
+    with pytest.raises(ValueError, match="hand-over"):
+        build(hand, repeats={1: 10})
+    assert build(hand)   # without the repeat it is fine
+    on = next(s for s in yaml.safe_load(a["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+    assert prop["pages"][1]["id"] in on
+    raw2 = {**raw, app: a["flow"][1]}   # the flow now handles that page
+    with pytest.raises(ValueError, match="already in the app"):
+        lessons.build(les, prop, set(), {}, raw2, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
