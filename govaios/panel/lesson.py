@@ -103,6 +103,10 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
             f"until you approve it with Touch ID.</p>"
             f"<form method=post action=/lesson/approve>{hidden}<input type=hidden name=name value='{escape(name)}'>"
             f"<input type=hidden name=p value='{digest(proposal)}'>{''.join(secs)}{bank}"
-            f"<p><button class=go>Approve with Touch ID</button></p></form>"
+            f"<p><button class=go>Approve with Touch ID</button></p>"
+            + ("" if lesson.get("flow") in lessons.SANDBOX else
+               "<p class=note>Try it runs the steps once on the real pages and stops before any button that changes "
+               "something.</p><p><button formaction=/lesson/try>Try it</button></p>")
+            + "</form>"
             f"<form method=post action=/lesson/discard>{hidden}<input type=hidden name=name value='{escape(name)}'>"
             f"<button>Discard</button></form>")

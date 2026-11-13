@@ -23,13 +23,14 @@ import yaml
 
 from govaios import agents, applyfiles, auth, lessons, runstate, studio, terms
 import os
+import shutil
 from govaios.formfill import BankError, add_answer, load_bank, ok_value, read_bank, stage_text
 from govaios.approvals import Approvals, pages_used, read_bound
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
 from govaios.audit.verify import verify
 from govaios.panel import extlink, lesson as lesson_ui, market, settings, tickets, totp
-from govaios.panel.apps import list_apps, match
+from govaios.panel.apps import App, list_apps, match
 from govaios.panel.launch import RunLaunch
 from govaios.panel.session import SESSION_S, Session
 from govaios.recorder import FLOW as TEACH_FLOW
@@ -298,6 +299,20 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     home = Path(home)
     log = AuditLog(home)
     approvals_path = home / "approvals.json"
+
+    def revoke_try(fid):
+        """A Try's one-run approval ends with its run; revoked even when the audit line fails."""
+        try:
+            log.append("approval", flow=fid, outcome="revoked", reason="try run ended")
+        finally:
+            Approvals(approvals_path).revoke_flow(fid)
+
+    try:
+        _stale = [f for f in Approvals(approvals_path).snapshot()["flows"] if str(f).startswith("try_")]
+    except (OSError, ValueError, AttributeError, TypeError):   # unreadable: the Approvals page says so
+        _stale = []
+    for _fid in _stale:
+        revoke_try(_fid)   # a panel that died mid-Try
     store = totp.SecretStore(home)
     panel = SimpleNamespace(session=session or Session(), run=None, app=None, convo=deque(maxlen=50),
                             speak=speak, name=name or settings.name(home), pending=None, lock=threading.RLock(),
@@ -346,9 +361,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if r is None or not r.done or panel.told is r:
                 return
             panel.told, app = r, panel.app.name
+            tried = r.stopped_reason is None and str(getattr(r, "reason", None) or "").startswith("Try it stops here")
             if r.code == 0 and r.stopped_reason is None:
                 tell(f"{app} finished: {(r.summary or 'done').split(': ', 1)[-1]}")
                 text = f"{panel.name}, the {app} flow is complete, thank you."
+            elif tried:   # a Try ends at its first change-making press: a normal end
+                tell(f"{app} finished: {r.reason}")
+                text = f"{panel.name}, the {app} try is done: it stopped before a change."
             else:
                 why = r.stopped_reason or getattr(r, "reason", None) or f"exit {r.code}"
                 cap = getattr(r, "capture", None)
@@ -360,6 +379,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 applyfiles.remove(home, applyfiles.ASK, applyfiles.REPLY)
             except OSError:
                 pass
+            if panel.app.id.startswith("try_"):
+                revoke_try(panel.app.id)
 
     def signout_all():
         with sign_lock:
@@ -1635,17 +1656,21 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     and applyfiles.read_json(home, applyfiles.REPLY) is None:
                 applyfiles.write_json(home, applyfiles.REPLY, {"run": panel.run_id, "card": choice})
 
-    def lesson_approve(f):
-        if not lesson_lock.acquire(blocking=False):
-            tell("Another lesson is being approved.")
-            return "/"
-        try:
-            return approve_lesson(f)
-        finally:
-            lesson_lock.release()
+    def one_lesson(fn):
+        """One lesson approval or Try (and its Touch ID) at a time."""
+        def post(f):
+            if not lesson_lock.acquire(blocking=False):
+                tell("Another lesson is being approved.")
+                return "/"
+            try:
+                return fn(f)
+            finally:
+                lesson_lock.release()
+        return post
 
-    def approve_lesson(f):
-        """The only place a lesson changes a flow, page files or the bank: checked, then Touch ID, then written."""
+    def lesson_plan(f):
+        """A posted lesson's checks, then lessons.build: a namespace (name, back, lesson, app, fid, sandbox, pages_dir,
+        new_app, plan), or where to send the browser when it is refused (None: not found). Writes nothing."""
         name = f.get("name", "")
         if not LESSON.fullmatch(f"/lesson/{name}"):
             return None
@@ -1688,6 +1713,16 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
+        return SimpleNamespace(name=name, back=back, lesson=lesson, app=app, fid=fid, sandbox=sandbox,
+                               pages_dir=pages_dir, new_app=new_app, plan=plan)
+
+    def approve_lesson(f):
+        """The only place a lesson changes a flow, page files or the bank: checked, then Touch ID, then written."""
+        c = lesson_plan(f)
+        if not isinstance(c, SimpleNamespace):
+            return c
+        name, back, app, fid, sandbox, pages_dir, new_app, plan = (c.name, c.back, c.app, c.fid, c.sandbox,
+                                                                   c.pages_dir, c.new_app, c.plan)
         ok, how = auth.prove(f"Approve the new app {app.name} and what GOV-AIOS learned" if new_app
                              else f"Add what GOV-AIOS learned to {app.name if app else 'Studio'}", home)
         who = {"flow": fid, "target": name, "approver": "admin", "channel": "touch_id", "auth": how}
@@ -1707,6 +1742,62 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         log.append("lesson", decision="allow", outcome="approved", flow_hash=digest, reason=plan["counts"], **who)
         lesson_reply(name, "approved")
         tell(f"Learned: {app.name} uses it from the next run." if not sandbox else "Saved the pages to Studio.")
+        return "/"
+
+    def try_lesson(f):
+        """Try it: the built lesson as a private copy, <home>/try/flows/try_<app id>.yaml and its pages, run once
+        under its own Touch ID and one-run approval. The engine stops before any change-making press; the real
+        app's flow, pages, bank and approvals are untouched."""
+        def busy():   # one run at a time, so the shared try tree is never replaced under a running Try
+            return live() or panel.queue or panel.told is not panel.run
+        if busy():
+            tell("Stop the running app first, then try it.")
+            return "/"
+        if not panel.session.active():
+            tell(NO_SESSION)
+            return "/"
+        c = lesson_plan(f)
+        if not isinstance(c, SimpleNamespace):
+            return c
+        if c.sandbox:
+            tell("A Studio lesson has no app to try.")
+            return c.back
+        tid, root = f"try_{c.app.id}", home / "try"
+        try:
+            if root.is_symlink():
+                root.unlink()
+            elif root.exists():
+                shutil.rmtree(root)   # each Try replaces the last one's tree
+            doc = yaml.safe_load(c.plan["flow"][1])
+            doc["workflow"].update({"id": tid, "try": True})
+            for d in (root, root / "flows", root / "pages"):
+                d.mkdir(mode=0o700)
+            path = root / "flows" / f"{tid}.yaml"
+            path.write_bytes(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True).encode())
+            for pid in pages_used(doc["workflow"]):
+                src = c.pages_dir / f"{pid}.yaml"
+                (root / "pages" / src.name).write_bytes(c.plan["pages"].get(src) or src.read_bytes())
+            digest = read_bound(path, root / "pages")[0]
+        except (OSError, KeyError, ValueError, yaml.YAMLError):
+            tell("Could not write the Try copy: nothing ran.")
+            return c.back
+        ok, how = auth.prove(f"Try {c.app.name} once", home)
+        who = {"flow": c.fid, "target": c.name, "approver": "admin", "channel": "touch_id", "auth": how}
+        if not ok:
+            log.append("lesson", decision="deny", **who)
+            tell("Touch ID is busy. Try again." if how in ("busy", "none") else "Not tried: nothing ran.")
+            return c.back
+        with panel.lock:   # checked again: a run may have started during the Touch ID wait
+            if busy() or not panel.session.active():
+                tell("Stop the running app first, then try it.")
+                return c.back
+            log.append("lesson", decision="allow", outcome="try", flow_hash=digest, **who)
+            Approvals(approvals_path).approve_flow(tid, digest)
+            try:
+                start_run(App(tid, c.app.name, path, digest, True, c.app.title), {})
+            except Exception:
+                revoke_try(tid)
+                raise
         return "/"
 
     def lesson_discard(f):
@@ -1865,7 +1956,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             start_run(hit, vals)
         return 200, {}
 
-    POSTS = {"/terms": terms_post, "/lesson/approve": lesson_approve, "/lesson/discard": lesson_discard,
+    POSTS = {"/terms": terms_post, "/lesson/approve": one_lesson(approve_lesson), "/lesson/try": one_lesson(try_lesson), "/lesson/discard": lesson_discard,
              "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/unqueue": unqueue_post, "/totp/setup": setup_post, "/totp/reset": reset,
              "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new,
              "/apps/delete": apps_delete, "/studio/disconnect": studio_disconnect}

@@ -40,7 +40,9 @@ LIVE_LINES = 50
 
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
-             "the browser has no window in front")
+             "the browser has no window in front", "Try it stops here")
+TRY_STOP = ("Try it stops here: the real run will press {}. Close the pop-up, or press Run: it starts from your "
+            "start page.")
 def _ends_run(e):
     m = str(e)
     return m.startswith(RUN_STOPS) or m.startswith("input refused") and "not on the target element" not in m
@@ -898,6 +900,11 @@ class Runner:
             ref = "{}.{}[{}].{}".format(*self.ctx["item_spec"], self.ctx["n"], tgt.split(".", 1)[1])
         else:
             ref = tgt
+        if self.flow.get("try") is True:   # before the press grant and the gate: a Try never asks to press
+            from .lessons import _CHANGE, _PAY   # lessons imports engine
+            names = (getattr(node, "name", "") or "", spec.get("name") or "", spec.get("name_matches") or "")
+            if spec["risk"] in ("submit", "payment") or any(_CHANGE.search(n) or _PAY.search(n) for n in names):
+                raise Stop(TRY_STOP.format(names[0] or names[1] or ref))
         if spec["risk"] == "submit":
             url = self.d.current_url(self.app)
             fid = self.flow["id"]
