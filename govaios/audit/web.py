@@ -880,6 +880,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 "press Continue. Skip leaves it on the list to fill before you submit.",
                 (("continue", "Continue"), ("skip", "Skip")),
                 "{name}, I couldn't fill {label}. Please fill it in Chrome, then press Continue."),
+        "covered": ("Something is in the way", "Something covers <b>{label}</b> in Chrome: maybe a pop-up, an ad or a "
+                    "banner. Close it there yourself (GOV-AIOS never clicks it), then press Continue. End stops the run.",
+                    (("continue", "Continue"), ("end", "End")),
+                    "{name}, something covers {label} in Chrome. Please close it, then press Continue."),
         "review": ("Ready for you to submit", "The form is filled. Check it in Chrome and press Submit there yourself. "
                    "Then press Next job, or End to stop here.", (("next", "Next job"), ("end", "End")),
                    "{name}, {job} is ready. Please check it and submit it in Chrome."),

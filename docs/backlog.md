@@ -179,6 +179,8 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 
 - **No waiver yet**: "no terms found: I'll go ahead" (spec rule 12) is still plan 4; Studio's Site terms only takes allowed / forbidden / unclear.
 - **Terms are asked in Studio, not the side panel**: the side panel only says recording paused on an unmarked site.
+- **Covered click: Retrain** is not offered on the "Something is in the way" card; it needs Teach this page from a stopped run (spec rule 8, plan 4).
+- **Recorder notes**: every refusal shows "Run could not find this"; say which check failed (name, unique spec, pop-up) so it can be diagnosed.
 - **A Chrome grant outlives the verdict**: the per-site permission stays after a verdict expires or turns forbidden (the recorder still pauses there).
 
 ## Teach extension, plan 3 leftovers (2026-11-13, branch `feat/teach-extension-plan3`)

@@ -41,6 +41,7 @@ LIVE_LINES = 50
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
              "the browser has no window in front", "Try it stops here")
+COVERED_ASKS = 3   # "Something is in the way" cards per click before the run stops
 TRY_STOP = ("Try it stops here: the real run will press {}. Close the pop-up, or press Run: it starts from your "
             "start page.")
 def _ends_run(e):
@@ -887,6 +888,23 @@ class Runner:
             raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
         self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
 
+    def _click_uncovered(self, node, locate, ref):
+        """Click; if something unrelated covers the target (a pop-up, an ad, a banner), the admin closes it in
+        Chrome and presses Continue, and the click is checked again. GOV-AIOS never clicks the cover itself."""
+        from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
+        for asked in range(COVERED_ASKS + 1):
+            try:
+                return self._act("click", self.d.click, node, target=ref)
+            except InputRefused as e:
+                if "is unrelated to target" not in str(e) or asked == COVERED_ASKS:
+                    raise
+                choice = self.card("covered", getattr(node, "name", "") or ref)
+                if choice is None:   # a CLI run: no one to ask
+                    raise
+                if choice == "end":
+                    raise Stop("ended by admin") from None
+                node, _ = locate()   # the page may have moved once the cover closed
+
     def do_click(self, s):
         tgt = self.ref(s["target"])
         rnd = self.ctx.get("round")
@@ -931,7 +949,7 @@ class Runner:
             else:
                 self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
                 node, spec = locate()   # positions changed after scrolling
-                self._act("click", self.d.click, node, target=ref)
+                self._click_uncovered(node, locate, ref)
             if "verify_page" not in s:
                 return
             page, _ = self.wait_for_page([s["verify_page"]], s.get("timeout_seconds", 15))

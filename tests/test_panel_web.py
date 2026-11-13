@@ -2064,6 +2064,15 @@ def test_terms_post_validates_and_records(cc):
     assert _log(cc.home, "apply_card")[-1]["outcome"] == "checked" and len(_log(cc.home, "apply_card")) == 1
 
 
+def test_covered_card_asks_to_close_it_then_continue(cc):
+    from govaios import applyfiles
+    rid = _carding(cc, "covered", "Products")
+    page = cc.get("/")[1]
+    assert "Something is in the way" in page and "Something covers <b>Products</b> in Chrome" in page
+    cc.post("/apply/card", ask=_ask_digest(cc), choice="continue")
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": "continue"}
+
+
 def test_studio_records_site_terms_with_touch_id(cc):
     from govaios import terms
     site = "https://automationexercise.com/"
