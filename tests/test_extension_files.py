@@ -12,6 +12,7 @@ def ext_id():
 
 def test_host_permissions_exact():
     assert manifest()["host_permissions"] == ["http://127.0.0.1:8765/*", "http://localhost/*", "http://127.0.0.1/*"]
+    assert manifest()["optional_host_permissions"] == ["https://*/*"]   # granted per site at Teach, never up front
 
 
 def test_key_is_base64_and_no_content_scripts():

@@ -175,6 +175,12 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 - **Extension**: a page can hide the ● Recording sign; "did not start" note stays until the next Teach.
 - **Flaky test**: `test_teach_records_lesson_and_stops_task` (observer path) fails about 1 in 3 runs.
 
+## Teach on sites marked allowed (2026-11-13, branch `feat/teach-allowed-sites`)
+
+- **No waiver yet**: "no terms found: I'll go ahead" (spec rule 12) is still plan 4; Studio's Site terms only takes allowed / forbidden / unclear.
+- **Terms are asked in Studio, not the side panel**: the side panel only says recording paused on an unmarked site.
+- **A Chrome grant outlives the verdict**: the per-site permission stays after a verdict expires or turns forbidden (the recorder still pauses there).
+
 ## Teach extension, plan 3 leftovers (2026-11-13, branch `feat/teach-extension-plan3`)
 
 - **Try it runs with no inputs**: an app that needs inputs (job_apply's url) stops with "bad run input".
