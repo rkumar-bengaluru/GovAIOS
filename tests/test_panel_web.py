@@ -2067,7 +2067,8 @@ def test_terms_post_validates_and_records(cc):
 def test_studio_records_site_terms_with_touch_id(cc):
     from govaios import terms
     site = "https://automationexercise.com/"
-    assert "action=/studio/terms" in cc.get("/studio")[1]
+    page = cc.get("/studio")[1]
+    assert "action=/studio/terms" in page and ".appcard input[type=radio]{flex:none;min-width:0}" in page   # radio beside its own label
     cc.answers["prove"] = False
     cc.post("/studio/terms", site=site, verdict="allowed", link=site, clause="practice website")
     assert terms.verdict(cc.home, site, ()) is None and cc.asked[-1] == "Record automationexercise.com's terms as allowed"

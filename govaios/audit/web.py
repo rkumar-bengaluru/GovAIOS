@@ -104,6 +104,9 @@ background:var(--ok);border:2px solid var(--ok)}
 .appcard .m{margin:0 0 10px}
 .appcard form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .appcard input{flex:1;min-width:220px}
+.appcard input[type=radio]{flex:none;min-width:0}
+.appcard fieldset{flex-basis:100%;display:flex;gap:16px;border:1px solid var(--line);border-radius:8px}
+.appcard fieldset label{display:flex;gap:6px;align-items:center}
 .cmd{display:flex;gap:10px;margin:18px 0 0;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .cmd input{flex:1}
 .note{background:var(--card);border-left:4px solid var(--amber);padding:10px 14px}
