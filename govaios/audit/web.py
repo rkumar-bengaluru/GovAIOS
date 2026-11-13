@@ -712,10 +712,13 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             f"<form method=post action=/totp/reset>{hidden(csrf)}<button class=stop>Reset authenticator</button></form>")
         authn = (f"<h2>Your name</h2><form method=post action=/name>{hidden(csrf)}<label for=nm>Your name</label> "
                  f"<input id=nm name=name maxlength=40 value='{escape(panel.name)}'> <button>Save</button></form>") + authn
+        def approve_form(a):   # a Draft made by Teach is approved with its lesson, never bare (it has no steps yet)
+            name = waiting_lesson(a.id)
+            return (f"<a class=go href='/lesson/{name}'>Approve it with what I learned</a>" if name else
+                    f"<form method=post action=/approve>{hidden(csrf)}"
+                    f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>")
         waiting = "<h2>Waiting for approval</h2><ul>" + "".join(
-            f"<li>{escape(a.name)} <span class=m>Needs approval</span>"
-            f"<form method=post action=/approve>{hidden(csrf)}"
-            f"<input type=hidden name=flow value='{escape(a.id)}'><button>Approve…</button></form>"
+            f"<li>{escape(a.name)} <span class=m>Needs approval</span>{approve_form(a)}"
             f"{delete_form(csrf, 'flow', a.id, '/approvals') if DELETABLE.fullmatch(a.id) else ''}</li>"
             for a in apps() if not a.approved) + "</ul>"
         bad = "<p class=fail>approvals.json unreadable</p>"
@@ -1746,6 +1749,20 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 return 409, {"note": str(e)[:200]}
             applyfiles.remove(home, applyfiles.TEACH_OPEN)
         return 200, {"lesson_url": f"/lesson/{name}"}
+
+    def waiting_lesson(fid):
+        """The newest new-app lesson bound to Draft fid and not yet approved with it, or None."""
+        d = home / lessons.DIR
+        if not d.is_dir() or d.is_symlink():
+            return None
+        for p in sorted(d.glob("*.json"), reverse=True):
+            try:
+                ok = lessons.load(home, p.name).get("flow") == fid
+            except (ValueError, OSError):
+                continue
+            if ok and not approved_since_bound(fid, p.name):
+                return p.name
+        return None
 
     def approved_since_bound(fid, name):
         """True unless the audit shows lesson name bound to app fid and the app not approved since (revoked counts)."""

@@ -2637,6 +2637,15 @@ def test_new_app_lesson_refused_if_draft_edited(panel):
     assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
 
 
+def test_approvals_sends_a_teach_draft_to_its_lesson(panel):
+    name = _done(panel)
+    page = panel.get("/approvals")[1]
+    assert f"href='/lesson/{name}'>Approve it with what I learned</a>" in page
+    assert "name=flow value='studio_approve_shortlisted'><button>Approve" not in page
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    assert "studio_approve_shortlisted" in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
 def test_new_app_rule_needs_never_approved(panel):
     name = _done(panel)
     panel.post("/approve", flow="studio_approve_shortlisted")
