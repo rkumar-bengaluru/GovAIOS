@@ -395,3 +395,33 @@ def test_build_never_lowers_max_element_risk(tmp_path):
     prop = lessons.propose(les, tmp_path / "pages", Bank())
     plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
     assert yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"] == "submit"
+
+
+def test_mixed_lesson_presses_own_page_and_hands_over_outside_page(tmp_path):
+    def pg(url, title):
+        t = tree(Node("button", "Review"), Node("button", "Approve & promote"), title=title)
+        return page(t, [{**ev("click", "button", "Review"), "risk": "navigate", "sure": True},
+                        {**ev("click", "button", "Approve & promote"), "risk": "submit", "sure": True}], url)
+    les = lesson(tmp_path, pg("http://localhost:8100/discover", "Own"), pg("https://acme.example/jobs", "Jobs | Acme"))
+    a, b = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(a) == ["click", "click"] and a["steps"][1]["press"] is True
+    assert kinds(b) == ["click", "hand_over"] and "press" not in b["steps"][1]
+    assert b["steps"][-1]["keep"]   # the closing hand-over is there (the outside page's own submit)
+
+
+def test_panel_port_submit_click_stays_hand_over(tmp_path):
+    les = _approve_lesson(tmp_path, "http://127.0.0.1:8765/discover")
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(p) == ["click", "hand_over"] and "press" not in p["steps"][1]
+
+
+def test_deleted_press_leaves_max_element_risk_alone(tmp_path):
+    les, app = joblens(tmp_path)
+    from govaios.approvals import read_bound
+    _, raw = read_bound(app, tmp_path / "pages")
+    before = yaml.safe_load(raw[app])["workflow"]["permissions"]["max_element_risk"]
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    j = next(j for j, s in enumerate(prop["pages"][1]["steps"]) if s.get("press"))
+    plan = lessons.build(les, prop, {(1, j)}, {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    after = yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"]
+    assert after == before and before != "submit"
