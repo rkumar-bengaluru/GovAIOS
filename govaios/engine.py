@@ -357,6 +357,13 @@ class Runner:
     def page_element(self, ref):
         """Element by schema ref, only after its page is identified (never on an unknown page)."""
         page_id = ref.split(".")[0]
+        on = self.ctx.get("learned_on")
+        if on and on[0] == page_id and self.d.current_url(self.app) == on[1]:
+            # a taught pop-up hides the page's anchors: within its own case, the same URL and title is the same page
+            root = self.snapshot()
+            if root is not None and re.search(self.pages[page_id]["identification"].get("title_matches", ""), root.name):
+                self._audit("verify", outcome=page_id)
+                return self.element(ref, root)
         page, root = self.wait_for_page([page_id], 10)
         if not page:
             raise Stop(f"not on {page_id}")
@@ -553,7 +560,11 @@ class Runner:
                     raise Stop("too many learned pages in a row")
                 self.gate("read_page", "read", destination=self.d.current_url(self.app))
                 self.ctx["page"] = page
-                self.steps(what["do"])                   # each step through its own gate (click: risk ceiling)
+                self.ctx["learned_on"] = (page, self.d.current_url(self.app))
+                try:
+                    self.steps(what["do"])               # each step through its own gate (click: risk ceiling)
+                finally:
+                    self.ctx.pop("learned_on", None)
                 self.step = s["id"]
                 if what["then"] == "end":
                     return ("end",)

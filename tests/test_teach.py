@@ -15,6 +15,10 @@ PAGES = {
         "send": {"role": "button", "name": "Send", "risk": "submit"}}},
     "page_b": {"title_matches": "^Step B$", "elements": {"done": {"role": "button", "name": "Done", "risk": "navigate"}}},
     "page_c": {"title_matches": "^Step C$", "elements": {"go": {"role": "button", "name": "Go", "risk": "navigate"}}},
+    "page_d": {"title_matches": "^Step D$", "anchors": ["head"], "elements": {
+        "head": {"role": "heading", "name": "Discover", "risk": "read"},
+        "open": {"role": "button", "name": "Open", "risk": "navigate"},
+        "close": {"role": "button", "name": "Close", "risk": "navigate"}}},
 }
 
 
@@ -30,8 +34,16 @@ class Desk(FakeDesktop):
         self.calls.append(("click", node.name))
         assert node.name != "Send", "a submit-rated element was clicked"
         self.title = {"Next": "Step B", "Go": "Step A"}.get(node.name, self.title)
+        if node.name in ("Open", "Close"):   # Open shows a pop-up that hides the heading (as JobLens's Review does)
+            self.popup = node.name == "Open"
+            self.url = SITE + "/elsewhere" if self.popup and self.moves else self.url
+
+    popup = moves = False
 
     def web_root(self, app):
+        if self.title == "Step D":
+            return N("document", "Step D", children=[N("button", "Close")] if self.popup
+                     else [N("heading", "Discover"), N("button", "Open")])
         kids = {"Step A": [N("button", "Next"), N("button", "Send")], "Step B": [N("button", "Done")],
                 "Step C": [N("button", "Go")]}[self.title]
         return N("document", self.title, children=kids)
@@ -42,7 +54,8 @@ def make(tmp_path, steps, risk="navigate"):
     flows.mkdir(parents=True), pages.mkdir()
     for pid, p in PAGES.items():
         (pages / f"{pid}.yaml").write_text(yaml.safe_dump({"page": {
-            "id": pid, "identification": {"title_matches": p["title_matches"]}, "elements": p["elements"]}}))
+            "id": pid, "identification": {"title_matches": p["title_matches"], "anchors": p.get("anchors", [])},
+            "elements": p["elements"]}}))
     f = flows / "teach.yaml"
     f.write_text(yaml.safe_dump({"workflow": {
         "id": "teach", "app": "Teach", "version": 1, "browser": {"application": "chrome", "account": "x"},
@@ -51,12 +64,13 @@ def make(tmp_path, steps, risk="navigate"):
     return f, pages
 
 
-def run(tmp_path, monkeypatch, steps, risk="navigate", ctx=None):
+def run(tmp_path, monkeypatch, steps, risk="navigate", ctx=None, desk=None):
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
     monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
     f, _ = make(tmp_path, steps, risk)
     d = Desk()
+    d.__dict__.update(desk or {})
     r = Runner(f, d, tmp_path)
     r.approvals.approve_flow("teach", r.digest)
     r.approvals.approve_destination("teach", SITE)
@@ -81,6 +95,22 @@ def test_learned_case_clicks_then_reclassifies(tmp_path, monkeypatch):
     assert ("click", "Next") in d.calls and ("click", "Done") in d.calls
     assert r.ctx["page"] == "page_b" and r.audit_lines[-1]["kind"] == "flow_end"
     assert any(e.get("step") == "learned_page_a_1" and e.get("action") == "click" for e in r.audit_lines)
+
+
+@pytest.mark.parametrize("moves", [False, True])
+def test_learned_click_inside_a_pop_up_on_the_same_url(tmp_path, monkeypatch, moves):
+    steps = [{"id": "where", "action": "classify_page", "timeout_seconds": 0,
+              "on_match": {"page_d": {"do": [{"id": "learned_page_d_1", "action": "click", "target": "page_d.open"},
+                                             {"id": "learned_page_d_2", "action": "click", "target": "page_d.close"}],
+                                      "then": "end"}, "unknown": "stop_and_report"}}]
+    monkeypatch.setattr(engine.Runner, "wait_for_page", lambda self, c, t: engine.Runner.current_page(self, c))
+    if moves:   # the URL changed: the full page check runs, and the hidden heading stops it
+        with pytest.raises(Stop, match="not on page_d"):
+            run(tmp_path, monkeypatch, steps, desk={"title": "Step D", "moves": True})
+        return
+    r, d = run(tmp_path, monkeypatch, steps, desk={"title": "Step D"})
+    assert [c for c in d.calls if c[0] == "click"] == [("click", "Open"), ("click", "Close")]
+    assert r.audit_lines[-1]["kind"] == "flow_end"
 
 
 def test_learned_end_finishes_the_job(tmp_path, monkeypatch):
