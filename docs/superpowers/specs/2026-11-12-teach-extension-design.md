@@ -208,6 +208,12 @@ Found and fixed while testing:
 
 Seen, not changed: lessons end with an automatic **hand-over** card on the last page, which a click-only lesson does not need (decided in plan 3). Shortlisted showed 2 profiles, not 4: JobLens screens posted listings by score, so not every refill lands there (plan 3's refill script reports where each one went).
 
+## Plan 3 result (2026-11-13, run by the admin on JobLens)
+
+- **Press grant: passed.** MoveDroppedToShortListed (Discover → Dropped → Review → Approve & promote, taught twice) asked one Touch ID, "Let '…' press Approve & promote", then pressed Approve & promote on both profiles itself and ended `done`. JobLens moved them from Dropped to Promoted.
+- **Fixed during the run:** End on a hand-over card stopped with "input refused: focused window is not the verified window": the engine brought Chrome forward before stopping. End now stops without doing that (`d73a1eb`). The first runs were on the morning's build, which still turned Approve & promote into a hand-over.
+- **Not yet run live:** Repeat (the box wasn't ticked; the two rounds were taught one by one), a second run asking no grant, and Try it.
+
 ## Build order
 
 1. **Spike:** matching on JobLens Shortlisted, with the bar in rule 2. If it fails, stop and come back to the admin.
