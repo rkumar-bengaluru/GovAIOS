@@ -425,3 +425,31 @@ def test_deleted_press_leaves_max_element_risk_alone(tmp_path):
     plan = lessons.build(les, prop, {(1, j)}, {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
     after = yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"]
     assert after == before and before != "submit"
+
+
+def test_repeatable_finds_the_review_row(tmp_path):
+    les, _ = joblens(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert lessons.repeatable(prop, les) == {1: 1}   # Shortlisted, Review (0), Approve & promote
+
+
+def test_build_wraps_the_round_in_repeat(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = joblens(tmp_path)
+    _, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+    on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+    new = prop["pages"][1]["id"]
+    review = f"{new}.button_review"
+    assert on[new]["do"] == [
+        {"id": f"learned_{new}_1", "action": "click", "target": f"{new}.shortlisted"},
+        {"id": f"learned_{new}_r1", "action": "repeat", "item": review, "max": 10, "steps": [
+            {"id": f"learned_{new}_2", "action": "click", "target": review},
+            {"id": f"learned_{new}_3", "action": "click", "target": f"{new}.approve_promote"}]}]
+    from govaios import engine
+    engine.check_learned(yaml.safe_load(plan["flow"][1])["workflow"]["steps"])
+    with pytest.raises(ValueError):   # a page with no list
+        lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {0: 10})
+    with pytest.raises(ValueError):   # the first repeated line deleted
+        lessons.build(les, prop, {(1, 1)}, {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})

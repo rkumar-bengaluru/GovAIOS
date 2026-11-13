@@ -2699,8 +2699,48 @@ def test_new_app_lesson_never_re_approves_after_revoke(panel):
 
 
 def test_press_line_words():
+    from govaios import capture
+    from govaios.desktop import Node
     from govaios.panel import lesson as pl
     prop = {"pages": [{"id": "p", "steps": [{"kind": "click", "label": "Approve & promote", "target": "p.a",
-                                              "keep": True, "press": True}], "added": [], "new": True}], "bank": []}
-    html = pl.page("n", {"pages": [{"title": "T", "url": "http://localhost:8100/"}]}, prop, set(), {}, "")
+                                              "keep": True, "press": True}], "added": [], "new": True,
+                       "yaml": {"page": {"elements": {"a": {"role": "button", "name": "Approve"}}}}}], "bank": []}
+    html = pl.page("n", {"pages": [{"title": "T", "url": "http://localhost:8100/",
+                                    "tree": capture.tree(Node("document", "T"))}]}, prop, set(), {}, "")
     assert "Press: Approve &amp; promote (asks Touch ID before the first run's press)" in html
+
+
+def _rows_lesson(P):
+    """A saved lesson of one JobLens-like page: Shortlisted, then Review in a list row."""
+    from govaios import lessons
+    from govaios.desktop import Node
+    ja = _approve_job_apply(P)
+    t = Node("document", "Discover | Acme", children=[Node("tab", "Shortlisted"), *[
+        Node("row", "", children=[Node("cell", c), Node("button", "Review")]) for c in ("A", "B")]])
+    evs = [{"kind": "click", "spec": {"role": "tab", "name": "Shortlisted"}, "label": "Shortlisted", "value": "",
+            "secure": False, "sure": True, "risk": "navigate"},
+           {"kind": "click", "spec": {"role": "button", "name": "Review", "index": 0}, "label": "Review", "value": "",
+            "secure": False, "sure": True, "risk": "navigate"}]
+    return lessons.save(P.home, "job_apply", ja.digest, "on_form", [
+        {"url": "https://jobs.acme.example/discover", "title": t.name, "tree": t, "events": evs}]), ja
+
+
+def test_lesson_page_offers_repeat(cc):
+    name, _ = _rows_lesson(cc)
+    page = cc.get(f"/lesson/{name}")[1]
+    assert "Repeat from “Review” for every item on this list, until none are left, at most" in page
+    assert "<input required name='cap:0' type=number min=1 max=100 value=10>" in page
+
+
+def test_approve_with_repeat_writes_it(cc):
+    name, ja = _rows_lesson(cc)
+    p = _lesson_form(cc, name)[0]
+    before = ja.path.read_bytes()
+    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "0"})
+    assert ja.path.read_bytes() == before and _tells(cc)[-1].startswith("GOV-AIOS -> Not approved:")
+    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "5"})
+    wf = yaml.safe_load(ja.path.read_text())["workflow"]
+    on = next(s for s in wf["steps"] if s["id"] == "on_form")["on_match"]
+    do = next(c["do"] for c in on.values()
+              if isinstance(c, dict) and any(d["action"] == "repeat" for d in c.get("do", [])))
+    assert [d["action"] for d in do] == ["click", "repeat"] and do[1]["max"] == 5

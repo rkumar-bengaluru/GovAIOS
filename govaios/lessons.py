@@ -343,21 +343,45 @@ def _site(url):
     return f"https://{u.hostname.lower()}" + (f":{port}" if port not in (None, 443) else "")
 
 
-def _cases(proposal, deleted, ids, on):
-    """The on_match cases a proposal adds to a step whose cases are on; ids: the flow's step ids (grown here)."""
+def repeatable(proposal, lesson) -> dict:
+    """{page index: line index}: the first kept click on an element that sits in a list item (an ITEM_ROLES
+    container of the page's stored tree); a repeat runs from that line to the page's last kept line."""
+    out = {}
+    for i, (p, lp) in enumerate(zip(proposal["pages"], lesson["pages"])):
+        page, root = p["yaml"]["page"], studio._as_nodes(lp["tree"])[0]
+        for j, s in enumerate(p["steps"]):
+            spec = page["elements"].get(str(s.get("target")).split(".", 1)[-1]) if s["kind"] == "click" else None
+            if s["keep"] and spec is not None and "index" in spec and engine.item_candidates(root, spec, page):
+                out[i] = j
+                break
+    return out
+
+
+def _cases(proposal, deleted, ids, on, repeats=None):
+    """The on_match cases a proposal adds to a step whose cases are on; ids: the flow's step ids (grown here).
+    repeats: {page index: (line index, cap)}: that line to the page's last kept line become one repeat step."""
     out, last = {}, len(proposal["pages"]) - 1
     for i, p in enumerate(proposal["pages"]):
         if p["id"] in on or p["id"] in out:   # the flow already handles this page: its own case stays
             continue
-        do = []
+        do, rep, n = [], None, 0
+        at, cap = (repeats or {}).get(i, (None, None))
         for j, line in enumerate(p["steps"]):
+            if j == at and (not line["keep"] or (i, j) in deleted):
+                raise ValueError("the Repeat needs its first line kept")
             s = _do(line, p) if line["keep"] and (i, j) not in deleted else None
             if s:
-                k = len(do) + 1
-                while f"learned_{p['id']}_{k}" in ids:
-                    k += 1
-                ids.add(f"learned_{p['id']}_{k}")
-                do.append({"id": f"learned_{p['id']}_{k}", **s})
+                n += 1
+                while f"learned_{p['id']}_{n}" in ids:
+                    n += 1
+                ids.add(f"learned_{p['id']}_{n}")
+                s = {"id": f"learned_{p['id']}_{n}", **s}
+                if j == at:
+                    rep = {"id": f"learned_{p['id']}_r{j}", "action": "repeat", "item": s["target"], "max": cap,
+                           "steps": []}
+                    ids.add(rep["id"])
+                    do.append(rep)
+                (rep["steps"] if rep else do).append(s)
         if do:
             out[p["id"]] = {"do": do, "then": "end" if i == last else "again"}
     return out
@@ -372,11 +396,11 @@ def preview(lesson, pages_dir, bank) -> tuple[list[str], str]:
     return lines, yaml.safe_dump(_cases(proposal, set(), set(), {}), sort_keys=False)
 
 
-def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path) -> dict:
+def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path, repeats=None) -> dict:
     """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
     "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
     raw: read_bound's {path: bytes} from the digest check: the flow is built from those bytes, never re-read.
-    deleted: {(page index, line index)}; keeps: {bank line index: keep}. ValueError when it cannot be written
+    deleted: {(page index, line index)}; keeps: {bank line index: keep}; repeats: {page index: cap}. ValueError when it cannot be written
     (the bank ops are tried against bank_path's bank as it is now, writing nothing)."""
     pages_dir = Path(pages_dir)
     pages, fresh = {}, set()
@@ -403,7 +427,10 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     if step is None or step.get("action") != "classify_page":
         raise ValueError("the step this lesson belongs to is gone; teach it again")
     on = step.setdefault("on_match", {})
-    cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on)
+    can = repeatable(proposal, lesson)
+    if any(i not in can for i in repeats or {}):
+        raise ValueError("this page has no list to repeat on")
+    cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on, {i: (can[i], c) for i, c in (repeats or {}).items()})
     on.update(cases)
     n = sum(len(c["do"]) for c in cases.values())
     if any(s.get("press") and s["keep"] and (i, j) not in deleted for i, p in enumerate(proposal["pages"])

@@ -1652,7 +1652,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         back = f"/lesson/{name}"
         try:
             lesson, proposal, app, _, _ = lesson_ctx(name)
-            deleted, keeps = lesson_ui.edits(proposal, f)
+            deleted, keeps, repeats = lesson_ui.edits(proposal, f)
+        except lesson_ui.BadCap as e:
+            tell(f"Not approved: {e}.")
+            return back
         except (ValueError, OSError, KeyError, TypeError):
             return None
         fid, sandbox, pages_dir = lesson.get("flow"), lesson.get("flow") in lessons.SANDBOX, flows_dir.parent / "pages"
@@ -1681,7 +1684,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return back
         try:
             plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir,
-                                 home / applyfiles.BANK)
+                                 home / applyfiles.BANK, repeats)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
