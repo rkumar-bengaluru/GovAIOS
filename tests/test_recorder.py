@@ -149,6 +149,24 @@ def test_new_path_starts_a_page(tmp_path):
                                       "JobLens · Discover: click Shortlisted (2)"]
 
 
+def test_back_on_an_earlier_page_keeps_only_the_last_visit(tmp_path):
+    """Discover -> Applications -> Discover (the 2026-11-13 lesson): the run must end on Discover, Shortlisted kept."""
+    disc = discover_tree(Node("link", "Applications", handle="apps"), Node("tab", "Shortlisted (2)", handle="t"))
+    desk = Desk(DISCOVER, {HOME: [home_tree()], DISCOVER: [disc]})
+    r = rec(tmp_path, desk)
+    desk.hit = "apps"
+    r.handle(down("Applications", DISCOVER))
+    desk.url, desk.hit = HOME, "discover"
+    r.handle(down("Discover"))
+    desk.url, desk.hit = DISCOVER, "t"
+    r.handle(down("Shortlisted (2)", DISCOVER, "tab"))
+    pages = lessons.load(tmp_path, r.name)["pages"]
+    assert [p["url"] for p in pages] == [HOME, DISCOVER]
+    assert [e["label"] for e in pages[1]["events"]] == ["Shortlisted (2)"]
+    assert out(tmp_path)["lines"] == ["JobLens · Applications: click Discover",
+                                      "JobLens · Discover: click Shortlisted (2)"]
+
+
 def test_pause_drops_downs(tmp_path):
     desk = Desk(HOME, {HOME: [home_tree()]})
     desk.hit = "discover"

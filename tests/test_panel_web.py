@@ -2201,6 +2201,23 @@ def test_delete_only_studio_and_check_apps(cc):
     assert cc.req("/apps/delete", "POST", body={"kind": "flow", "name": "check_x"})[0] == 403   # no session
 
 
+def test_delete_app_needs_touch_id_and_shows_on_apps(cc):
+    from govaios import studio
+    studio.new_automation(cc.flows, "Acme", "https://acme.example", {"application": "chrome", "profile_directory": "P", "account": "a@x.y"})
+    app = next(a for a in list_apps(cc.flows, cc.home) if a.id == "studio_acme")
+    Approvals(cc.home / "approvals.json").approve_flow(app.id, app.digest)
+    assert "name=name value='studio_acme'><input type=hidden name=back value='/apps'>" in cc.get("/apps")[1]
+    cc.answers["prove"] = False
+    cc.post("/apps/delete", kind="flow", name="studio_acme", back="/apps")
+    assert (cc.flows / "studio_acme.yaml").exists() and cc.asked[-1] == "Delete the app studio_acme"
+    assert _log(cc.home, "setting")[-1]["decision"] == "deny"
+    cc.answers["prove"] = True
+    cc.post("/apps/delete", kind="flow", name="studio_acme", back="/apps")
+    assert not (cc.flows / "studio_acme.yaml").exists()
+    e = _log(cc.home, "setting")[-1]
+    assert (e["field"], e["channel"], e["auth"]) == ("delete", "touch_id", "biometric")
+
+
 def test_delete_symlink_refused(cc, tmp_path):
     (cc.home / "t.yaml").write_text("x")
     (cc.flows / "studio_link.yaml").symlink_to(cc.home / "t.yaml")

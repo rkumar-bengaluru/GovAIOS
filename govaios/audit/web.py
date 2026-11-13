@@ -758,7 +758,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return (f"<form method=post action=/say>{hidden(csrf)}<input type=hidden name=text value='{escape(say)}'>"
                     f"<button class=go>Run</button></form>")
         cards = "".join(f"<section class=appcard><h2>{escape(a.name)}</h2><p>{escape(a.title)}</p>"
-                        f"<p class=m>{'Last started ' + escape(last[a.id]) if last.get(a.id) else 'Never run'}</p>{ctl(a)}</section>"
+                        f"<p class=m>{'Last started ' + escape(last[a.id]) if last.get(a.id) else 'Never run'}</p>{ctl(a)}"
+                        f"{delete_form(csrf, 'flow', a.id, '/apps') if DELETABLE.fullmatch(a.id) else ''}</section>"
                         for a in apps() if a.approved)
         cc = "".join(f"<li>{ag.title}<span class=m> Governed: type /{ag.slash}</span></li>"
                      for ag in agents.AGENTS.values() if cc_roots(ag) is not None)
@@ -1380,7 +1381,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
     def apps_delete(f):
         """Delete a Studio app (studio_*, check_*) or a draft page no flow uses; its approval goes first."""
         kind, name, back = f.get("kind"), f.get("name", ""), f.get("back")
-        back = back if back in ("/", "/studio", "/approvals") else "/"
+        back = back if back in ("/", "/studio", "/approvals", "/apps") else "/"
         if not flows_dir:
             return None
         pages = flows_dir.parent / "pages"
@@ -1390,6 +1391,9 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 wid = yaml.safe_load(path.read_text())["workflow"]["id"]
             except Exception:
                 wid = name
+            if live() and panel.app.id == wid:
+                tell("Stop that app's run first, then delete it.")
+                return back
             apply = lambda: (Approvals(approvals_path).revoke_flow(wid), path.unlink())   # noqa: E731
         elif kind == "page" and PAGE_ID.fullmatch(name):
             path = pages / f"{name}.yaml"
@@ -1414,7 +1418,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if path.is_symlink() or not path.is_file():
             tell("Studio: nothing to delete there.")
             return back
-        audited("setting", {"field": "delete", "target": path.name}, apply)
+        fields = {"field": "delete", "target": path.name}
+        if kind == "flow":   # an app goes only with Touch ID
+            ok, how = auth.prove(f"Delete the app {name}", home)
+            fields.update(approver="admin", channel="touch_id", auth=how)
+            if not ok:
+                log.append("setting", decision="deny", **fields)
+                tell("Touch ID is busy. Try again." if how in ("busy", "none") else "Not deleted.")
+                return back
+        audited("setting", fields, apply)
         tell(f"{path.name} is deleted.")
         return back
 

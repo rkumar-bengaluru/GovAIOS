@@ -123,11 +123,15 @@ class Recorder:
         sure = [id(h) for h in find_all(root, spec, {"elements": {}})] == [id(n)]
         risk = lessons.level(n.role, n.name)
         key = _key(url)
-        page = next((p for p in self.doc["pages"] if p["url"] == key), None)
-        new = page is None
-        if new:   # a page's tree and title are its first snapshot's
+        pages, before = self.doc["pages"], list(self.doc["pages"])
+        page = next((p for p in pages if p["url"] == key), None)
+        if page is None:   # a page's tree and title are its first snapshot's
             page = {"url": key, "title": _title(root), "tree": _blank(root), "events": []}
-            self.doc["pages"].append(page)
+            pages.append(page)
+        elif page is not pages[-1]:   # back on an earlier page: a run does each page once, so this visit's clicks win
+            pages.remove(page)
+            page = {**page, "events": []}
+            pages.append(page)
         e = {"kind": "click", "spec": spec, "label": n.name, "value": "", "secure": False,
              "submit": risk != "navigate", "risk": risk, "sure": sure}
         page["events"].append(e)
@@ -135,11 +139,10 @@ class Recorder:
             lessons.write(self.home, self.name, self.doc)
         except OSError:   # undo in memory too, so what is shown is what is on disk
             page["events"].pop()
-            if new:
-                self.doc["pages"].pop()
+            self.doc["pages"] = before
             self.note = UNSAVED
             return
-        self.lines.append(_line(page["title"], e))
+        self.lines = [_line(p["title"], x) for p in self.doc["pages"] for x in p["events"]]
         self.note = ""
 
     def _out(self):
