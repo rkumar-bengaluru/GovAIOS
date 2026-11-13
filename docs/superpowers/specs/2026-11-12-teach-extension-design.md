@@ -193,6 +193,27 @@ Approve never implies the press grant, and the press grant is never asked twice 
 - **Drafts and pages waiting for approval** are shown beside the count ("+3 waiting") but are not counted.
 - Studio shows the count per site and the total.
 
+## Plan 2 result (2026-11-13, run by the admin on JobLens, PR #35)
+
+**Build steps 2 and 3 work end to end.** The admin paired the extension, taught Home → Discover → Shortlisted → Review → Close → Review → Close, pressed Done, named the app, approved its lesson with one Touch ID, and pressed Run: every taught click ran, through to the end.
+
+Found and fixed while testing:
+
+- **Pairing did not stick:** Chrome sends no `Origin` on the extension's GET, so the token was dropped. `/ext/state` is a POST (`27754f8`).
+- **A refused button's note vanished** on the next poll (`b7db7e3`).
+- **Teach stopped at once:** the panel's run launch takes the focus from Chrome. Teach brings Chrome to the front before pinning its window (`c209bfa`).
+- **The empty Draft was approved instead of its lesson:** signing in from the lesson tab lands on Home, and Approvals offered the bare Draft. A Draft with a waiting lesson now links to the lesson (`2a80b95`).
+- **A page visited twice merged its visits:** Discover → Applications → Discover became one Discover list that left the page midway. A page visited again keeps only the clicks of its last visit and moves to the end (`6681a2c`). Studio apps can be deleted from Apps with Touch ID (same commit, the admin's request).
+- **A click inside the Review pop-up failed the page check:** the modal hides the page's `Discover` heading from the accessibility tree. Within a taught page's steps, the same URL and title count as the same page (`224f445`).
+
+Seen, not changed: lessons end with an automatic **hand-over** card on the last page, which a click-only lesson does not need (decided in plan 3). Shortlisted showed 2 profiles, not 4: JobLens screens posted listings by score, so not every refill lands there (plan 3's refill script reports where each one went).
+
+## Plan 3 result (2026-11-13, run by the admin on JobLens)
+
+- **Press grant: passed.** MoveDroppedToShortListed (Discover → Dropped → Review → Approve & promote, taught twice) asked one Touch ID, "Let '…' press Approve & promote", then pressed Approve & promote on both profiles itself and ended `done`. JobLens moved them from Dropped to Promoted.
+- **Fixed during the run:** End on a hand-over card stopped with "input refused: focused window is not the verified window": the engine brought Chrome forward before stopping. End now stops without doing that (`d73a1eb`). The first runs were on the morning's build, which still turned Approve & promote into a hand-over.
+- **Not yet run live:** Repeat (the box wasn't ticked; the two rounds were taught one by one), a second run asking no grant, and Try it.
+
 ## Build order
 
 1. **Spike:** matching on JobLens Shortlisted, with the bar in rule 2. If it fails, stop and come back to the admin.

@@ -22,14 +22,15 @@ from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, loa
 from .audit.log import AuditLog, url_for_audit
 from .delivery import TARGETS, check_block
 from .approvals import Approvals, pages_used, read_bound
-from .policy import RISK_ORDER, decide, origin
+from .policy import RISK_ORDER, decide, origin, own
 from .runstate import Stop
 
 REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
 
 
 NO_DEST = object()
-LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over")   # what a taught page may do (Studio lessons)
+LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat")   # what a taught page may do (Studio lessons)
+ITEM_ROLES = ("row", "article")   # what a repeat round works on: one list item
 MAX_LEARNED = 10   # learned pages run within one classify_page call
 FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
@@ -39,7 +40,9 @@ LIVE_LINES = 50
 
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
-             "the browser has no window in front")
+             "the browser has no window in front", "Try it stops here")
+TRY_STOP = ("Try it stops here: the real run will press {}. Close the pop-up, or press Run: it starts from your "
+            "start page.")
 def _ends_run(e):
     m = str(e)
     return m.startswith(RUN_STOPS) or m.startswith("input refused") and "not on the target element" not in m
@@ -94,6 +97,29 @@ def find_all(root, spec, page):
     return hits
 
 
+def item_spec(spec):
+    """The item's own target spec: the row is the container, so the taught index and within do not apply."""
+    return {k: v for k, v in spec.items() if k not in ("index", "within")}
+
+
+def item_candidates(root, spec, page):
+    """List items (innermost) holding exactly one match of item_spec(spec), in walk order."""
+    spec = item_spec(spec)
+    held = [n for n in root.walk() if n.role in ITEM_ROLES and len(find_all(n, spec, page)) == 1]
+    return [n for n in held if not any(m is not n and any(x is m for x in n.walk()) for m in held)]
+
+
+def item_target(item, spec, page):
+    return find_all(item, item_spec(spec), page)[0]
+
+
+def item_label(item, target):
+    """The item's first cell or heading name, else its first other name (not the item's own, often its whole text,
+    nor the target's): for audit and messages only, never its identity."""
+    named = [n for n in item.walk() if n is not item and n is not target and n.name]
+    return next((n.name for n in named if n.role in ("cell", "heading")), named[0].name if named else "")[:200]
+
+
 def field_value(node, spec):
     v = node.text() if spec.get("text") else (node.name or node.text())
     for suffix in spec.get("strip_suffix", []):
@@ -115,7 +141,7 @@ def identify(page, root):
     return True
 
 
-def check_learned(steps):
+def check_learned(steps, pages=None):
     """A learned page case {do: [steps], then: again|end}: only the allowed actions, each with its own id."""
     ids = []
 
@@ -139,12 +165,40 @@ def check_learned(steps):
                         raise Stop(f"learned steps: {d.get('action')} not allowed")
                     ids.append(d["id"])
                     learned.add(d["id"])
+                    if d["action"] == "repeat":
+                        check_repeat(d, pages)
+                        for x in d["steps"]:
+                            ids.append(x["id"])
+                            learned.add(x["id"])
 
     learned = set()
     walk(steps)
     for i in sorted(learned):
         if ids.count(i) > 1:
             raise Stop(f"duplicate step id: {i}")
+
+
+def check_repeat(d, pages=None):
+    """pages: the flow's page schemas (Runner); without them only the item's form is checked."""
+    item = d.get("item")
+    if not (isinstance(item, str) and re.fullmatch(r"[^.]+\.[^.]+", item)) or item.startswith(("current_item.", "current_page.")):
+        raise Stop("learned steps: a repeat's item must be page.element")
+    if pages is not None and item.split(".")[1] not in pages.get(item.split(".")[0], {}).get("elements", {}):
+        raise Stop(f"learned steps: repeat item {item} is not an element of its page")
+    m = d.get("max")
+    if type(m) is not int or not 1 <= m <= 100:
+        raise Stop("learned steps: repeat max must be 1 to 100")
+    if not isinstance(d.get("steps"), list) or not d["steps"]:
+        raise Stop("learned steps: repeat has no steps")
+    for x in d["steps"]:
+        if not isinstance(x, dict) or not x.get("id"):
+            raise Stop("learned steps: a step without an id")
+        if x.get("action") == "repeat":
+            raise Stop("learned steps: a repeat cannot hold a repeat")
+        if x.get("action") not in LEARNED_ACTIONS:
+            raise Stop(f"learned steps: {x.get('action')} not allowed")
+    if d["steps"][0].get("action") != "click" or d["steps"][0].get("target") != d.get("item"):
+        raise Stop("learned steps: a repeat's first step must click its item")
 
 
 def approval_question(f, deliver):
@@ -235,7 +289,6 @@ class Runner:
         self.flow = yaml.safe_load(raw[self.flow_path])["workflow"]
         if not re.fullmatch(r"[a-z0-9_]+", str(self.flow.get("id"))):   # it becomes part of a report filename
             raise Stop("invalid flow id")
-        check_learned(self.flow["steps"])
         try:
             self.deliver = check_block(self.flow)
         except ValueError as e:
@@ -252,6 +305,7 @@ class Runner:
         self.pages = {}
         for pid in sorted(pages_used(self.flow)):
             self.pages[pid] = yaml.safe_load(raw[self.pages_dir / f"{pid}.yaml"])["page"]
+        check_learned(self.flow["steps"], self.pages)
         self.ctx = {}
 
     def _audit(self, kind, **f):
@@ -282,7 +336,7 @@ class Runner:
         return ok, how
 
     # governance gate for every side effect
-    def gate(self, action, risk, target=None, destination=NO_DEST, question=None, keep=True):
+    def gate(self, action, risk, target=None, destination=NO_DEST, question=None, keep=True, granted=False):
         """keep=False: a first-contact approval holds for this call only, never remembered (teach)."""
         if runstate.stopped(self.home):   # row 28: backs up the guard's SIGTERM
             raise Stop("emergency stop")
@@ -296,7 +350,7 @@ class Runner:
         if destination is NO_DEST:
             destination = None
         dest = url_for_audit(destination) if destination else None
-        verdict = decide({"action": action, "risk": risk, "destination": destination}, self.flow, self.approvals)
+        verdict = decide({"action": action, "risk": risk, "destination": destination, "granted": granted}, self.flow, self.approvals)
         asked, how, remember = verdict == "ask", None, False
         if asked:
             q = f"Flow '{self.flow['id']}' wants to {action}"
@@ -356,18 +410,36 @@ class Runner:
 
     def page_element(self, ref):
         """Element by schema ref, only after its page is identified (never on an unknown page)."""
-        page_id = ref.split(".")[0]
+        return self.element(ref, self.page_root(ref.split(".")[0]))
+
+    def page_root(self, page_id):
+        """A fresh snapshot, only once it is identified as page_id."""
         on = self.ctx.get("learned_on")
         if on and on[0] == page_id and self.d.current_url(self.app) == on[1]:
             # a taught pop-up hides the page's anchors: within its own case, the same URL and title is the same page
             root = self.snapshot()
             if root is not None and re.search(self.pages[page_id]["identification"].get("title_matches", ""), root.name):
                 self._audit("verify", outcome=page_id)
-                return self.element(ref, root)
+                return root
         page, root = self.wait_for_page([page_id], 10)
         if not page:
             raise Stop(f"not on {page_id}")
-        return self.element(ref, root)
+        return root
+
+    def items(self, ref):
+        """(root, page, ref's spec, the list items holding ref's element) on a fresh, identified snapshot."""
+        page_id, el_id = ref.split(".")
+        page, root = self.pages[page_id], self.page_root(page_id)
+        spec = page["elements"][el_id]
+        return root, page, spec, item_candidates(root, spec, page)
+
+    def round_element(self, ref, label):
+        """The round's click target: ref's element inside the first list item (never the taught index)."""
+        _, page, spec, cands = self.items(ref)
+        node = item_target(cands[0], spec, page) if cands else None
+        if node is None or item_label(cands[0], node) != label:
+            raise Stop("the list changed during the round")
+        return node, spec
 
     def element(self, ref, root):
         page_id, el_id = ref.split(".")
@@ -745,17 +817,108 @@ class Runner:
         """Audit ref for a target; `current_page.<el>` names the page the run classified."""
         return f"{self.ctx['page']}.{target.split('.', 1)[1]}" if target.startswith("current_page.") else target
 
+    def submit_buttons(self):
+        """Sorted names of the submit-risk elements any click step targets, nested steps and learned cases included."""
+        names = set()
+
+        def spec_of(t):
+            page, _, el = t.partition(".")
+            pages = self.pages.values() if page == "current_page" else [self.pages.get(page, {"elements": {}})]
+            return [p["elements"][el] for p in pages if el in p.get("elements", {})]
+
+        def walk(steps):
+            for s in steps:
+                if s.get("action") == "click":
+                    for e in spec_of(s.get("target", "")):
+                        if e.get("risk") == "submit":
+                            names.add(e.get("name") or e.get("name_matches", "").strip("^$"))
+                walk(s.get("steps", []))
+                for page, v in s.get("on_match", {}).items():
+                    if isinstance(v, dict) and isinstance(v.get("do"), list):
+                        walk(v["do"])
+                    elif isinstance(v, dict) and "click" in v:   # an interstitial's click
+                        walk([{"action": "click", "target": f"{page}.{v['click']}"}])
+
+        walk(self.flow["steps"])
+        return sorted(names)
+
+    def _press_grant(self, url, spec):
+        """One Touch ID lets this version of the app press its own submit buttons."""
+        names = ", ".join(self.submit_buttons()) or spec.get("name") or spec.get("name_matches", "").strip("^$")
+        ok, how = self.ask(f"Let '{self.flow.get('app') or self.flow['id']}' press {names} on {origin(url)}?",
+                           f"{self.flow['id']}: press {names}")
+        self._audit("press_grant", flow_hash=self.digest, decision="allow" if ok else "deny",
+                    approver="admin", channel="touch_id", auth=how, reason=names)
+        if not ok:
+            raise Stop("press grant busy" if how == "busy" else "press grant refused")
+        if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked while the prompt was up
+            raise Stop("revoked")
+        self.approvals.grant_presses(self.flow["id"], self.digest)
+
+    def do_repeat(self, s):
+        """A taught round on the first list item still holding s["item"], until none are left or s["max"] rounds."""
+        k, label = 0, None
+        try:
+            while k < s["max"]:
+                label = None   # set once this round has an item
+                root, page, spec, cands = self.items(s["item"])
+                if not cands:
+                    if n := len(find_all(root, item_spec(spec), page)):   # never a silent "none left"
+                        raise Stop(f"repeat: {n} {spec.get('name') or s['item']} found but none inside a row or card")
+                    break
+                c, label = len(cands), item_label(cands[0], item_target(cands[0], spec, page))
+                self.ctx["round"] = (s["item"], label)
+                try:
+                    self.steps(s["steps"])   # steps[0] clicks the item (do_click finds it in the first candidate)
+                finally:
+                    self.ctx.pop("round", None)
+                    self.step = s["id"]
+                deadline = time.time() + 10   # the item leaves once the app answers: wait as page checks wait
+                while len(self.items(s["item"])[3]) >= c:
+                    if time.time() > deadline:
+                        raise Stop(f"{label} is still on the list after its round")
+                    time.sleep(1)
+                k += 1
+                self._audit("repeat", target=label, outcome="done")
+        except Stop as e:
+            self._audit("repeat", target=label, outcome="error")
+            if _ends_run(e) or label is None:   # a run stop keeps the message the run checks; no round yet: as is
+                raise
+            raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
+        self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
+
     def do_click(self, s):
         tgt = self.ref(s["target"])
-        if tgt.startswith("current_item."):
-            node, spec = self._current_item_node(tgt.split(".", 1)[1])
-        else:
-            node, spec = self.page_element(tgt)
+        rnd = self.ctx.get("round")
+        is_round = rnd is not None and tgt == rnd[0]
+
+        def locate():
+            if tgt.startswith("current_item."):
+                return self._current_item_node(tgt.split(".", 1)[1])
+            return self.round_element(tgt, rnd[1]) if is_round else self.page_element(tgt)
+
+        node, spec = locate()
         if tgt.startswith("current_item."):
             ref = "{}.{}[{}].{}".format(*self.ctx["item_spec"], self.ctx["n"], tgt.split(".", 1)[1])
         else:
             ref = tgt
-        self.gate("click", spec["risk"], target=ref)
+        if self.flow.get("try") is True:   # before the press grant and the gate: a Try never asks to press
+            from .lessons import _CHANGE, _PAY   # lessons imports engine
+            names = (getattr(node, "name", "") or "", spec.get("name") or "", spec.get("name_matches") or "")
+            if spec["risk"] in ("submit", "payment") or any(_CHANGE.search(n) or _PAY.search(n) for n in names):
+                raise Stop(TRY_STOP.format(names[0] or names[1] or ref))
+        if spec["risk"] == "submit":
+            url = self.d.current_url(self.app)
+            fid = self.flow["id"]
+            # ask only if policy would allow the press with a grant: never prompt for a press that is denied anyway
+            if own(url) and not self.approvals.press_ok(fid, self.digest) and decide(
+                    {"action": "click", "risk": "submit", "destination": url, "granted": True},
+                    self.flow, self.approvals) != "deny":
+                self._press_grant(url, spec)
+            self.gate("click", "submit", target=ref, destination=url,
+                      granted=self.approvals.press_ok(fid, self.digest))
+        else:
+            self.gate("click", spec["risk"], target=ref)
         before = self.d.current_url(self.app)
         # open_link: go to the link's own address instead of clicking it (JobLens's two-line titles defeat the
         # click-point check); same site only, so it never reaches a destination the click could not
@@ -767,8 +930,7 @@ class Runner:
                 self._go(url)
             else:
                 self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
-                node, spec = (self._current_item_node(tgt.split(".", 1)[1]) if tgt.startswith("current_item.")
-                              else self.page_element(tgt))   # positions changed after scrolling
+                node, spec = locate()   # positions changed after scrolling
                 self._act("click", self.d.click, node, target=ref)
             if "verify_page" not in s:
                 return
@@ -916,7 +1078,8 @@ class Runner:
         choice = reply.get("card")
         if choice not in CARDS[kind]:
             raise Stop("bad reply")
-        self._act("raise_pinned", self.d.raise_pinned)
+        if choice != "end":   # End stops the run: no window is needed, and a failed raise would hide "ended by admin"
+            self._act("raise_pinned", self.d.raise_pinned)
         return choice
 
     def teach(self, step_id, offered=False):
@@ -1083,12 +1246,17 @@ class Runner:
     def do_attach_file(self, s):
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
         from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
+        if self.flow.get("try") is True:   # a Try never attaches: it stops before the real run would
+            node, spec = self.page_element(self.ref(s["target"]))
+            raise Stop(TRY_STOP.format(getattr(node, "name", "") or spec.get("name") or self.ref(s["target"])))
         a, ref = self.ctx.get("apply") or self._new_apply(), self.ref(s["target"])   # a learned attach: no fill before
         a["yourself"].append("Resume/CV")   # until attached: a stop from here on leaves it on the result card
         self.write_result()
         p = cv_path(a["bank"], user_home())
         if p is not None:
             _, spec = self.page_element(ref)
+            if spec["risk"] in ("submit", "payment"):
+                raise Stop(f"{ref}: attach on a {spec['risk']} element denied")
             if RISK_ORDER.index(spec["risk"]) > RISK_ORDER.index(self.flow["permissions"]["max_element_risk"]):
                 raise Stop(f"{ref}: risk {spec['risk']} above the flow's ceiling")   # never click it
             try:

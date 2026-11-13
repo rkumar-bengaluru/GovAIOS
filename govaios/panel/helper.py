@@ -86,7 +86,7 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
             sent = len(ls)
             if done:
                 send({"id": n, "done": True, "code": run.code, "summary": run.summary,
-                      "stopped_reason": run.stopped_reason})
+                      "stopped_reason": run.stopped_reason, "reason": run.reason})
                 return
             time.sleep(0.05)
 
@@ -94,7 +94,9 @@ def _child(cmd_r, evt_w, root, home, open_cmd, say_cmd, admin):
         if not (isinstance(flow, str) and isinstance(ticket, str) and _HEX64.fullmatch(ticket)):
             return None
         real = os.path.realpath(flow)
-        ok = (os.path.dirname(real) == root and real.endswith(".yaml") and os.path.isfile(real)
+        # the apps folder, or the panel's Try copy (<home>/try/flows): still only with a ticket the panel made
+        ok = (os.path.dirname(real) in (root, os.path.realpath(os.path.join(home, "try", "flows")))
+              and real.endswith(".yaml") and os.path.isfile(real)
               and os.path.isfile(os.path.join(home, "tickets", ticket)))   # only a ticket the panel made
         return real if ok else None
 
@@ -276,7 +278,7 @@ class Helper:
                     r._lines.append(str(ev["line"]))
                 elif ev.get("done"):
                     r.code, r.summary = ev.get("code"), ev.get("summary")
-                    r.stopped_reason, r.error = ev.get("stopped_reason"), ev.get("error")
+                    r.stopped_reason, r.error, r.reason = ev.get("stopped_reason"), ev.get("error"), ev.get("reason")
                     r.done = True
         for r in list(self._runs.values()):   # child exited: nothing will finish these
             with r._lock:
@@ -290,6 +292,7 @@ class HelperRun:
     def __init__(self, helper, n, flow_path, ticket, inputs=None):
         self._helper, self._n, self.flow, self.ticket, self.inputs = helper, n, str(flow_path), ticket, inputs
         self.done, self.code, self.summary, self.stopped_reason, self.error = False, None, None, None, None
+        self.reason = None   # the app's own "STOPPED: <why>" line, as RunLaunch reads it
         self._lines, self._lock = [], threading.Lock()
 
     def lines(self):

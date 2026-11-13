@@ -528,7 +528,7 @@ def test_attach_run_stop_during_dialog_propagates(tmp_path, exc):
 def test_attach_submit_rated_target_never_clicked(tmp_path):
     desk = CvDesk()
     r, entries, err = attach(tmp_path, desk, page=PAGE.replace("name: Attach, risk: modify", "name: Attach, risk: submit"))
-    assert err is not None and "above the flow" in str(err)
+    assert err is not None and "attach on a submit element denied" in str(err)
     assert ("choose_file",) not in desk.calls and "Attach" not in desk.values.get("clicked", [])
 
 

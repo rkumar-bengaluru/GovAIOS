@@ -1,4 +1,5 @@
 """Studio lessons: saved recordings become a proposed change (pages, steps, bank ops); nothing is written."""
+import copy
 import os
 
 import pytest
@@ -333,8 +334,8 @@ def test_joblens_lesson_builds_two_cases(tmp_path):
     assert list(on) == ["joblens_applications", new, "unknown"]
     assert on["joblens_applications"] == {"do": [{"id": "learned_joblens_applications_1", "action": "click",
                                                   "target": "joblens_applications.discover"}], "then": "again"}
-    assert [s["action"] for s in on[new]["do"]] == ["click", "click", "hand_over"] and on[new]["then"] == "end"
-    assert [s.get("target") for s in on[new]["do"]] == [f"{new}.shortlisted", f"{new}.button_review", None]
+    assert [s["action"] for s in on[new]["do"]] == ["click", "click", "click"] and on[new]["then"] == "end"
+    assert [s.get("target") for s in on[new]["do"]] == [f"{new}.shortlisted", f"{new}.button_review", f"{new}.approve_promote"]
     pg = prop["pages"][1]["yaml"]["page"]
     assert [pg["elements"][a] for a in pg["identification"]["anchors"]][0]["name"] == "Discover"
     assert not lessons._identifies(pg, studio._as_nodes(les["pages"][0]["tree"])[0])   # never the home page
@@ -344,6 +345,163 @@ def test_preview_lines_and_yaml(tmp_path):
     les, _ = joblens(tmp_path)
     lines, text = lessons.preview(les, tmp_path / "pages", Bank())
     assert lines == ["JobLens · Applications: click Discover", "JobLens · Discover: click Shortlisted",
-                     "JobLens · Discover: click Review", "JobLens · Discover: you press Approve & promote"]
+                     "JobLens · Discover: click Review", "JobLens · Discover: press Approve & promote"]
     cases = yaml.safe_load(text)
     assert list(cases) == ["joblens_applications", "localhost_joblens"] and cases["localhost_joblens"]["then"] == "end"
+
+
+def _approve_lesson(tmp_path, url, label="Approve & promote", risk="submit"):
+    t = tree(Node("button", "Review"), Node("button", label))
+    ev2 = {**ev("click", "button", label), "risk": risk, "sure": True}
+    return lesson(tmp_path, page(t, [{**ev("click", "button", "Review"), "risk": "navigate", "sure": True}, ev2], url))
+
+
+def test_own_app_submit_click_is_a_press(tmp_path):
+    les, app = joblens(tmp_path)
+    from govaios.approvals import read_bound
+    d, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    steps = prop["pages"][1]["steps"]
+    assert steps[2]["kind"] == "click" and steps[2]["press"] is True
+    assert all(s["kind"] != "hand_over" for p in prop["pages"] for s in p["steps"])
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    on = next(s for s in wf["steps"] if s["id"] == "on_start")["on_match"]
+    do = on[prop["pages"][1]["id"]]["do"]
+    assert do[-1]["action"] == "click" and do[-1]["target"].endswith(".approve_promote")
+    assert wf["permissions"]["max_element_risk"] == "submit"
+
+
+def test_outside_submit_click_stays_hand_over(tmp_path):
+    les = _approve_lesson(tmp_path, "https://acme.example/jobs")
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(p) == ["click", "hand_over"] and "press" not in p["steps"][1]
+
+
+def test_payment_click_on_own_app_stays_hand_over(tmp_path):
+    les = _approve_lesson(tmp_path, "http://localhost:8100/pay", "Pay now", "payment")
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(p) == ["click", "hand_over"] and "press" not in p["steps"][1]
+
+
+def test_build_never_lowers_max_element_risk(tmp_path):
+    les, app = joblens(tmp_path)
+    from govaios.approvals import read_bound
+    doc = yaml.safe_load(app.read_bytes())
+    doc["workflow"]["permissions"]["max_element_risk"] = "submit"
+    app.write_text(yaml.safe_dump(doc, sort_keys=False))
+    _, raw = read_bound(app, tmp_path / "pages")
+    for lp in les["pages"]:
+        lp["events"] = [e for e in lp["events"] if e.get("risk") == "navigate"]
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    assert yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"] == "submit"
+
+
+def test_mixed_lesson_presses_own_page_and_hands_over_outside_page(tmp_path):
+    def pg(url, title):
+        t = tree(Node("button", "Review"), Node("button", "Approve & promote"), title=title)
+        return page(t, [{**ev("click", "button", "Review"), "risk": "navigate", "sure": True},
+                        {**ev("click", "button", "Approve & promote"), "risk": "submit", "sure": True}], url)
+    les = lesson(tmp_path, pg("http://localhost:8100/discover", "Own"), pg("https://acme.example/jobs", "Jobs | Acme"))
+    a, b = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(a) == ["click", "click"] and a["steps"][1]["press"] is True
+    assert kinds(b) == ["click", "hand_over"] and "press" not in b["steps"][1]
+    assert b["steps"][-1]["keep"]   # the closing hand-over is there (the outside page's own submit)
+
+
+def test_panel_port_submit_click_stays_hand_over(tmp_path):
+    les = _approve_lesson(tmp_path, "http://127.0.0.1:8765/discover")
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(p) == ["click", "hand_over"] and "press" not in p["steps"][1]
+
+
+def test_deleted_press_leaves_max_element_risk_alone(tmp_path):
+    les, app = joblens(tmp_path)
+    from govaios.approvals import read_bound
+    _, raw = read_bound(app, tmp_path / "pages")
+    before = yaml.safe_load(raw[app])["workflow"]["permissions"]["max_element_risk"]
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    j = next(j for j, s in enumerate(prop["pages"][1]["steps"]) if s.get("press"))
+    plan = lessons.build(les, prop, {(1, j)}, {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    after = yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"]
+    assert after == before and before != "submit"
+
+
+def test_repeatable_finds_the_review_row(tmp_path):
+    les, _ = joblens(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert lessons.repeatable(prop, les) == {1: 1}   # Shortlisted, Review (0), Approve & promote
+
+
+def test_build_wraps_the_round_in_repeat(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = joblens(tmp_path)
+    _, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+    on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+    new = prop["pages"][1]["id"]
+    review = f"{new}.button_review"
+    assert on[new]["do"] == [
+        {"id": f"learned_{new}_1", "action": "click", "target": f"{new}.shortlisted"},
+        {"id": f"learned_{new}_r1", "action": "repeat", "item": review, "max": 10, "steps": [
+            {"id": f"learned_{new}_2", "action": "click", "target": review},
+            {"id": f"learned_{new}_3", "action": "click", "target": f"{new}.approve_promote"}]}]
+    from govaios import engine
+    engine.check_learned(yaml.safe_load(plan["flow"][1])["workflow"]["steps"])
+    with pytest.raises(ValueError):   # a page with no list
+        lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {0: 10})
+    with pytest.raises(ValueError):   # the first repeated line deleted
+        lessons.build(les, prop, {(1, 1)}, {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+
+
+def test_repeat_refusals_and_same_bytes(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = joblens(tmp_path)
+    _, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+
+    def build(prop=prop, **kw):
+        return lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", **kw)
+    a, b = build(repeats={1: 10}), build(repeats={1: 10})   # tick, untick, tick: same flow, same digest
+    assert build(repeats={1: 10})["flow"] == a["flow"] and a["flow"] == b["flow"] and a["digest"] == b["digest"]
+    assert build()["flow"] != a["flow"]
+    hand = copy.deepcopy(prop)
+    hand["pages"][1]["steps"].append({"kind": "hand_over", "label": "You check", "target": "x.y", "keep": True})
+    with pytest.raises(ValueError, match="hand-over"):
+        build(hand, repeats={1: 10})
+    assert build(hand)   # without the repeat it is fine
+    on = next(s for s in yaml.safe_load(a["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+    assert prop["pages"][1]["id"] in on
+    raw2 = {**raw, app: a["flow"][1]}   # the flow now handles that page
+    with pytest.raises(ValueError, match="already in the app"):
+        lessons.build(les, prop, set(), {}, raw2, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+
+
+def test_closing_hand_over_follows_the_repeat(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = joblens(tmp_path)
+    _, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    prop["pages"][1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None, "keep": True})
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+    on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+    do = on[prop["pages"][1]["id"]]["do"]
+    assert [d["action"] for d in do] == ["click", "repeat", "hand_over"]
+    assert [d["action"] for d in do[1]["steps"]] == ["click", "click"]
+
+
+def test_known_page_storing_navigate_is_raised_to_submit_when_the_recorder_reads_submit(tmp_path):
+    les, app = joblens(tmp_path)
+    pages = tmp_path / "pages"
+    p = lessons.propose(les, pages, Bank())["pages"][1]
+    page = p["yaml"]["page"]
+    page["elements"]["approve_promote"]["risk"] = "navigate"
+    (pages / f"{p['id']}.yaml").write_text(yaml.safe_dump({"page": page}))
+    p2 = lessons.propose(les, pages, Bank())["pages"][1]
+    assert not p2["new"]
+    press = next(s for s in p2["steps"] if s.get("press"))
+    assert press["target"] == f"{p2['id']}.approve_promote"
+    assert p2["yaml"]["page"]["elements"]["approve_promote"]["risk"] == "submit"
+    assert "approve_promote" in p2["added"]   # shown as "Adds to this page", and the page is rewritten

@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from .observer import NO_FILE
-from .policy import RISK_ORDER, origin
+from .policy import RISK_ORDER, origin, own
 from . import capture, engine, formfill, studio
 from .approvals import pages_used, read_bound
 from .formfill import FIELD_ROLES, Field, new_key, normalize, restricted
@@ -233,9 +233,17 @@ def propose(lesson, pages_dir, bank) -> dict:
                 text += f" via the button {evs[i - 1].get('label') or '?'!r}"   # the button replay clicks
             if kind == "click" and not k:
                 line = {"kind": "click", "label": "not sure what this was", "target": None, "keep": False}
-            elif kind == "click" and max((r for r in (look["elements"][k].get("risk"), ev.get("risk")) if r in RISK_ORDER),
-                                         key=RISK_ORDER.index, default=None) in ("submit", "payment"):   # the higher rating
-                line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
+            elif kind == "click" and (rating := max((r for r in (look["elements"][k].get("risk"), ev.get("risk"))
+                                                     if r in RISK_ORDER), key=RISK_ORDER.index, default=None)) \
+                    in ("submit", "payment"):   # the higher rating
+                if rating == "submit" and own(lp["url"]):   # own app: the engine asks the press grant before the first press
+                    if look["elements"][k].get("risk") != "submit":   # the written page must carry it, and show the change
+                        look["elements"][k]["risk"] = "submit"
+                        if not new and k in page["elements"] and k not in added:
+                            added.append(k)
+                    line = {"kind": "click", "label": text, "target": target, "keep": keep, "press": True}
+                else:
+                    line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
             elif kind == "click":
                 line = {"kind": "click", "label": text, "target": target,
                         "keep": keep}   # a click after the hand over is dead: replay stops there
@@ -260,7 +268,8 @@ def propose(lesson, pages_dir, bank) -> dict:
                     ops.append(op)
         out_pages.append({"id": pid, "new": new, "yaml": {"page": page}, "steps": steps,
                           "added": added})
-    if out_pages and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[-1]["steps"]):
+    if out_pages and not all(own(lp["url"]) for lp in lesson["pages"]) \
+            and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[-1]["steps"]):
         out_pages[-1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None,
                                        "keep": True})
     return {"pages": out_pages, "bank": ops}
@@ -301,7 +310,7 @@ def _ids(steps):
         out += _ids(s.get("steps", []))
         for v in s.get("on_match", {}).values():
             if isinstance(v, dict) and isinstance(v.get("do"), list):
-                out += [d.get("id") for d in v["do"] if isinstance(d, dict)]
+                out += _ids([d for d in v["do"] if isinstance(d, dict)])   # a repeat's sub-steps too
     return out
 
 
@@ -338,21 +347,49 @@ def _site(url):
     return f"https://{u.hostname.lower()}" + (f":{port}" if port not in (None, 443) else "")
 
 
-def _cases(proposal, deleted, ids, on):
-    """The on_match cases a proposal adds to a step whose cases are on; ids: the flow's step ids (grown here)."""
+def repeatable(proposal, lesson) -> dict:
+    """{page index: line index}: the first kept click on an element that sits in a list item (an ITEM_ROLES
+    container of the page's stored tree); a repeat runs from that line to the page's last kept line."""
+    out = {}
+    for i, (p, lp) in enumerate(zip(proposal["pages"], lesson["pages"])):
+        page, root = p["yaml"]["page"], studio._as_nodes(lp["tree"])[0]
+        for j, s in enumerate(p["steps"]):
+            spec = page["elements"].get(str(s.get("target")).split(".", 1)[-1]) if s["kind"] == "click" else None
+            if s["keep"] and spec is not None and "index" in spec and engine.item_candidates(root, spec, page):
+                out[i] = j
+                break
+    return out
+
+
+def _cases(proposal, deleted, ids, on, repeats=None):
+    """The on_match cases a proposal adds to a step whose cases are on; ids: the flow's step ids (grown here).
+    repeats: {page index: (line index, cap)}: that line to the page's last kept line become one repeat step."""
     out, last = {}, len(proposal["pages"]) - 1
     for i, p in enumerate(proposal["pages"]):
         if p["id"] in on or p["id"] in out:   # the flow already handles this page: its own case stays
             continue
-        do = []
+        do, rep, n = [], None, 0
+        at, cap = (repeats or {}).get(i, (None, None))
         for j, line in enumerate(p["steps"]):
+            if j == at and (not line["keep"] or (i, j) in deleted):
+                raise ValueError("the Repeat needs its first line kept")
             s = _do(line, p) if line["keep"] and (i, j) not in deleted else None
+            if s and rep and s["action"] == "hand_over":
+                if line.get("target"):
+                    raise ValueError("a repeat cannot include a hand-over")
+                rep = None   # the automatic closing hand-over comes after the repeat, not in its round
             if s:
-                k = len(do) + 1
-                while f"learned_{p['id']}_{k}" in ids:
-                    k += 1
-                ids.add(f"learned_{p['id']}_{k}")
-                do.append({"id": f"learned_{p['id']}_{k}", **s})
+                n += 1
+                while f"learned_{p['id']}_{n}" in ids:
+                    n += 1
+                ids.add(f"learned_{p['id']}_{n}")
+                s = {"id": f"learned_{p['id']}_{n}", **s}
+                if j == at:
+                    rep = {"id": f"learned_{p['id']}_r{j}", "action": "repeat", "item": s["target"], "max": cap,
+                           "steps": []}
+                    ids.add(rep["id"])
+                    do.append(rep)
+                (rep["steps"] if rep else do).append(s)
         if do:
             out[p["id"]] = {"do": do, "then": "end" if i == last else "again"}
     return out
@@ -361,17 +398,17 @@ def _cases(proposal, deleted, ids, on):
 def preview(lesson, pages_dir, bank) -> tuple[list[str], str]:
     """What the extension shows while teaching: a line per kept click or hand-over, and the cases' YAML."""
     proposal = propose(lesson, pages_dir, bank)
-    lines = [f"{lp['title']}: {'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
+    lines = [f"{lp['title']}: {'press' if s.get('press') else 'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
              for p, lp in zip(proposal["pages"], lesson["pages"]) for s in p["steps"]
              if s["keep"] and s["target"] and s["kind"] in ("click", "hand_over")]   # never the closing hand-over
     return lines, yaml.safe_dump(_cases(proposal, set(), set(), {}), sort_keys=False)
 
 
-def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path) -> dict:
+def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path, repeats=None) -> dict:
     """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
     "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
     raw: read_bound's {path: bytes} from the digest check: the flow is built from those bytes, never re-read.
-    deleted: {(page index, line index)}; keeps: {bank line index: keep}. ValueError when it cannot be written
+    deleted: {(page index, line index)}; keeps: {bank line index: keep}; repeats: {page index: cap}. ValueError when it cannot be written
     (the bank ops are tried against bank_path's bank as it is now, writing nothing)."""
     pages_dir = Path(pages_dir)
     pages, fresh = {}, set()
@@ -398,9 +435,19 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     if step is None or step.get("action") != "classify_page":
         raise ValueError("the step this lesson belongs to is gone; teach it again")
     on = step.setdefault("on_match", {})
-    cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on)
+    can = repeatable(proposal, lesson)
+    if any(i not in can for i in repeats or {}):
+        raise ValueError("this page has no list to repeat on")
+    if any(proposal["pages"][i]["id"] in on for i in repeats or {}):
+        raise ValueError("this page is already in the app; Repeat not added")
+    cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on, {i: (can[i], c) for i, c in (repeats or {}).items()})
     on.update(cases)
     n = sum(len(c["do"]) for c in cases.values())
+    if any(s.get("press") and s["keep"] and (i, j) not in deleted for i, p in enumerate(proposal["pages"])
+           if p["id"] in cases for j, s in enumerate(p["steps"])):   # a kept press needs submit; never lower it
+        perms = wf["permissions"]
+        if RISK_ORDER.index(perms["max_element_risk"]) < RISK_ORDER.index("submit"):
+            perms["max_element_risk"] = "submit"
     if "unknown" in on:
         on["unknown"] = on.pop("unknown")   # stays the last case, as written by hand
     dests = wf.setdefault("destinations", [])

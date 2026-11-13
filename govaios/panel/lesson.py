@@ -17,13 +17,21 @@ def digest(proposal):
     return hashlib.sha256(json.dumps(proposal, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
+class BadCap(ValueError):
+    """The Repeat's cap is not a whole number from 1 to 100."""
+
+
 def edits(proposal, form):
-    """(deleted {(page, line)}, keeps {bank line: keep}) from the posted form; ValueError on anything else."""
-    deleted, keeps = set(), {}
+    """(deleted {(page, line)}, keeps {bank line: keep}, repeats {page: cap}) from the posted form; ValueError
+    on anything else."""
+    deleted, keeps, repeats = set(), {}, {}
     for k, v in form.items():
         if k in ("csrf", "name", "p"):
             continue
         d, b = re.fullmatch(r"del:([0-9]{1,3}):([0-9]{1,3})", k), re.fullmatch(r"keep:([0-9]{1,3})", k)
+        r = re.fullmatch(r"(rep|cap):([0-9]{1,3})", k)
+        if r and int(r[2]) < len(proposal["pages"]) and (r[1] == "cap" or v == "1"):
+            continue   # read below: a cap counts only when its Repeat is ticked
         if d and v == "1" and int(d[1]) < len(proposal["pages"]) \
                 and int(d[2]) < len(proposal["pages"][int(d[1])]["steps"]):
             deleted.add((int(d[1]), int(d[2])))
@@ -31,7 +39,13 @@ def edits(proposal, form):
             keeps[int(b[1])] = v
         else:
             raise ValueError("unknown field")
-    return deleted, keeps
+    for k, v in form.items():
+        if k.startswith("rep:") and v == "1":
+            cap = form.get("cap:" + k[4:], "")
+            if not re.fullmatch(r"[0-9]{1,3}", cap) or not 1 <= int(cap) <= 100:
+                raise BadCap("the Repeat's limit must be a whole number from 1 to 100")
+            repeats[int(k[4:])] = int(cap)
+    return deleted, keeps, repeats
 
 
 def _bank_line(i, o):
@@ -48,17 +62,24 @@ def _bank_line(i, o):
 def page(name, lesson, proposal, flow_cases, others, hidden):
     """The page body. flow_cases: page ids the flow's step already handles (their steps are not added);
     others: {known page gaining elements: names of the other apps that use it}."""
-    secs = []
+    secs, can = [], lessons.repeatable(proposal, lesson)
     for i, p in enumerate(proposal["pages"]):
         lp = lesson["pages"][i] if i < len(lesson["pages"]) else {}
         rows = []
         for j, s in enumerate(p["steps"]):
             text = f"{WORDS.get(s['kind'], escape(s['kind']))}: {escape(str(s.get('label'))[:200])}"
+            if s.get("press"):
+                text = f"Press: {escape(str(s.get('label'))[:200])} (asks Touch ID before the first run's press)"
             if s["kind"] == "hand_fill" or not s["keep"]:
                 note = " (not replayed)" if s["kind"] != "hand_fill" else ""
                 rows.append(f"<li>{text}{note}</li>")
             else:
                 rows.append(f"<li>{text} <label><input type=checkbox name='del:{i}:{j}' value=1> Delete</label></li>")
+        offer = ""
+        if (j := can.get(i)) is not None and p["id"] not in flow_cases:
+            offer = (f"<p class=note><label><input type=checkbox name='rep:{i}' value=1> Repeat from "
+                     f"“{escape(str(p['steps'][j]['label'])[:200])}” for every item on this list, until none are left, "
+                     f"at most <input required name='cap:{i}' type=number min=1 max=100 value=10> times.</label></p>")
         added = (f"<p class=m>Adds to this page: {escape(', '.join(p['added']))}</p>" if p["added"] else "")
         handled = ("<p class=note>The flow already handles this page: these steps are not added.</p>"
                    if p["id"] in flow_cases else "")
@@ -68,7 +89,7 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
         secs.append(f"<section class=appcard><h2><code>{escape(p['id'])}</code> · {'new' if p['new'] else 'known'}"
                     f"</h2><p class=m>{escape(str(lp.get('title') or '')[:200])} "
                     f"<code>{escape(str(lp.get('url') or '')[:200])}</code></p>{added}{handled}"
-                    f"<ol>{''.join(rows)}</ol></section>")
+                    f"{offer}<ol>{''.join(rows)}</ol></section>")
     last = proposal["pages"][-1] if proposal["pages"] else None
     if last and lesson.get("flow") not in lessons.SANDBOX and (last["id"] in flow_cases or not any(
             s["keep"] and lessons._do(s, last) for s in last["steps"])):
@@ -82,6 +103,10 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
             f"until you approve it with Touch ID.</p>"
             f"<form method=post action=/lesson/approve>{hidden}<input type=hidden name=name value='{escape(name)}'>"
             f"<input type=hidden name=p value='{digest(proposal)}'>{''.join(secs)}{bank}"
-            f"<p><button class=go>Approve with Touch ID</button></p></form>"
+            f"<p><button class=go>Approve with Touch ID</button></p>"
+            + ("" if lesson.get("flow") in lessons.SANDBOX else
+               "<p class=note>Try it runs the steps once on the real pages and stops before any button that changes "
+               "something.</p><p><button formaction=/lesson/try>Try it</button></p>")
+            + "</form>"
             f"<form method=post action=/lesson/discard>{hidden}<input type=hidden name=name value='{escape(name)}'>"
             f"<button>Discard</button></form>")

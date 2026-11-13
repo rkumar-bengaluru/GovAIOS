@@ -238,3 +238,17 @@ def test_helper_run_refuses_bad_inputs(h):
     r.start()
     assert wait(lambda: r.done) and r.code == 0
     assert 'GOVAIOS_RUN_INPUT={"job_url": "u"}' in calls(h)[0]
+
+
+@pytest.fixture
+def stop_line(monkeypatch):   # before h: the helper's child takes the environment at fork
+    monkeypatch.setenv("FAKE_LINE", "STOPPED: Try it stops here: x")
+
+
+def test_helper_runs_the_try_copy_and_forwards_the_stop_line(stop_line, h):
+    t = h.tmp / "home" / "try" / "flows"
+    t.mkdir(parents=True)
+    (t / "try_x.yaml").write_text("x")
+    r = h.run(t / "try_x.yaml", TICKET)
+    r.start()
+    assert wait(lambda: r.done) and r.code == 0 and r.error is None and r.reason == "Try it stops here: x"

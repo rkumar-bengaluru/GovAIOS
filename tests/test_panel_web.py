@@ -2696,3 +2696,174 @@ def test_new_app_lesson_never_re_approves_after_revoke(panel):
     panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
     assert "Approve Approve shortlisted first" in _tells(panel)[-1] and len(panel.asked) == n
     assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+# --- Try it (plan 3 Task 5)
+
+TRY_ID = "try_studio_approve_shortlisted"
+
+
+def _try(P):
+    """A Teach lesson for the Draft app, a session open, then Try it: the lesson's name."""
+    _open(P)
+    name = _done(P)
+    P.post("/lesson/try", name=name, p=_lesson_form(P, name)[0])
+    return name
+
+
+def test_try_runs_a_copy_and_leaves_the_app_alone(panel):
+    _open(panel)
+    name = _done(panel)
+    flow, lesson = panel.flows / "studio_approve_shortlisted.yaml", panel.home / "lessons" / name
+    before, lesson_before, snap = _snap(panel), lesson.read_bytes(), Approvals(panel.home / "approvals.json").snapshot()
+    panel.post("/lesson/try", name=name, p=_lesson_form(panel, name)[0])
+    assert panel.asked.count("Try Approve shortlisted once") == 1 and panel.asked[-1] == "Try Approve shortlisted once"
+    r = panel.made[-1]
+    assert r.started and Path(r.flow_path).parent == panel.home / "try" / "flows"
+    assert Path(r.flow_path).name == f"{TRY_ID}.yaml"
+    assert _snap(panel) == before and flow.read_bytes() == before[flow] and lesson.read_bytes() == lesson_before
+    now = Approvals(panel.home / "approvals.json").snapshot()
+    assert {k: v for k, v in now["flows"].items() if k != TRY_ID} == snap["flows"] and TRY_ID in now["flows"]
+    wf = yaml.safe_load(Path(r.flow_path).read_text())["workflow"]
+    assert wf["id"] == TRY_ID and wf["try"] is True
+    for d in (panel.home / "try", panel.home / "try" / "flows", panel.home / "try" / "pages"):
+        assert d.stat().st_mode & 0o777 == 0o700
+    e = _log(panel.home, "lesson")[-1]
+    assert (e["outcome"], e["flow"], e["target"]) == ("try", "studio_approve_shortlisted", name)
+
+
+def test_built_try_flow_starts_at_open_start(panel):
+    _try(panel)
+    steps = yaml.safe_load(Path(panel.made[-1].flow_path).read_text())["workflow"]["steps"]
+    real = yaml.safe_load((panel.flows / "studio_approve_shortlisted.yaml").read_text())["workflow"]["steps"]
+    i = next(i for i, x in enumerate(real) if x["id"] == "open_start")   # after the account check on Google
+    assert steps[:i + 1] == real[:i + 1] and steps[i]["action"] == "navigate"
+    assert steps[i]["value"] == "http://localhost:8100/"
+
+
+def test_try_approval_is_revoked_after_the_run(panel):
+    _try(panel)
+    r = panel.made[-1]
+    assert TRY_ID in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+    r.done, r.code, r.reason = True, 1, "Try it stops here: the real run will press Approve & promote."
+    _tick(panel)
+    assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+    e = _log(panel.home, "approval")[-1]
+    assert (e["flow"], e["outcome"], e["reason"]) == (TRY_ID, "revoked", "try run ended")
+    assert "Approve shortlisted finished: Try it stops here" in _tells(panel)[-1]
+
+
+def test_try_refused_touch_id_starts_nothing(panel):
+    panel.answers["prove"] = False
+    _try(panel)
+    assert panel.asked[-1] == "Try Approve shortlisted once" and panel.made == []
+    assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+    assert _log(panel.home, "lesson")[-1]["decision"] == "deny"
+
+
+def test_try_refused_while_a_run_is_live(panel):
+    _running(panel)
+    name = _done(panel)
+    n = len(panel.asked)
+    panel.post("/lesson/try", name=name, p=_lesson_form(panel, name)[0])
+    assert len(panel.asked) == n and len(panel.made) == 1 and not (panel.home / "try").exists()
+    assert _tells(panel)[-1] == "GOV-AIOS -> Stop the running app first, then try it."
+
+
+def test_try_approvals_revoked_at_panel_start(panel):
+    ap = Approvals(panel.home / "approvals.json")
+    ap.approve_flow("try_x", "d" * 64)
+    real = dict(ap.snapshot()["flows"])
+    srv = make_server(panel.home, flows_dir=panel.flows, launcher=panel.launcher, speak=lambda t: None, tick_s=None)
+    srv.server_close()
+    now = ap.snapshot()["flows"]
+    assert "try_x" not in now and now == {k: v for k, v in real.items() if k != "try_x"} and now
+    e = _log(panel.home, "approval")[-1]
+    assert (e["flow"], e["outcome"], e["reason"]) == ("try_x", "revoked", "try run ended")
+
+
+def test_try_approval_is_revoked_when_the_report_raises(panel, monkeypatch):
+    from govaios import applyfiles
+    _try(panel)
+    r = panel.made[-1]
+    r.done, r.code = True, 1
+    monkeypatch.setattr(applyfiles, "remove", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        panel.srv.panel.tick()
+    assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_try_prefix_is_reserved_in_the_apps_folder(panel):
+    (panel.flows / "hand.yaml").write_text("workflow:\n  id: try_hand\n  app: Hand\n  name: Hand\n  version: 1\n"
+                                           "  permissions: { allow: [launch_application], max_element_risk: read }\n"
+                                           "  steps:\n    - { id: go, action: launch_application }\n")
+    assert not any(a.id == "try_hand" for a in list_apps(panel.flows, panel.home))
+
+
+def test_lesson_page_has_try_it(panel):
+    name = _done(panel)
+    page = _lesson_form(panel, name)[1]
+    assert ("Try it runs the steps once on the real pages and stops before any button that changes something."
+            in page and "formaction=/lesson/try" in page)
+
+
+def test_press_line_words():
+    from govaios import capture
+    from govaios.desktop import Node
+    from govaios.panel import lesson as pl
+    prop = {"pages": [{"id": "p", "steps": [{"kind": "click", "label": "Approve & promote", "target": "p.a",
+                                              "keep": True, "press": True}], "added": [], "new": True,
+                       "yaml": {"page": {"elements": {"a": {"role": "button", "name": "Approve"}}}}}], "bank": []}
+    html = pl.page("n", {"pages": [{"title": "T", "url": "http://localhost:8100/",
+                                    "tree": capture.tree(Node("document", "T"))}]}, prop, set(), {}, "")
+    assert "Press: Approve &amp; promote (asks Touch ID before the first run's press)" in html
+
+
+def _rows_lesson(P):
+    """A saved lesson of one JobLens-like page: Shortlisted, then Review in a list row."""
+    from govaios import lessons
+    from govaios.desktop import Node
+    ja = _approve_job_apply(P)
+    t = Node("document", "Discover | Acme", children=[Node("tab", "Shortlisted"), *[
+        Node("row", "", children=[Node("cell", c), Node("button", "Review")]) for c in ("A", "B")]])
+    evs = [{"kind": "click", "spec": {"role": "tab", "name": "Shortlisted"}, "label": "Shortlisted", "value": "",
+            "secure": False, "sure": True, "risk": "navigate"},
+           {"kind": "click", "spec": {"role": "button", "name": "Review", "index": 0}, "label": "Review", "value": "",
+            "secure": False, "sure": True, "risk": "navigate"}]
+    return lessons.save(P.home, "job_apply", ja.digest, "on_form", [
+        {"url": "https://jobs.acme.example/discover", "title": t.name, "tree": t, "events": evs}]), ja
+
+
+def test_lesson_page_offers_repeat(cc):
+    name, _ = _rows_lesson(cc)
+    page = cc.get(f"/lesson/{name}")[1]
+    assert "Repeat from “Review” for every item on this list, until none are left, at most" in page
+    assert "<input required name='cap:0' type=number min=1 max=100 value=10>" in page
+
+
+def test_approve_with_repeat_writes_it(cc):
+    name, ja = _rows_lesson(cc)
+    p = _lesson_form(cc, name)[0]
+    before = ja.path.read_bytes()
+    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "0"})
+    assert ja.path.read_bytes() == before and _tells(cc)[-1].startswith("GOV-AIOS -> Not approved:")
+    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "5"})
+    wf = yaml.safe_load(ja.path.read_text())["workflow"]
+    on = next(s for s in wf["steps"] if s["id"] == "on_form")["on_match"]
+    do = next(c["do"] for c in on.values()
+              if isinstance(c, dict) and any(d["action"] == "repeat" for d in c.get("do", [])))
+    assert [d["action"] for d in do] == ["click", "repeat", "hand_over"] and do[1]["max"] == 5
+
+
+def test_no_repeat_offer_on_a_page_the_flow_has():
+    from govaios import capture
+    from govaios.desktop import Node
+    from govaios.panel import lesson as pl
+    t = Node("document", "T", children=[Node("row", "", children=[Node("button", "Review")])])
+    prop = {"pages": [{"id": "p", "steps": [{"kind": "click", "label": "Review", "target": "p.b", "keep": True}],
+                       "added": [], "new": False,
+                       "yaml": {"page": {"elements": {"b": {"role": "button", "name": "Review", "index": 0}}}}}],
+            "bank": []}
+    les = {"pages": [{"title": "T", "url": "https://a.example/", "tree": capture.tree(t)}]}
+    assert "name='cap:0'" in pl.page("n", les, prop, set(), {}, "")
+    assert "name='cap:0'" not in pl.page("n", les, prop, {"p"}, {}, "")
