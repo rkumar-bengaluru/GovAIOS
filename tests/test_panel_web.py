@@ -2738,12 +2738,12 @@ def test_approve_with_repeat_writes_it(cc):
     before = ja.path.read_bytes()
     cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "0"})
     assert ja.path.read_bytes() == before and _tells(cc)[-1].startswith("GOV-AIOS -> Not approved:")
-    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "5", "del:0:2": "1"})
+    cc.post("/lesson/approve", name=name, p=p, **{"rep:0": "1", "cap:0": "5"})
     wf = yaml.safe_load(ja.path.read_text())["workflow"]
     on = next(s for s in wf["steps"] if s["id"] == "on_form")["on_match"]
     do = next(c["do"] for c in on.values()
               if isinstance(c, dict) and any(d["action"] == "repeat" for d in c.get("do", [])))
-    assert [d["action"] for d in do] == ["click", "repeat"] and do[1]["max"] == 5
+    assert [d["action"] for d in do] == ["click", "repeat", "hand_over"] and do[1]["max"] == 5
 
 
 def test_no_repeat_offer_on_a_page_the_flow_has():

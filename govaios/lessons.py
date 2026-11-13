@@ -370,8 +370,10 @@ def _cases(proposal, deleted, ids, on, repeats=None):
             if j == at and (not line["keep"] or (i, j) in deleted):
                 raise ValueError("the Repeat needs its first line kept")
             s = _do(line, p) if line["keep"] and (i, j) not in deleted else None
-            if s and at is not None and j >= at and s["action"] == "hand_over":
-                raise ValueError("a repeat cannot include a hand-over")
+            if s and rep and s["action"] == "hand_over":
+                if line.get("target"):
+                    raise ValueError("a repeat cannot include a hand-over")
+                rep = None   # the automatic closing hand-over comes after the repeat, not in its round
             if s:
                 n += 1
                 while f"learned_{p['id']}_{n}" in ids:

@@ -468,7 +468,7 @@ def test_repeat_refusals_and_same_bytes(tmp_path):
     assert build(repeats={1: 10})["flow"] == a["flow"] and a["flow"] == b["flow"] and a["digest"] == b["digest"]
     assert build()["flow"] != a["flow"]
     hand = copy.deepcopy(prop)
-    hand["pages"][1]["steps"].append({"kind": "hand_over", "label": "You check", "target": None, "keep": True})
+    hand["pages"][1]["steps"].append({"kind": "hand_over", "label": "You check", "target": "x.y", "keep": True})
     with pytest.raises(ValueError, match="hand-over"):
         build(hand, repeats={1: 10})
     assert build(hand)   # without the repeat it is fine
@@ -477,3 +477,16 @@ def test_repeat_refusals_and_same_bytes(tmp_path):
     raw2 = {**raw, app: a["flow"][1]}   # the flow now handles that page
     with pytest.raises(ValueError, match="already in the app"):
         lessons.build(les, prop, set(), {}, raw2, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+
+
+def test_closing_hand_over_follows_the_repeat(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = joblens(tmp_path)
+    _, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    prop["pages"][1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None, "keep": True})
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+    on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+    do = on[prop["pages"][1]["id"]]["do"]
+    assert [d["action"] for d in do] == ["click", "repeat", "hand_over"]
+    assert [d["action"] for d in do[1]["steps"]] == ["click", "click"]
