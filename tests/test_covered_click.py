@@ -14,10 +14,10 @@ COVERED = "input refused: click point is not on the target element (hit AXGroup 
 class Desk(FakeDesktop):
     def __init__(self, covered, err=COVERED):
         super().__init__([])
-        self.covered, self.err = covered, err
+        self.covered, self.err, self.url = covered, err, SITE + "/"
 
     def current_url(self, app):
-        return SITE + "/"
+        return self.url
 
     def click(self, node):
         if self.covered:
@@ -29,7 +29,7 @@ class Desk(FakeDesktop):
         return N("document", "Home", children=[N("link", "Products")])
 
 
-def go(tmp_path, monkeypatch, desk, choices, run_id="r1"):
+def go(tmp_path, monkeypatch, desk, choices, run_id="r1", on_card=lambda: None):
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
     monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
     monkeypatch.setattr(engine.auth, "approve", lambda q, r, h: (True, "biometric"))
@@ -45,7 +45,7 @@ def go(tmp_path, monkeypatch, desk, choices, run_id="r1"):
         "destinations": [SITE], "steps": [{"id": "go", "action": "click", "target": "home.products"}]}}))
     r = Runner(flows / "ae.yaml", desk, tmp_path)
     seen = []
-    r.card = lambda kind, label, tick=None: (seen.append((kind, label)), choices.pop(0) if run_id else None)[1]
+    r.card = lambda kind, label, tick=None: (seen.append((kind, label)), on_card(), choices.pop(0) if run_id else None)[2]
     r.approvals.approve_flow("ae", r.digest)
     r.approvals.approve_destination("ae", SITE)
     try:
@@ -81,3 +81,11 @@ def test_other_refusals_never_ask(tmp_path, monkeypatch, err):
 def test_a_cli_run_stops_as_before(tmp_path, monkeypatch):
     seen, err = go(tmp_path, monkeypatch, Desk(covered=1), [], run_id=None)
     assert err == COVERED
+
+
+def test_closing_a_full_page_ad_that_finished_the_click_carries_on(tmp_path, monkeypatch):
+    d = Desk(covered=1)
+    went_on = lambda: setattr(d, "url", SITE + "/products#google_vignette")   # closing the ad finished the click
+    seen, err = go(tmp_path, monkeypatch, d, ["continue"], on_card=went_on)
+    assert err is None and ("click", "Products") not in d.calls   # never clicked again on the next page
+    assert "\"outcome\":\"done_by_cover\"" in (tmp_path / "audit.jsonl").read_text()

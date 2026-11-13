@@ -888,7 +888,7 @@ class Runner:
             raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
         self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
 
-    def _click_uncovered(self, node, locate, ref):
+    def _click_uncovered(self, node, locate, ref, before):
         """Click; if something unrelated covers the target (a pop-up, an ad, a banner), the admin closes it in
         Chrome and presses Continue, and the click is checked again. GOV-AIOS never clicks the cover itself."""
         from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
@@ -903,6 +903,11 @@ class Runner:
                     raise
                 if choice == "end":
                     raise Stop("ended by admin") from None
+                now = urlsplit(self.d.current_url(self.app) or "")
+                if (now.netloc, now.path) != (urlsplit(before or "").netloc, urlsplit(before or "").path):
+                    # closing a full-page ad finishes the click it held back: the page is already the next one
+                    self._audit("action", action="click", target=ref, outcome="done_by_cover")
+                    return None
                 node, _ = locate()   # the page may have moved once the cover closed
 
     def do_click(self, s):
@@ -949,7 +954,7 @@ class Runner:
             else:
                 self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
                 node, spec = locate()   # positions changed after scrolling
-                self._click_uncovered(node, locate, ref)
+                self._click_uncovered(node, locate, ref, before)
             if "verify_page" not in s:
                 return
             page, _ = self.wait_for_page([s["verify_page"]], s.get("timeout_seconds", 15))
