@@ -490,3 +490,18 @@ def test_closing_hand_over_follows_the_repeat(tmp_path):
     do = on[prop["pages"][1]["id"]]["do"]
     assert [d["action"] for d in do] == ["click", "repeat", "hand_over"]
     assert [d["action"] for d in do[1]["steps"]] == ["click", "click"]
+
+
+def test_known_page_storing_navigate_is_raised_to_submit_when_the_recorder_reads_submit(tmp_path):
+    les, app = joblens(tmp_path)
+    pages = tmp_path / "pages"
+    p = lessons.propose(les, pages, Bank())["pages"][1]
+    page = p["yaml"]["page"]
+    page["elements"]["approve_promote"]["risk"] = "navigate"
+    (pages / f"{p['id']}.yaml").write_text(yaml.safe_dump({"page": page}))
+    p2 = lessons.propose(les, pages, Bank())["pages"][1]
+    assert not p2["new"]
+    press = next(s for s in p2["steps"] if s.get("press"))
+    assert press["target"] == f"{p2['id']}.approve_promote"
+    assert p2["yaml"]["page"]["elements"]["approve_promote"]["risk"] == "submit"
+    assert "approve_promote" in p2["added"]   # shown as "Adds to this page", and the page is rewritten

@@ -237,6 +237,10 @@ def propose(lesson, pages_dir, bank) -> dict:
                                                      if r in RISK_ORDER), key=RISK_ORDER.index, default=None)) \
                     in ("submit", "payment"):   # the higher rating
                 if rating == "submit" and own(lp["url"]):   # own app: the engine asks the press grant before the first press
+                    if look["elements"][k].get("risk") != "submit":   # the written page must carry it, and show the change
+                        look["elements"][k]["risk"] = "submit"
+                        if not new and k in page["elements"] and k not in added:
+                            added.append(k)
                     line = {"kind": "click", "label": text, "target": target, "keep": keep, "press": True}
                 else:
                     line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
