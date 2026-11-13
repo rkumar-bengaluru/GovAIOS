@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Own apps are hosts `localhost` and `127.0.0.1` (any port except the panel's 8765, as `recorder.OWN`/`PANEL_PORT`). One constant: `policy.OWN_HOSTS = ("localhost", "127.0.0.1")`; `recorder.OWN` is replaced by it.
+- Own apps are hosts `localhost` and `127.0.0.1` (any port except the panel's 8765). One constant each, in `policy`: `OWN_HOSTS = ("localhost", "127.0.0.1")` and `PANEL_PORT = 8765`. `recorder.OWN`/`recorder.PANEL_PORT` and `cli.AGENT_PORT` import them; no second `8765` literal is left in `govaios/`.
 - **Submit-level presses happen only on own-app pages, and only with that app's press grant for its current digest.** On any other origin a submit click is denied, as today. A **payment** click is denied on every site, always (never asked).
 - **The three Touch IDs stay separate** (rule 4): Try it, Approve, press grant. The prompt names which one it is: `"Try <app> once"`, the existing approve text, `"Let '<app>' press <names> on <site>?"`.
 - Every press and every repeat round is in the audit log. Nothing is removed from it.
@@ -23,9 +23,9 @@
 
 ## Rulings made while planning (to report to the admin)
 
-- **The repeat is offered on the lesson page, not in the side panel.** Why: the extension's Done already opens the lesson page, where steps are deleted and approved. Cost if wrong: the side panel later gains the same offer, reading `/ext/state`.
-- **Only the shrinking repeat ("until none are left, at most N") is built.** A round whose item is still first on the list afterwards stops the run (`"<label> is still on the list after its round"`), so it never loops on one item. The "first N" form for lists that don't shrink is parked in `docs/backlog.md`. Why: it is the acceptance test, and spec rule 1 forbids index-based rounds.
-- **No automatic hand-over card when every page of the lesson is on the admin's own apps** (the card the admin met on 2026-11-13). Outside-site lessons keep it.
+- **SPEC CHANGE, needs the admin's OK before Task 4: the repeat is offered on the lesson page, not in the side panel** (spec Goal 4 says side panel). Why: engineering. The offer needs the whole page's stored tree and the kept lines (`repeatable`), which exist only after Done, and this plan does not change the extension. The lesson page is where the admin approves anyway, so the offer sits at the top of it, above the steps, and Approve is on the same page. **One place only:** the lesson page stays the only place a repeat and its cap are set. If the side panel later says anything about repeats, it only says "Repeat is offered after Done"; it never sets a cap. If the admin says no, Task 4 moves to a plan that changes the extension; Tasks 1–3 are unchanged.
+- **Only the shrinking repeat ("until none are left, at most N") is built.** A round after which the list did not shrink stops the run (`"<label> is still on the list after its round"`), so it never loops on one item. The "first N" form for lists that don't shrink is parked in `docs/backlog.md`. Why: it is the acceptance test, and spec rule 1 forbids index-based rounds.
+- **No automatic hand-over card when every page of the lesson is on the admin's own apps** (the card the admin met on 2026-11-13). The card existed because outside-site submits are the admin's to press; on own apps the press grant replaces it. What the admin sees instead: the run's normal end, the Home line `"<app> finished: done"` and the spoken "the <app> flow is complete" (`web.report`), as every finished run has today. Outside-site lessons keep the card.
 - **Items are `row` or `article` containers** (`roles.yaml`), the nearest one holding exactly one match of the target.
 - **Try it runs a private copy** of the built lesson (`<home>/try/flows/try_<app id>.yaml` plus its pages, workflow id `try_<app id>`, `try: true`). The approval for that copy is revoked when the run ends, so the Touch ID covers one run of the exact draft.
 
@@ -122,19 +122,22 @@
   - `test_repeat_does_every_row_until_none_left`: 3 rows → 3 rounds in row order (re-found each time), audit labels `["Ada", "Ben", "Cy"]`, a closing `none_left` entry, and the flow's next step runs.
   - `test_repeat_ends_when_none_left`: 0 rows plus a text "No profiles" → no click, `none_left` with `"0 done"`.
   - `test_repeat_cap_stops_at_max`: 5 rows, `max: 2` → 2 rounds, `cap`.
-  - `test_repeat_stops_on_a_row_that_did_not_go`: the second row's approve leaves it in place → Stop `"repeat stopped on Ben after 1 done: Ben is still on the list after its round"`.
+  - `test_repeat_stops_on_a_row_that_did_not_go`: the second row's approve leaves it in place → Stop `"repeat stopped on Ben after 1 done: Ben is still on the list after its round"` (checked right after round 2; round 2 is not audited `done`).
   - `test_repeat_shape_checked_at_load`: `max: 0`, `max: 101`, a nested repeat, an empty `steps`, or a first step that does not click `item` each raise `Stop` from `check_learned`, with a message naming the problem.
   - `test_repeat_round_click_is_the_item_s_own_button`: the round's first click lands on the first row's Review even though the page element carries `index: 1`.
+  - `test_repeat_with_duplicate_names_does_each_row`: 3 rows all labelled "Ada" → 3 rounds, 3 `done` entries, `none_left`; no false "still on the list" stop.
+  - `test_repeat_duplicate_name_that_did_not_go_stops`: 2 rows labelled "Ada", the first one's approve fails to remove it → Stop `"repeat stopped on Ada after 0 done: Ada is still on the list after its round"`.
+  - `test_repeat_clicks_the_item_once_per_round`: the FakeDesktop counts clicks on Review: exactly one per round (`do_repeat` never clicks the item itself).
 - [ ] **Step 2: Run it.** Expected: FAIL.
-- [ ] **Step 3: Implement `do_repeat`** by rule 1. Each round:
+- [ ] **Step 3: Implement `do_repeat`** by rule 1. **Identity is the container, never its text**: the label is for the audit and messages only. Each round:
   1. Run the page check for `item`'s page, the same way `page_element` does.
   2. The candidates are the `ITEM_ROLES` nodes (innermost first) holding exactly one match of the item's spec without `index`, in walk order.
   3. None → `none_left`.
-  4. Otherwise take the first one. If its label equals the previous round's, stop with the error above.
-  5. Set `ctx["round"] = (page_id, el_id, label)`, run `self.steps(s["steps"])`, then pop `ctx["round"]`.
+  4. The round's item is the **first** candidate; remember the candidate count `c`. Set `ctx["round"] = (page_id, el_id)` (position 0 among candidates), run `self.steps(s["steps"])`, then pop `ctx["round"]`.
+  5. Check it went: run the page check again and count the candidates the same way. Wait for it as page checks wait today (the row leaves after JobLens answers). If the count is still not lower than `c`, stop with `"<label> is still on the list after its round"`. Only then audit the round `done`. (A shrinking list loses one item per round; this does not depend on names being unique. A list that grew meanwhile also stops, which is the safe side.)
   6. A `Stop` inside becomes `Stop(f"repeat stopped on {label} after {k} done: {e}")`, after the error audit.
 
-  In `do_click`, when `ctx["round"]` is set and the target is its element, the node is that item's own match, re-found by label in a fresh snapshot, both before and after `scroll_into_view`. `check_learned` accepts `repeat` in `do` lists and validates its shape. Its sub-steps' ids count toward the duplicate check.
+  **The first sub-step is the item click; `do_repeat` never clicks it itself.** In `do_click`, when `ctx["round"]` is set and the target is its element, the node is the target match inside the **first candidate container** of a fresh snapshot (the same rule as step 2), both before and after `scroll_into_view`. Later sub-steps (the pop-up's Approve) are found as usual. `check_learned` accepts `repeat` in `do` lists and validates its shape: `steps[0]` must be a `click` on `item`. Its sub-steps' ids count toward the duplicate check.
 - [ ] **Step 4: Run the whole suite.** Expected: all pass.
 - [ ] **Step 5: Commit** `feat(engine): repeat a taught round on every list item until none are left`.
 
@@ -149,7 +152,7 @@
 **Interfaces:**
 - Consumes: the `repeat` syntax and `ITEM_ROLES` (Task 3).
 - Produces: `lessons.repeatable(proposal, lesson) -> {page index: line index}`. A page is repeatable at the first kept click line whose element carries `index` and sits in an `ITEM_ROLES` container of the page's stored tree. The repeat runs from that line to the end of the page's kept lines.
-- Produces: `lesson_ui.edits(proposal, form)` returns `(deleted, keeps, repeats)`, where `repeats = {page index: cap}` comes from the form fields `rep:<i>=1` and `cap:<i>=<1..100>`. A bad cap raises `ValueError`. `build(..., repeats=None)` and `_cases(..., repeats=None)` wrap those lines into one `repeat` step with id `learned_<page>_r<k>`.
+- Produces: `lesson_ui.edits(proposal, form)` returns `(deleted, keeps, repeats)`, where `repeats = {page index: cap}` comes from the form fields `rep:<i>=1` and `cap:<i>=<1..100>`. A bad cap raises `ValueError`. The cap input carries `min=1 max=100 required`, so the browser refuses a bad value before posting; the server's `Not approved:` (which reloads the page, as every lesson-page refusal does today) is the backstop. `build(..., repeats=None)` and `_cases(..., repeats=None)` wrap those lines into one `repeat` step with id `learned_<page>_r<k>`, where `k` is the line index of the first repeated line: ticking, unticking and ticking again builds the same flow and digest.
 
 - [ ] **Step 1: Failing tests.**
   - `test_repeatable_finds_the_review_row`: the JobLens tree (two `row`s, each with Review). Lines are Shortlisted, Review (index 0), Approve & promote, so `repeatable` gives `{0: 1}`.
@@ -178,8 +181,12 @@
   4. `approve_flow("try_<id>", digest)`, then `start_run` on that app.
   5. Audit kind `lesson`, `outcome="try"`.
 
-  When the panel sees any `try_` run end, it calls `revoke_flow` on it. The real app's flow, pages, bank and approvals are untouched.
-- Engine: when `self.flow.get("try") is True`, `do_click` stops before any click whose element risk is `submit`/`payment`, **or** whose name matches `lessons._CHANGE`/`_PAY`, with `Stop(f"Try it stops here: the real run will press {name}.")`. That message counts as a normal end in the run's card, not a failure.
+  **Refused while any run is live** (`live()`), with `"Stop the running app first, then try it."`: only one run exists at a time, so the shared try tree is never replaced under a running Try.
+  **Revocation, concrete triggers:** (a) `web.report()`, which already runs once when a run is done (from `tick`), calls `revoke_flow(panel.app.id)` when that id starts with `try_`; (b) at panel start, every approval whose id starts with `try_` is revoked (a panel that died mid-Try). Both audited as kind `approval`, `outcome="revoked"`, `reason="try run ended"`.
+  **Audit:** a Try run is a real run under its own workflow id `try_<id>`: its run start, clicks and stop are in the audit log like any run, so the admin can see how far it got.
+  **What Try leaves behind:** it opens a real Review pop-up and stops there. The real Run starts with its `open_start` navigate step, which reloads the start page, so a pop-up Try left open is gone. The stop line says so: `"Try it stops here: the real run will press {name}. Close the pop-up, or press Run: it starts from your start page."`
+  The real app's flow, pages, bank and approvals are untouched.
+- Engine: when `self.flow.get("try") is True`, `do_click` stops before any click whose element risk is `submit`/`payment`, **or** whose name matches `lessons._CHANGE`/`_PAY`, with the stop line above. That message counts as a normal end in the run's card, not a failure.
 - Lesson page: the line `Try it runs the steps once on the real pages and stops before any button that changes something.` above the **Try it** button.
 
 - [ ] **Step 1: Failing tests.**
@@ -188,6 +195,9 @@
   - `test_try_runs_a_copy_and_leaves_the_app_alone` (panel): POST `/lesson/try` asks exactly `"Try Approve shortlisted once"`, starts a run whose flow path is under `<home>/try/flows/`, and leaves the real flow file bytes, the approvals for the real app and the lesson file unchanged.
   - `test_try_approval_is_revoked_after_the_run` (panel): after the fake run ends, `try_studio_approve_shortlisted` is not in approvals.
   - `test_try_refused_touch_id_starts_nothing`.
+  - `test_try_refused_while_a_run_is_live` (panel): no Touch ID asked, nothing written under `<home>/try/`.
+  - `test_try_approvals_revoked_at_panel_start` (panel): an approvals file holding `try_x` → after `make_server`, `try_x` is gone and the real apps' approvals are kept.
+  - `test_built_try_flow_starts_at_open_start` (panel): the try flow's first step is the `open_start` navigate of the real app.
 - [ ] **Step 2: Run them.** Expected: FAIL.
 - [ ] **Step 3: Implement.** Reuse `approve_lesson`'s checks by moving them into one helper both handlers call. Do not copy them.
 - [ ] **Step 4: Run the whole suite.** Expected: all pass.
@@ -204,10 +214,10 @@
 - `scripts/refill_shortlisted.py [--n 4]` (n in 1..10):
   1. POST `n` test listings to `http://127.0.0.1:8100/api/discover/listings`, the endpoint `delivery.TARGETS["joblens"]` already names. Use `delivery.send`. Never any other host.
   2. Each listing is `{"title": "GOV-AIOS test profile <stamp>-<i>", "source": "GOV-AIOS test", "company": "Test Co", "url": "http://localhost/test/<stamp>-<i>", "jd_text": <a fixed ≥ MIN_JD_CHARS test description>}`. `<stamp>` is the UTC time `YYYYmmddHHMMSS`, so JobLens never sees a duplicate.
-  3. Poll `GET /api/discover/listings/<id>` every 2 s, up to 120 s.
-  4. Print one line per listing: `<id> <status>`. Then print `shortlisted: <n>` from `GET /api/discover/listings/counts`.
-  5. Exit 0 if every listing has a status, 1 if JobLens is unreachable.
-- [ ] **Step 1: Failing test** (`tests/test_refill.py`, with `send` and the GETs stubbed): `test_refill_posts_unique_test_listings_to_joblens_only` checks for 4 POSTs, all to `127.0.0.1:8100`, with distinct titles and urls and `source == "GOV-AIOS test"`, and the printed lines. `test_refill_unreachable_exits_1`.
+  3. Before posting, read `shortlisted` from `GET /api/discover/listings/counts`. JobLens screens each listing with its model (`stages.quick_stage`: `shortlisted` if the quick score ≥ the admin's `quick_threshold`, else `screened_out`; a listing with a JD may then move on to the fit stage), so a posted listing is **not** guaranteed to land in Shortlisted, and each one costs JobLens model calls.
+  4. Poll `GET /api/discover/listings/<id>` every 2 s, up to 120 s, until each listing's status is no longer `new`. Print one line per listing: `<id> <status> <reason>`.
+  5. Read `shortlisted` again and print `shortlisted: <before> -> <after>`. **Exit 0 only if `after - before == n`**. Otherwise exit 1 with `"only <k> of <n> reached Shortlisted; JobLens screened the rest (reasons above). Teach on what is there, or lower Quick threshold in JobLens's Discover settings for the test."` Exit 2 if JobLens is unreachable. The script never changes JobLens settings.
+- [ ] **Step 1: Failing test** (`tests/test_refill.py`, with `send` and the GETs stubbed): `test_refill_posts_unique_test_listings_to_joblens_only` checks for 4 POSTs, all to `127.0.0.1:8100`, with distinct titles and urls and `source == "GOV-AIOS test"`, and the printed lines. `test_refill_unreachable_exits_2`. `test_refill_fails_when_screened_out`: 2 of 4 come back `screened_out` → exit 1 and the message above. `test_refill_waits_past_new`: a listing `new` on the first poll, `shortlisted` on the second, counts it.
 - [ ] **Step 2: Run it.** Expected: FAIL.
 - [ ] **Step 3: Implement.** Use stdlib only (`urllib`), as `delivery.send` does.
 - [ ] **Step 4: Run the whole suite.** Expected: all pass.
@@ -220,10 +230,10 @@
 
 - [ ] **Step 1: The admin runs it.**
   1. Rebuild and install.
-  2. Run `.venv/bin/python scripts/refill_shortlisted.py --n 4`.
+  2. Run `.venv/bin/python scripts/refill_shortlisted.py --n 4`, then look at Shortlisted in Chrome. **Stop if it shows fewer than 2 profiles** (one to teach on, at least one for Run): a repeat on an empty list would "pass" with `none_left` and 0 done. Write down the count.
   3. In Chrome: Teach on `http://localhost:8100/`, then Discover → Shortlisted → Review (first profile) → Approve & promote, then Done, naming it `Approve shortlisted`.
   4. On the lesson page: tick **Repeat**, optionally press **Try it** (it stops at Approve & promote), then **Approve**.
-  5. **Run**: one press-grant Touch ID, then every remaining shortlisted profile is approved.
+  5. **Run**: one press-grant Touch ID, then every remaining shortlisted profile is approved. Pass means the audit's `done` rounds equal the count from step 2 minus 1, and Shortlisted then shows 0.
   6. Run again: no grant asked.
 
   Paste the result.
