@@ -761,22 +761,26 @@ class Runner:
                         if e.get("risk") == "submit":
                             names.add(e.get("name") or e.get("name_matches", "").strip("^$"))
                 walk(s.get("steps", []))
-                for v in s.get("on_match", {}).values():
+                for page, v in s.get("on_match", {}).items():
                     if isinstance(v, dict) and isinstance(v.get("do"), list):
                         walk(v["do"])
+                    elif isinstance(v, dict) and "click" in v:   # an interstitial's click
+                        walk([{"action": "click", "target": f"{page}.{v['click']}"}])
 
         walk(self.flow["steps"])
         return sorted(names)
 
-    def _press_grant(self, url):
+    def _press_grant(self, url, spec):
         """One Touch ID lets this version of the app press its own submit buttons."""
-        names = ", ".join(self.submit_buttons())
+        names = ", ".join(self.submit_buttons()) or spec.get("name") or spec.get("name_matches", "").strip("^$")
         ok, how = self.ask(f"Let '{self.flow.get('app') or self.flow['id']}' press {names} on {origin(url)}?",
                            f"{self.flow['id']}: press {names}")
         self._audit("press_grant", flow_hash=self.digest, decision="allow" if ok else "deny",
                     approver="admin", channel="touch_id", auth=how, reason=names)
         if not ok:
             raise Stop("press grant busy" if how == "busy" else "press grant refused")
+        if not self.approvals.flow_ok(self.flow["id"], self.digest):   # revoked while the prompt was up
+            raise Stop("revoked")
         self.approvals.grant_presses(self.flow["id"], self.digest)
 
     def do_click(self, s):
@@ -792,8 +796,11 @@ class Runner:
         if spec["risk"] == "submit":
             url = self.d.current_url(self.app)
             fid = self.flow["id"]
-            if own(url) and not self.approvals.press_ok(fid, self.digest):
-                self._press_grant(url)
+            # ask only if policy would allow the press with a grant: never prompt for a press that is denied anyway
+            if own(url) and not self.approvals.press_ok(fid, self.digest) and decide(
+                    {"action": "click", "risk": "submit", "destination": url, "granted": True},
+                    self.flow, self.approvals) != "deny":
+                self._press_grant(url, spec)
             self.gate("click", "submit", target=ref, destination=url,
                       granted=self.approvals.press_ok(fid, self.digest))
         else:
@@ -1131,6 +1138,8 @@ class Runner:
         p = cv_path(a["bank"], user_home())
         if p is not None:
             _, spec = self.page_element(ref)
+            if spec["risk"] in ("submit", "payment"):
+                raise Stop(f"{ref}: attach on a {spec['risk']} element denied")
             if RISK_ORDER.index(spec["risk"]) > RISK_ORDER.index(self.flow["permissions"]["max_element_risk"]):
                 raise Stop(f"{ref}: risk {spec['risk']} above the flow's ceiling")   # never click it
             try:
