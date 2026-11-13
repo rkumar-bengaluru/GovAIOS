@@ -306,7 +306,7 @@ def _ids(steps):
         out += _ids(s.get("steps", []))
         for v in s.get("on_match", {}).values():
             if isinstance(v, dict) and isinstance(v.get("do"), list):
-                out += [d.get("id") for d in v["do"] if isinstance(d, dict)]
+                out += _ids([d for d in v["do"] if isinstance(d, dict)])   # a repeat's sub-steps too
     return out
 
 

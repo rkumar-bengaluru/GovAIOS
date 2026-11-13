@@ -95,15 +95,20 @@ def find_all(root, spec, page):
     return hits
 
 
+def item_spec(spec):
+    """The item's own target spec: the row is the container, so the taught index and within do not apply."""
+    return {k: v for k, v in spec.items() if k not in ("index", "within")}
+
+
 def item_candidates(root, spec, page):
-    """List items (innermost) holding exactly one match of spec without its index, in walk order."""
-    spec = {k: v for k, v in spec.items() if k != "index"}
+    """List items (innermost) holding exactly one match of item_spec(spec), in walk order."""
+    spec = item_spec(spec)
     held = [n for n in root.walk() if n.role in ITEM_ROLES and len(find_all(n, spec, page)) == 1]
     return [n for n in held if not any(m is not n and any(x is m for x in n.walk()) for m in held)]
 
 
 def item_target(item, spec, page):
-    return find_all(item, {k: v for k, v in spec.items() if k != "index"}, page)[0]
+    return find_all(item, item_spec(spec), page)[0]
 
 
 def item_label(item, target):
@@ -132,7 +137,7 @@ def identify(page, root):
     return True
 
 
-def check_learned(steps):
+def check_learned(steps, pages=None):
     """A learned page case {do: [steps], then: again|end}: only the allowed actions, each with its own id."""
     ids = []
 
@@ -157,7 +162,7 @@ def check_learned(steps):
                     ids.append(d["id"])
                     learned.add(d["id"])
                     if d["action"] == "repeat":
-                        check_repeat(d)
+                        check_repeat(d, pages)
                         for x in d["steps"]:
                             ids.append(x["id"])
                             learned.add(x["id"])
@@ -169,7 +174,13 @@ def check_learned(steps):
             raise Stop(f"duplicate step id: {i}")
 
 
-def check_repeat(d):
+def check_repeat(d, pages=None):
+    """pages: the flow's page schemas (Runner); without them only the item's form is checked."""
+    item = d.get("item")
+    if not (isinstance(item, str) and re.fullmatch(r"[^.]+\.[^.]+", item)) or item.startswith(("current_item.", "current_page.")):
+        raise Stop("learned steps: a repeat's item must be page.element")
+    if pages is not None and item.split(".")[1] not in pages.get(item.split(".")[0], {}).get("elements", {}):
+        raise Stop(f"learned steps: repeat item {item} is not an element of its page")
     m = d.get("max")
     if type(m) is not int or not 1 <= m <= 100:
         raise Stop("learned steps: repeat max must be 1 to 100")
@@ -274,7 +285,6 @@ class Runner:
         self.flow = yaml.safe_load(raw[self.flow_path])["workflow"]
         if not re.fullmatch(r"[a-z0-9_]+", str(self.flow.get("id"))):   # it becomes part of a report filename
             raise Stop("invalid flow id")
-        check_learned(self.flow["steps"])
         try:
             self.deliver = check_block(self.flow)
         except ValueError as e:
@@ -291,6 +301,7 @@ class Runner:
         self.pages = {}
         for pid in sorted(pages_used(self.flow)):
             self.pages[pid] = yaml.safe_load(raw[self.pages_dir / f"{pid}.yaml"])["page"]
+        check_learned(self.flow["steps"], self.pages)
         self.ctx = {}
 
     def _audit(self, kind, **f):
@@ -412,18 +423,19 @@ class Runner:
         return root
 
     def items(self, ref):
-        """(page_id, el_id, the list items holding ref's element) on a fresh, identified snapshot."""
+        """(root, page, ref's spec, the list items holding ref's element) on a fresh, identified snapshot."""
         page_id, el_id = ref.split(".")
-        page = self.pages[page_id]
-        return page_id, el_id, item_candidates(self.page_root(page_id), page["elements"][el_id], page)
+        page, root = self.pages[page_id], self.page_root(page_id)
+        spec = page["elements"][el_id]
+        return root, page, spec, item_candidates(root, spec, page)
 
-    def round_element(self, ref):
+    def round_element(self, ref, label):
         """The round's click target: ref's element inside the first list item (never the taught index)."""
-        page_id, el_id, cands = self.items(ref)
-        if not cands:
-            raise Stop(f"{ref}: no list item left")
-        spec = self.pages[page_id]["elements"][el_id]
-        return item_target(cands[0], spec, self.pages[page_id]), spec
+        _, page, spec, cands = self.items(ref)
+        node = item_target(cands[0], spec, page) if cands else None
+        if node is None or item_label(cands[0], node) != label:
+            raise Stop("the list changed during the round")
+        return node, spec
 
     def element(self, ref, root):
         page_id, el_id = ref.split(".")
@@ -844,19 +856,21 @@ class Runner:
         k, label = 0, None
         try:
             while k < s["max"]:
-                page_id, el_id, cands = self.items(s["item"])
+                label = None   # set once this round has an item
+                root, page, spec, cands = self.items(s["item"])
                 if not cands:
+                    if n := len(find_all(root, item_spec(spec), page)):   # never a silent "none left"
+                        raise Stop(f"repeat: {n} {spec.get('name') or s['item']} found but none inside a row or card")
                     break
-                c, page = len(cands), self.pages[page_id]
-                label = item_label(cands[0], item_target(cands[0], page["elements"][el_id], page))
-                self.ctx["round"] = (page_id, el_id)
+                c, label = len(cands), item_label(cands[0], item_target(cands[0], spec, page))
+                self.ctx["round"] = (s["item"], label)
                 try:
                     self.steps(s["steps"])   # steps[0] clicks the item (do_click finds it in the first candidate)
                 finally:
                     self.ctx.pop("round", None)
                     self.step = s["id"]
                 deadline = time.time() + 10   # the item leaves once the app answers: wait as page checks wait
-                while len(self.items(s["item"])[2]) >= c:
+                while len(self.items(s["item"])[3]) >= c:
                     if time.time() > deadline:
                         raise Stop(f"{label} is still on the list after its round")
                     time.sleep(1)
@@ -864,7 +878,7 @@ class Runner:
                 self._audit("repeat", target=label, outcome="done")
         except Stop as e:
             self._audit("repeat", target=label, outcome="error")
-            if _ends_run(e):   # emergency stop, revoked...: keep the message the run's own checks look for
+            if _ends_run(e) or label is None:   # a run stop keeps the message the run checks; no round yet: as is
                 raise
             raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
         self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
@@ -872,12 +886,12 @@ class Runner:
     def do_click(self, s):
         tgt = self.ref(s["target"])
         rnd = self.ctx.get("round")
-        is_round = rnd is not None and tgt == ".".join(rnd)
+        is_round = rnd is not None and tgt == rnd[0]
 
         def locate():
             if tgt.startswith("current_item."):
                 return self._current_item_node(tgt.split(".", 1)[1])
-            return self.round_element(tgt) if is_round else self.page_element(tgt)
+            return self.round_element(tgt, rnd[1]) if is_round else self.page_element(tgt)
 
         node, spec = locate()
         if tgt.startswith("current_item."):
