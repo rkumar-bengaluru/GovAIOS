@@ -2696,3 +2696,11 @@ def test_new_app_lesson_never_re_approves_after_revoke(panel):
     panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
     assert "Approve Approve shortlisted first" in _tells(panel)[-1] and len(panel.asked) == n
     assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_press_line_words():
+    from govaios.panel import lesson as pl
+    prop = {"pages": [{"id": "p", "steps": [{"kind": "click", "label": "Approve & promote", "target": "p.a",
+                                              "keep": True, "press": True}], "added": [], "new": True}], "bank": []}
+    html = pl.page("n", {"pages": [{"title": "T", "url": "http://localhost:8100/"}]}, prop, set(), {}, "")
+    assert "Press: Approve &amp; promote (asks Touch ID before the first run's press)" in html

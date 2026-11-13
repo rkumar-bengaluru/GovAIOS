@@ -333,8 +333,8 @@ def test_joblens_lesson_builds_two_cases(tmp_path):
     assert list(on) == ["joblens_applications", new, "unknown"]
     assert on["joblens_applications"] == {"do": [{"id": "learned_joblens_applications_1", "action": "click",
                                                   "target": "joblens_applications.discover"}], "then": "again"}
-    assert [s["action"] for s in on[new]["do"]] == ["click", "click", "hand_over"] and on[new]["then"] == "end"
-    assert [s.get("target") for s in on[new]["do"]] == [f"{new}.shortlisted", f"{new}.button_review", None]
+    assert [s["action"] for s in on[new]["do"]] == ["click", "click", "click"] and on[new]["then"] == "end"
+    assert [s.get("target") for s in on[new]["do"]] == [f"{new}.shortlisted", f"{new}.button_review", f"{new}.approve_promote"]
     pg = prop["pages"][1]["yaml"]["page"]
     assert [pg["elements"][a] for a in pg["identification"]["anchors"]][0]["name"] == "Discover"
     assert not lessons._identifies(pg, studio._as_nodes(les["pages"][0]["tree"])[0])   # never the home page
@@ -344,6 +344,54 @@ def test_preview_lines_and_yaml(tmp_path):
     les, _ = joblens(tmp_path)
     lines, text = lessons.preview(les, tmp_path / "pages", Bank())
     assert lines == ["JobLens · Applications: click Discover", "JobLens · Discover: click Shortlisted",
-                     "JobLens · Discover: click Review", "JobLens · Discover: you press Approve & promote"]
+                     "JobLens · Discover: click Review", "JobLens · Discover: press Approve & promote"]
     cases = yaml.safe_load(text)
     assert list(cases) == ["joblens_applications", "localhost_joblens"] and cases["localhost_joblens"]["then"] == "end"
+
+
+def _approve_lesson(tmp_path, url, label="Approve & promote", risk="submit"):
+    t = tree(Node("button", "Review"), Node("button", label))
+    ev2 = {**ev("click", "button", label), "risk": risk, "sure": True}
+    return lesson(tmp_path, page(t, [{**ev("click", "button", "Review"), "risk": "navigate", "sure": True}, ev2], url))
+
+
+def test_own_app_submit_click_is_a_press(tmp_path):
+    les, app = joblens(tmp_path)
+    from govaios.approvals import read_bound
+    d, raw = read_bound(app, tmp_path / "pages")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    steps = prop["pages"][1]["steps"]
+    assert steps[2]["kind"] == "click" and steps[2]["press"] is True
+    assert all(s["kind"] != "hand_over" for p in prop["pages"] for s in p["steps"])
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    on = next(s for s in wf["steps"] if s["id"] == "on_start")["on_match"]
+    do = on[prop["pages"][1]["id"]]["do"]
+    assert do[-1]["action"] == "click" and do[-1]["target"].endswith(".approve_promote")
+    assert wf["permissions"]["max_element_risk"] == "submit"
+
+
+def test_outside_submit_click_stays_hand_over(tmp_path):
+    les = _approve_lesson(tmp_path, "https://acme.example/jobs")
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(p) == ["click", "hand_over"] and "press" not in p["steps"][1]
+
+
+def test_payment_click_on_own_app_stays_hand_over(tmp_path):
+    les = _approve_lesson(tmp_path, "http://localhost:8100/pay", "Pay now", "payment")
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert kinds(p) == ["click", "hand_over"] and "press" not in p["steps"][1]
+
+
+def test_build_never_lowers_max_element_risk(tmp_path):
+    les, app = joblens(tmp_path)
+    from govaios.approvals import read_bound
+    doc = yaml.safe_load(app.read_bytes())
+    doc["workflow"]["permissions"]["max_element_risk"] = "submit"
+    app.write_text(yaml.safe_dump(doc, sort_keys=False))
+    _, raw = read_bound(app, tmp_path / "pages")
+    for lp in les["pages"]:
+        lp["events"] = [e for e in lp["events"] if e.get("risk") == "navigate"]
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    assert yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"] == "submit"

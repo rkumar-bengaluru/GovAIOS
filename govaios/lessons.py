@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from .observer import NO_FILE
-from .policy import RISK_ORDER, origin
+from .policy import RISK_ORDER, origin, own
 from . import capture, engine, formfill, studio
 from .approvals import pages_used, read_bound
 from .formfill import FIELD_ROLES, Field, new_key, normalize, restricted
@@ -233,9 +233,13 @@ def propose(lesson, pages_dir, bank) -> dict:
                 text += f" via the button {evs[i - 1].get('label') or '?'!r}"   # the button replay clicks
             if kind == "click" and not k:
                 line = {"kind": "click", "label": "not sure what this was", "target": None, "keep": False}
-            elif kind == "click" and max((r for r in (look["elements"][k].get("risk"), ev.get("risk")) if r in RISK_ORDER),
-                                         key=RISK_ORDER.index, default=None) in ("submit", "payment"):   # the higher rating
-                line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
+            elif kind == "click" and (rating := max((r for r in (look["elements"][k].get("risk"), ev.get("risk"))
+                                                     if r in RISK_ORDER), key=RISK_ORDER.index, default=None)) \
+                    in ("submit", "payment"):   # the higher rating
+                if rating == "submit" and own(lp["url"]):   # own app: the engine asks the press grant before the first press
+                    line = {"kind": "click", "label": text, "target": target, "keep": keep, "press": True}
+                else:
+                    line = {"kind": "hand_over", "label": text, "target": target, "keep": keep}   # replayed as hand over
             elif kind == "click":
                 line = {"kind": "click", "label": text, "target": target,
                         "keep": keep}   # a click after the hand over is dead: replay stops there
@@ -260,7 +264,8 @@ def propose(lesson, pages_dir, bank) -> dict:
                     ops.append(op)
         out_pages.append({"id": pid, "new": new, "yaml": {"page": page}, "steps": steps,
                           "added": added})
-    if out_pages and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[-1]["steps"]):
+    if out_pages and not all(own(lp["url"]) for lp in lesson["pages"]) \
+            and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[-1]["steps"]):
         out_pages[-1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None,
                                        "keep": True})
     return {"pages": out_pages, "bank": ops}
@@ -361,7 +366,7 @@ def _cases(proposal, deleted, ids, on):
 def preview(lesson, pages_dir, bank) -> tuple[list[str], str]:
     """What the extension shows while teaching: a line per kept click or hand-over, and the cases' YAML."""
     proposal = propose(lesson, pages_dir, bank)
-    lines = [f"{lp['title']}: {'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
+    lines = [f"{lp['title']}: {'press' if s.get('press') else 'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
              for p, lp in zip(proposal["pages"], lesson["pages"]) for s in p["steps"]
              if s["keep"] and s["target"] and s["kind"] in ("click", "hand_over")]   # never the closing hand-over
     return lines, yaml.safe_dump(_cases(proposal, set(), set(), {}), sort_keys=False)
@@ -401,6 +406,11 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on)
     on.update(cases)
     n = sum(len(c["do"]) for c in cases.values())
+    if any(s.get("press") and s["keep"] and (i, j) not in deleted for i, p in enumerate(proposal["pages"])
+           if p["id"] in cases for j, s in enumerate(p["steps"])):   # a kept press needs submit; never lower it
+        perms = wf["permissions"]
+        if RISK_ORDER.index(perms["max_element_risk"]) < RISK_ORDER.index("submit"):
+            perms["max_element_risk"] = "submit"
     if "unknown" in on:
         on["unknown"] = on.pop("unknown")   # stays the last case, as written by hand
     dests = wf.setdefault("destinations", [])
