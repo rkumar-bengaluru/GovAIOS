@@ -1243,6 +1243,9 @@ class Runner:
     def do_attach_file(self, s):
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
         from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
+        if self.flow.get("try") is True:   # a Try never attaches: it stops before the real run would
+            node, spec = self.page_element(self.ref(s["target"]))
+            raise Stop(TRY_STOP.format(getattr(node, "name", "") or spec.get("name") or self.ref(s["target"])))
         a, ref = self.ctx.get("apply") or self._new_apply(), self.ref(s["target"])   # a learned attach: no fill before
         a["yourself"].append("Resume/CV")   # until attached: a stop from here on leaves it on the result card
         self.write_result()

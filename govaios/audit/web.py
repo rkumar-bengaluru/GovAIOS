@@ -361,26 +361,28 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if r is None or not r.done or panel.told is r:
                 return
             panel.told, app = r, panel.app.name
-            tried = r.stopped_reason is None and str(getattr(r, "reason", None) or "").startswith("Try it stops here")
-            if r.code == 0 and r.stopped_reason is None:
-                tell(f"{app} finished: {(r.summary or 'done').split(': ', 1)[-1]}")
-                text = f"{panel.name}, the {app} flow is complete, thank you."
-            elif tried:   # a Try ends at its first change-making press: a normal end
-                tell(f"{app} finished: {r.reason}")
-                text = f"{panel.name}, the {app} try is done: it stopped before a change."
-            else:
-                why = r.stopped_reason or getattr(r, "reason", None) or f"exit {r.code}"
-                cap = getattr(r, "capture", None)
-                tell(f"{app} stopped: {why}" + (f" Saved page: captures/{cap}" if cap else ""))
-                text = f"{panel.name}, the {app} flow stopped: {why}."
-            panel.voice = threading.Thread(target=panel.speak, args=(text,), daemon=True)
-            panel.voice.start()
-            try:   # after the finish message: a killed run leaves its hand-off behind
-                applyfiles.remove(home, applyfiles.ASK, applyfiles.REPLY)
-            except OSError:
-                pass
-            if panel.app.id.startswith("try_"):
-                revoke_try(panel.app.id)
+            try:
+                tried = r.stopped_reason is None and str(getattr(r, "reason", None) or "").startswith("Try it stops here")
+                if r.code == 0 and r.stopped_reason is None:
+                    tell(f"{app} finished: {(r.summary or 'done').split(': ', 1)[-1]}")
+                    text = f"{panel.name}, the {app} flow is complete, thank you."
+                elif tried:   # a Try ends at its first change-making press: a normal end
+                    tell(f"{app} finished: {r.reason}")
+                    text = f"{panel.name}, the {app} try is done: it stopped before a change."
+                else:
+                    why = r.stopped_reason or getattr(r, "reason", None) or f"exit {r.code}"
+                    cap = getattr(r, "capture", None)
+                    tell(f"{app} stopped: {why}" + (f" Saved page: captures/{cap}" if cap else ""))
+                    text = f"{panel.name}, the {app} flow stopped: {why}."
+                panel.voice = threading.Thread(target=panel.speak, args=(text,), daemon=True)
+                panel.voice.start()
+                try:   # after the finish message: a killed run leaves its hand-off behind
+                    applyfiles.remove(home, applyfiles.ASK, applyfiles.REPLY)
+                except OSError:
+                    pass
+            finally:   # whatever the report does, a Try's one-run approval ends with its run
+                if panel.app.id.startswith("try_"):
+                    revoke_try(panel.app.id)
 
     def signout_all():
         with sign_lock:

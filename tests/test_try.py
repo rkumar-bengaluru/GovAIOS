@@ -47,3 +47,15 @@ def test_try_stop_inside_a_repeat_is_not_wrapped(tmp_path, monkeypatch):
     d, why = rp.go(tmp_path, monkeypatch, ["Ada"])
     assert why == STOP.format("Approve & promote") and d.calls.count(("click", "Review")) == 1
     assert ("click", "Approve & promote") not in d.calls
+
+
+def test_try_stops_before_attaching_a_file(tmp_path, monkeypatch):
+    f = pg.make(tmp_path)
+    d = yaml.safe_load(f.read_text())
+    d["workflow"].update({"try": True, "steps": [{"id": "cv", "action": "attach_file", "target": "disc.approve",
+                                                  "check": "disc.approve"}]})
+    d["workflow"]["permissions"]["allow"].append("attach_file")
+    f.write_text(yaml.safe_dump(d))
+    d, asked, why = pg.go(tmp_path, monkeypatch, [], keep=True)
+    assert why == STOP.format("Approve & promote") and asked == []
+    assert not any(c[0] in ("click", "choose_file") for c in d.calls if isinstance(c, tuple))

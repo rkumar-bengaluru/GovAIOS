@@ -174,3 +174,8 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 - **Panel**: `/ext/state` runs `propose` on every poll (watch latency); malformed lesson JSON gives 500 in `/ext/done`; the new-app audit scan trusts unsigned lines (Touch ID still required).
 - **Extension**: a page can hide the ● Recording sign; "did not start" note stays until the next Teach.
 - **Flaky test**: `test_teach_records_lesson_and_stops_task` (observer path) fails about 1 in 3 runs.
+
+## Teach extension, plan 3 leftovers (2026-11-13, branch `feat/teach-extension-plan3`)
+
+- **Try it runs with no inputs**: an app that needs inputs (job_apply's url) stops with "bad run input".
+- **Try it does not apply the lesson's bank ops**: fill-from-bank steps use the real bank as it is now.

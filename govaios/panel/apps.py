@@ -28,6 +28,8 @@ def list_apps(flows_dir: Path, home: Path) -> list[App]:
         try:
             digest, raw = read_bound(p, flows_dir.parent / "pages")
             wf = yaml.safe_load(raw[p])["workflow"]
+            if str(wf["id"]).startswith("try_"):   # reserved for the panel's Try copies (revoked at panel start)
+                continue
             out.append(App(wf["id"], wf.get("app") or wf["name"], p, digest, approvals.flow_ok(wf["id"], digest), wf["name"]))
         except Exception:   # unloadable file: not an app
             continue

@@ -2782,6 +2782,24 @@ def test_try_approvals_revoked_at_panel_start(panel):
     assert (e["flow"], e["outcome"], e["reason"]) == ("try_x", "revoked", "try run ended")
 
 
+def test_try_approval_is_revoked_when_the_report_raises(panel, monkeypatch):
+    from govaios import applyfiles
+    _try(panel)
+    r = panel.made[-1]
+    r.done, r.code = True, 1
+    monkeypatch.setattr(applyfiles, "remove", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        panel.srv.panel.tick()
+    assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_try_prefix_is_reserved_in_the_apps_folder(panel):
+    (panel.flows / "hand.yaml").write_text("workflow:\n  id: try_hand\n  app: Hand\n  name: Hand\n  version: 1\n"
+                                           "  permissions: { allow: [launch_application], max_element_risk: read }\n"
+                                           "  steps:\n    - { id: go, action: launch_application }\n")
+    assert not any(a.id == "try_hand" for a in list_apps(panel.flows, panel.home))
+
+
 def test_lesson_page_has_try_it(panel):
     name = _done(panel)
     page = _lesson_form(panel, name)[1]
