@@ -53,11 +53,17 @@ def edits(proposal, form):
     return deleted, keeps, repeats, outcomes
 
 
-def _outcome_line(proposal, o):
+def _outcome_line(proposal, o, others):
     i, j = o["at"]
     after = escape(str(proposal["pages"][i]["steps"][j].get("label"))[:200])
     if o["kind"] == "count":
-        return f"{escape(o['label'][:200])} {o['before']} → {o['after']} ({o['change']:+d}), checked after: {after}"
+        adds = ""
+        if o.get("adds"):
+            adds = f"; if ticked, adds <code>{escape(o['adds'])}</code> to <code>{escape(o['page'])}</code>"
+            if others.get(o["page"]):
+                adds += f", approving again: {escape(', '.join(others[o['page']]))}"
+        return (f"{escape(o['label'][:200])} {o['before']} → {o['after']} ({o['change']:+d}), "
+                f"checked after: {after}{adds}")
     return escape("this round's item left the list, checked after: ") + after
 
 
@@ -88,7 +94,7 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
                 rows.append(f"<li>{text}{note}</li>")
             else:
                 outs = "".join(f"<li><label><input type=checkbox name='out:{i}:{j}:{k}' value=1> "
-                               f"{_outcome_line(proposal, o)}</label></li>" for k, o in enumerate(s.get("outcomes") or []))
+                               f"{_outcome_line(proposal, o, others)}</label></li>" for k, o in enumerate(s.get("outcomes") or []))
                 outs = f"<ul>{outs}</ul>" if outs else ""
                 rows.append(f"<li>{text} <label><input type=checkbox name='del:{i}:{j}' value=1> Delete</label>"
                             f"{outs}</li>")

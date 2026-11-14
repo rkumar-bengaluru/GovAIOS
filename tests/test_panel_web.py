@@ -2165,6 +2165,36 @@ def test_bank_failure_midway_leaves_flow_unapproved(cc, monkeypatch):
     assert _log(cc.home, "lesson")[-1]["reason"] == "BankError"
 
 
+def test_count_on_a_shared_known_page_warns_its_other_apps(cc):
+    """A ticked count adds an element to a known page another app uses: said before Touch ID."""
+    from govaios import capture, lessons
+    from govaios.desktop import Node
+    ja = _approve_job_apply(cc)
+    (cc.flows.parent / "pages" / "own_list.yaml").write_text(
+        "page:\n  id: own_list\n  identification: {title_matches: '^Own$', anchors: [heading]}\n"
+        "  elements:\n    heading: {role: heading, name: List, risk: read}\n"
+        "    approve: {role: button, name: Approve, risk: submit}\n")
+    (cc.flows / "other.yaml").write_text((cc.flows / "job_apply.yaml").read_text()
+                                         .replace("id: job_apply", "id: other_flow", 1)
+                                         .replace('app: "Job Apply"', 'app: "Other app"', 1)
+                                         .replace("greenhouse_application: continue", "own_list: continue", 1))
+
+    def own(n):
+        return Node("document", "Own", children=[Node("heading", "List"), Node("button", "Approve"),
+                                                 Node("tab", f"Promoted ({n})")])
+    name = lessons.save(cc.home, "job_apply", ja.digest, "on_form", [
+        {"url": "http://localhost:8100/list", "title": "Own", "tree": own(7),
+         "events": [{"kind": "click", "spec": {"role": "button", "name": "Approve"}, "label": "Approve", "value": "",
+                     "secure": False, "risk": "submit", "sure": True, "before": capture.tree(own(7))}]}])
+    doc = lessons.load(cc.home, name)
+    doc["done_tree"] = capture.tree(own(8))
+    lessons.write(cc.home, name, doc)
+    page = _lesson_form(cc, name)[1]
+    assert "own_list</code> \u00b7 known" in page and "Adds to this page" not in page
+    assert "if ticked, adds <code>promoted_count</code> to <code>own_list</code>, approving again: Other app" in page
+    assert "Changing this page means approving again: Other app." in page
+
+
 def test_new_page_made_during_touch_id_is_never_replaced(cc, monkeypatch):
     from govaios import auth
     name, _ = _lesson(cc)

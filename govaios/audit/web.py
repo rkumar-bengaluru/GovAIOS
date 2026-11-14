@@ -1676,6 +1676,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             st = lessons._find(yaml.safe_load(app.path.read_bytes())["workflow"]["steps"], lesson.get("step"))
             cases = set((st or {}).get("on_match", {}))
         grown, others = {p["id"] for p in proposal["pages"] if p["added"]}, {}
+        grown |= {o["page"] for p in proposal["pages"] for s in p["steps"] for o in s.get("outcomes") or []
+                  if o.get("adds")}   # a ticked count rewrites that known page
         for a in apps() if grown else ():
             if a.id != lesson.get("flow"):
                 for pid in grown & pages_used(yaml.safe_load(a.path.read_bytes())["workflow"]):

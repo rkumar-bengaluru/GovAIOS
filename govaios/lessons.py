@@ -335,8 +335,13 @@ def _outcomes(lesson, out_pages, marks):
         for t, at, pid in afters:
             for (role, label), n in _counts(t).items():
                 if was.get((role, label), n) != n and not any(o.get("label") == label and o["role"] == role for o in outs):
+                    p = next(p for p in out_pages if p["id"] == pid)
+                    els = dict(p["yaml"]["page"]["elements"])
+                    key = _count_key(els, role, label)
                     outs.append({"kind": "count", "role": role, "label": label, "before": was[(role, label)],
-                                 "after": n, "change": n - was[(role, label)], "at": at, "page": pid})
+                                 "after": n, "change": n - was[(role, label)], "at": at, "page": pid,
+                                 # a known page gains this key if ticked: shown, and the page's other apps warned
+                                 "adds": key if not p["new"] and key not in p["yaml"]["page"]["elements"] else None})
         if i in can and j >= can[i]:   # inside the page's repeatable range
             page = out_pages[i]["yaml"]["page"]
             r = out_pages[i]["steps"][can[i]]

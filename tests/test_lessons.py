@@ -559,7 +559,8 @@ def test_propose_hr_after_later_click(tmp_path):
     [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
     assert p["steps"][0]["press"] and p["steps"][1]["kind"] == "click"
     assert p["steps"][0]["outcomes"] == [{"kind": "count", "role": "tab", "label": "Scheduled", "before": 3,
-                                          "after": 4, "change": 1, "at": [0, 1], "page": p["id"]}]
+                                          "after": 4, "change": 1, "at": [0, 1], "page": p["id"],
+                                          "adds": None}]
 
 
 def test_old_lesson_without_trees_proposes_no_outcome(tmp_path):
@@ -640,3 +641,32 @@ def test_build_refuses_press_without_outcome(tmp_path):
     assert _plan(tmp_path, les, app, prop, require_outcomes=False)   # Try it never presses
     with pytest.raises(ValueError, match="the step an outcome is checked after was removed"):
         _plan(tmp_path, les, app, prop, deleted=[_press(prop)], outcomes=_tick(prop, lambda o: True))
+
+
+def test_two_presses_first_reads_only_up_to_the_second(tmp_path):
+    from govaios import capture
+
+    def hr(a, b):
+        return capture.tree(tree(Node("button", "Schedule"), Node("button", "Approve"), Node("tab", f"Scheduled ({a})"),
+                                 Node("tab", f"Approved ({b})"), title="HR"))
+    les = lesson(tmp_path, page(tree(Node("button", "Schedule"), Node("button", "Approve"), title="HR"), [
+        {**ev("click", "button", "Schedule"), "risk": "submit", "sure": True, "before": hr(3, 1)},
+        {**ev("click", "button", "Approve"), "risk": "submit", "sure": True, "before": hr(4, 1)}],
+        "http://localhost:8100/hr"))
+    les["done_tree"] = hr(4, 2)   # only the second press changed Approved
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert [(o["label"], o["at"]) for o in p["steps"][0]["outcomes"]] == [("Scheduled", [0, 0])]
+    assert [(o["label"], o["at"]) for o in p["steps"][1]["outcomes"]] == [("Approved", [0, 1])]
+
+
+def test_build_refuses_when_only_the_at_line_is_deleted(tmp_path):
+    les, app = joblens_outcomes(tmp_path)
+    tab = dict(les["pages"][1]["events"][0])   # after the press, a click on the Shortlisted tab, then Done
+    les["pages"][1]["events"].append(tab)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    i, j = _press(prop)
+    ticks = _tick(prop, lambda o: o.get("label") == "Promoted")
+    assert prop["pages"][i]["steps"][j]["outcomes"][ticks[(i, j)][0]]["at"] == [1, 3]
+    assert _plan(tmp_path, les, app, prop, outcomes=ticks)
+    with pytest.raises(ValueError, match="the step an outcome is checked after was removed"):
+        _plan(tmp_path, les, app, prop, deleted=[(1, 3)], outcomes=ticks)
