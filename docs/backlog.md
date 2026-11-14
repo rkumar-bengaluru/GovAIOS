@@ -3,6 +3,18 @@
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
 Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-tasks`); 2026-11-07 Job Apply; before that 2026-11-08 Claude Code and Codex governance (PRs #16, #17).
 
+## Outcome check per step (2026-11-14, from the WebArena comparison)
+
+- **Each taught step records what it changed; every run waits for that change or stops.** Today the engine checks the
+  page before a step (`wait_for_page`) and the click point, but nothing after: a click that changes nothing still counts
+  as done (automationexercise "Add to cart", 2026-11-13). Idea from WebArena's evaluators (url_match, must_include,
+  program_html), done after every step instead of once at the end.
+- Gains: the audit shows proof ("Approve & promote → Promoted 7 → 8"), not just "clicked"; a silent miss stops with
+  "click done, result not seen"; Repeat stops cleanly when the list stops shrinking.
+- Open for design: what Studio records as the outcome (new URL, an element that appears, a count that moves), how long a
+  run waits, and what the stop card offers.
+- Related: save one-line `role 'name'` snapshots before and after each step in the audit, for readable diffs on a failure.
+
 ## JobLens apply (app JobLens, flow `job_apply`; branch `feat/joblens-tasks`, 2026-11-08)
 
 - ~~List JobLens applications in `/job-apply`~~ built 2026-11-08: the run reads JobLens in Chrome, one panel task per Ready
