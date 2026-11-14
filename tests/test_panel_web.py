@@ -2064,6 +2064,36 @@ def test_terms_post_validates_and_records(cc):
     assert _log(cc.home, "apply_card")[-1]["outcome"] == "checked" and len(_log(cc.home, "apply_card")) == 1
 
 
+def test_covered_card_asks_to_close_it_then_continue(cc):
+    from govaios import applyfiles
+    rid = _carding(cc, "covered", "Products")
+    page = cc.get("/")[1]
+    assert "Something is in the way" in page and "Something covers <b>Products</b> in Chrome" in page
+    cc.post("/apply/card", ask=_ask_digest(cc), choice="continue")
+    assert applyfiles.read_json(cc.home, applyfiles.REPLY) == {"run": rid, "card": "continue"}
+
+
+def test_studio_records_site_terms_with_touch_id(cc):
+    from govaios import terms
+    site = "https://automationexercise.com/"
+    page = cc.get("/studio")[1]
+    assert "action=/studio/terms" in page and ".appcard input[type=radio]{flex:none;min-width:0}" in page   # radio beside its own label
+    cc.answers["prove"] = False
+    cc.post("/studio/terms", site=site, verdict="allowed", link=site, clause="practice website")
+    assert terms.verdict(cc.home, site, ()) is None and cc.asked[-1] == "Record automationexercise.com's terms as allowed"
+    assert _log(cc.home, "setting")[-1]["decision"] == "deny"
+    cc.answers["prove"] = True
+    cc.post("/studio/terms", site=site, verdict="allowed", link="http://x.example/", clause="")   # link not https
+    assert terms.verdict(cc.home, site, ()) is None and _tells(cc)[-1].startswith("GOV-AIOS -> Terms not recorded")
+    cc.post("/studio/terms", site=site, verdict="allowed", link=site, clause="practice website")
+    assert terms.verdict(cc.home, site, ()) == "allowed"
+    e = _log(cc.home, "setting")[-1]
+    assert (e["field"], e["target"], e["outcome"], e["auth"]) == ("terms", "automationexercise.com", "allowed", "biometric")
+    assert "<b>automationexercise.com</b> \u00b7 allowed" in cc.get("/studio")[1]
+    cc.post("/studio/terms", site="ftp://x.example", verdict="allowed", link=site, clause="")
+    assert _tells(cc)[-1] == "GOV-AIOS -> Terms not recorded: give an http(s) site and a verdict."
+
+
 def _approved_now(P):
     return next(a for a in list_apps(P.flows, P.home) if a.id == "job_apply").approved
 

@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from urllib.parse import urlsplit
 
-from . import capture, lessons, studio
+from . import capture, lessons, studio, terms
 from .policy import OWN_HOSTS, PANEL_PORT
 from .applyfiles import TEACH_OPEN, TEACH_OUT, remove, write_json
 from .engine import find_all
@@ -17,8 +17,13 @@ CLICKABLE = ("link", "button", "tab", "radio")
 COUNT = re.compile(r"^(.*\S) \(\d+\)$")   # "Shortlisted (4)": the count changes, so it is never part of the step
 OWN, PANEL_PORT = OWN_HOSTS, PANEL_PORT   # one source: policy
 MISMATCH = "Run could not find this. Do it again, or skip it."
-OUTSIDE = "Outside sites come later: recording paused."
+OUTSIDE = "This site's terms are not marked allowed in Studio: recording paused."
 UNSAVED = "Could not save this step. Do it again."
+
+
+def _plain(name):
+    """A name as the page's own text has it: icon-font glyphs (CSS ::before, Unicode private use) dropped."""
+    return re.sub(r"\s+", " ", re.sub("[\ue000-\uf8ff]", "", name or "")).strip()
 
 
 def _key(url):
@@ -98,7 +103,8 @@ class Recorder:
     def _down(self, ev):
         url = self.desk.current_url(self.app)
         s = urlsplit(url)
-        if s.scheme != "http" or s.hostname not in OWN or s.port == PANEL_PORT:   # never the panel's own pages
+        own = s.scheme == "http" and s.hostname in OWN and s.port != PANEL_PORT   # never the panel's own pages
+        if not own and not (s.scheme == "https" and terms.verdict(self.home, url, ()) == "allowed"):
             self.paused, self.note, self.at = True, OUTSIDE, None
             return
         if _key(ev.get("url")) != _key(url) or ev.get("x") is None or ev.get("y") is None:
@@ -113,7 +119,7 @@ class Recorder:
             n = up.get(id(n))
         if n is None:
             return   # empty space
-        if n.name != ev.get("name"):   # rule 2: what GOV-AIOS reads must be what the page reported
+        if _plain(n.name) != _plain(ev.get("name")):   # rule 2: what GOV-AIOS reads must be what the page reported
             self.note = MISMATCH
             return
         spec = _spec(root, n)

@@ -104,6 +104,9 @@ background:var(--ok);border:2px solid var(--ok)}
 .appcard .m{margin:0 0 10px}
 .appcard form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .appcard input{flex:1;min-width:220px}
+.appcard input[type=radio]{flex:none;min-width:0}
+.appcard fieldset{flex-basis:100%;display:flex;gap:16px;border:1px solid var(--line);border-radius:8px}
+.appcard fieldset label{display:flex;gap:6px;align-items:center}
 .cmd{display:flex;gap:10px;margin:18px 0 0;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .cmd input{flex:1}
 .note{background:var(--card);border-left:4px solid var(--amber);padding:10px 14px}
@@ -877,6 +880,10 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 "press Continue. Skip leaves it on the list to fill before you submit.",
                 (("continue", "Continue"), ("skip", "Skip")),
                 "{name}, I couldn't fill {label}. Please fill it in Chrome, then press Continue."),
+        "covered": ("Something is in the way", "Something covers <b>{label}</b> in Chrome: maybe a pop-up, an ad or a "
+                    "banner. Close it there yourself (GOV-AIOS never clicks it), then press Continue. End stops the run.",
+                    (("continue", "Continue"), ("end", "End")),
+                    "{name}, something covers {label} in Chrome. Please close it, then press Continue."),
         "review": ("Ready for you to submit", "The form is filled. Check it in Chrome and press Submit there yourself. "
                    "Then press Next job, or End to stop here.", (("next", "Next job"), ("end", "End")),
                    "{name}, {job} is ready. Please check it and submit it in Chrome."),
@@ -1367,6 +1374,18 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 f"stay yours.</p><form method=post action=/studio/compose>{hidden(csrf)}<label>App name <input name=app "
                 f"maxlength=40 required></label>{sel}<button class=go>Save as a Draft app</button></form></section>"
                 if cat else "<p class=note>No draft pages yet. Capture pages with the Web Sandbox first.</p>")
+        sites = "".join(f"<li><b>{escape(str(d))}</b> \u00b7 {escape(str(e.get('value')))} \u00b7 {escape(str(e.get('date')))}"
+                        f" \u00b7 <a href='{escape(str(e.get('link')))}' target=_blank rel=noopener>terms</a></li>"
+                        for d, e in terms._store(home).items() if isinstance(e, dict))
+        radios = "".join(f"<label><input type=radio name=verdict value={v} required> {v.capitalize()}</label>"
+                         for v in terms.VERDICTS)
+        new += (f"<section class=appcard><h2>Site terms</h2><p class=m>Teach records on an outside site only when its "
+                f"terms are marked allowed here (90 days, then check again). Recording one asks Touch ID.</p>"
+                f"<ul>{sites}</ul><form method=post action=/studio/terms>{hidden(csrf)}<label>Site <input name=site "
+                f"type=url required placeholder='https://'></label><fieldset><legend>The terms say a personal agent is"
+                f"</legend>{radios}</fieldset><label>Terms link <input name=link type=url maxlength=500 required "
+                f"placeholder='https://'></label><label>The clause it rests on <textarea name=clause maxlength=2000>"
+                f"</textarea></label><button class=go>Record</button></form></section>")
         if extlink.connected(home):
             new += (f"<section class=appcard><h2>Chrome extension</h2><p class=m>Connected. Disconnecting also discards an "
                     f"unfinished lesson.</p><form method=post action=/studio/disconnect>{hidden(csrf)}"
@@ -1400,6 +1419,29 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         log.append("setting", field="studio_new", flow=path.stem)
         tell(f"{f.get('app', '').strip()[:40]} is saved as a draft app. Approve it to let it run.")
         return "/"
+
+    def studio_terms(f):
+        """A site's terms verdict from Studio (the same store the terms card writes), with Touch ID."""
+        site, verdict = f.get("site", "").strip(), f.get("verdict", "")
+        d = terms.domain(site) if urlsplit(site).scheme in ("http", "https") else ""
+        if not d or verdict not in terms.VERDICTS:
+            tell("Terms not recorded: give an http(s) site and a verdict.")
+            return "/studio"
+        fields = {"field": "terms", "target": d[:200], "outcome": verdict}
+        ok, how = auth.prove(f"Record {d}'s terms as {verdict}", home)
+        if not ok:
+            log.append("setting", decision="deny", approver="admin", channel="touch_id", auth=how, **fields)
+            tell("Touch ID is busy. Try again." if how in ("busy", "none") else "Terms not recorded.")
+            return "/studio"
+        try:
+            audited("setting", {**fields, "approver": "admin", "channel": "touch_id", "auth": how},
+                    lambda: terms.record(home, site, verdict, f.get("link", "").strip(),
+                                         f.get("clause", "").replace("\r\n", "\n")))
+        except ValueError as e:   # terms.record's own fixed messages
+            tell(f"Terms not recorded: {e}.")
+            return "/studio"
+        tell(f"{d}: terms recorded as {verdict}.")
+        return "/studio"
 
     def apps_delete(f):
         """Delete a Studio app (studio_*, check_*) or a draft page no flow uses; its approval goes first."""
@@ -1960,7 +2002,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     POSTS = {"/terms": terms_post, "/lesson/approve": one_lesson(approve_lesson), "/lesson/try": one_lesson(try_lesson), "/lesson/discard": lesson_discard,
              "/apply/answer": apply_answer, "/apply/card": apply_card, "/apply/bank": bank_post, "/say": say, "/approve": approve, "/end": end, "/unqueue": unqueue_post, "/totp/setup": setup_post, "/totp/reset": reset,
-             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new,
+             "/revoke": revoke, "/name": set_name, "/market/setup": market_setup, "/studio/compose": studio_compose, "/studio/new": studio_new, "/studio/terms": studio_terms,
              "/apps/delete": apps_delete, "/studio/disconnect": studio_disconnect}
     for _ag in agents.AGENTS.values():
         POSTS.update({f"/{_ag.slash}/setup": setup_post_for(_ag), f"/{_ag.slash}/off": off_post_for(_ag),

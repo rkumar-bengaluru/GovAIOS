@@ -41,6 +41,7 @@ LIVE_LINES = 50
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
              "the browser has no window in front", "Try it stops here")
+COVERED_ASKS = 3   # "Something is in the way" cards per click before the run stops
 TRY_STOP = ("Try it stops here: the real run will press {}. Close the pop-up, or press Run: it starts from your "
             "start page.")
 def _ends_run(e):
@@ -887,6 +888,28 @@ class Runner:
             raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
         self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
 
+    def _click_uncovered(self, node, locate, ref, before):
+        """Click; if something unrelated covers the target (a pop-up, an ad, a banner), the admin closes it in
+        Chrome and presses Continue, and the click is checked again. GOV-AIOS never clicks the cover itself."""
+        from .desktop.macos import InputRefused   # lazy: pyobjc only on the real desktop
+        for asked in range(COVERED_ASKS + 1):
+            try:
+                return self._act("click", self.d.click, node, target=ref)
+            except InputRefused as e:
+                if "is unrelated to target" not in str(e) or asked == COVERED_ASKS:
+                    raise
+                choice = self.card("covered", getattr(node, "name", "") or ref)
+                if choice is None:   # a CLI run: no one to ask
+                    raise
+                if choice == "end":
+                    raise Stop("ended by admin") from None
+                now = urlsplit(self.d.current_url(self.app) or "")
+                if (now.netloc, now.path) != (urlsplit(before or "").netloc, urlsplit(before or "").path):
+                    # closing a full-page ad finishes the click it held back: the page is already the next one
+                    self._audit("action", action="click", target=ref, outcome="done_by_cover")
+                    return None
+                node, _ = locate()   # the page may have moved once the cover closed
+
     def do_click(self, s):
         tgt = self.ref(s["target"])
         rnd = self.ctx.get("round")
@@ -922,8 +945,13 @@ class Runner:
         before = self.d.current_url(self.app)
         # open_link: go to the link's own address instead of clicking it (JobLens's two-line titles defeat the
         # click-point check); same site only, so it never reaches a destination the click could not
-        url = self.d.link_url(node) if s.get("open_link") else None
-        if url and origin(url) != origin(before):
+        # a learned link on an outside site is opened the same way: a click there can be held by a full-page ad
+        learned_link = str(s.get("id", "")).startswith("learned_") and getattr(node, "role", "") == "link" \
+            and not own(before or "")
+        url = self.d.link_url(node) if s.get("open_link") or learned_link else None
+        here, there = urlsplit(before or ""), urlsplit(url or "")
+        if url and (origin(url) != origin(before) or there.scheme not in ("http", "https")
+                    or (there.path, there.query) == (here.path, here.query)):   # "#top", javascript: stay clicks
             url = None
         for attempt in range(2):                         # one bounded retry (Rule 10)
             if url:
@@ -931,7 +959,7 @@ class Runner:
             else:
                 self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
                 node, spec = locate()   # positions changed after scrolling
-                self._act("click", self.d.click, node, target=ref)
+                self._click_uncovered(node, locate, ref, before)
             if "verify_page" not in s:
                 return
             page, _ = self.wait_for_page([s["verify_page"]], s.get("timeout_seconds", 15))

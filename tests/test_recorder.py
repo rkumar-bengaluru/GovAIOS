@@ -1,7 +1,8 @@
 """The Teach recorder: each press is read at once, checked, and saved to the open lesson as it goes."""
 from govaios import applyfiles, lessons
 from govaios.desktop import Node
-from govaios.recorder import Recorder
+from govaios import terms
+from govaios.recorder import OUTSIDE, Recorder
 
 HOME, DISCOVER = "http://localhost:8100/", "http://localhost:8100/discover"
 
@@ -89,6 +90,16 @@ def test_spec_checked_against_its_own_snapshot(tmp_path):
     assert e["risk"] == "navigate" and e["submit"] is False
 
 
+def test_icon_glyph_in_the_tree_name_still_matches(tmp_path):
+    tree = Node("document", "Shop", children=[Node("link", "\uf07a Add to cart", handle="add")])
+    desk = Desk(HOME, {HOME: [tree]})
+    desk.hit = "add"
+    r = rec(tmp_path, desk)
+    r.handle(down("Add to cart"))   # the page's innerText has no glyph: it comes from CSS ::before
+    (e,) = lessons.load(tmp_path, r.name)["pages"][0]["events"]
+    assert e["spec"] == {"role": "link", "name": "\uf07a Add to cart"} and out(tmp_path)["note"] == ""
+
+
 def test_name_mismatch_not_saved(tmp_path):
     desk = Desk(DISCOVER, {DISCOVER: [discover_tree(Node("button", "Skip", handle="s"))]})
     desk.hit = "s"
@@ -120,8 +131,30 @@ def test_outside_origin_pauses(tmp_path):
     r = rec(tmp_path, desk)
     r.handle(down("Discover", "https://example.com/"))
     assert r.paused and out(tmp_path)["paused"] is True
-    assert out(tmp_path)["note"] == "Outside sites come later: recording paused."
+    assert out(tmp_path)["note"] == OUTSIDE
     assert lessons.load(tmp_path, r.name)["pages"] == []
+
+
+def test_a_site_marked_allowed_records(tmp_path):
+    site = "https://automationexercise.com/"
+    terms.record(tmp_path, site, "allowed", site, "Full-Fledged practice website for Automation Engineers")
+    desk = Desk(site, {site: [home_tree()]})
+    desk.hit = "discover"
+    r = rec(tmp_path, desk)
+    r.handle(down("Discover", site))
+    assert not r.paused and [p["url"] for p in lessons.load(tmp_path, r.name)["pages"]] == [site]
+
+
+def test_forbidden_unclear_or_plain_http_sites_pause(tmp_path):
+    for value, url in (("forbidden", "https://jiomart.com/"), ("unclear", "https://gymshark.com/"),
+                       ("allowed", "http://books.toscrape.com/")):
+        terms.record(tmp_path, url.replace("http:", "https:"), value, "https://x.example/terms", "")
+        desk = Desk(url, {url: [home_tree()]})
+        desk.hit = "discover"
+        r = rec(tmp_path, desk)
+        r.handle(down("Discover", url))
+        assert r.paused and out(tmp_path)["note"] == OUTSIDE
+        assert lessons.load(tmp_path, r.name)["pages"] == []
 
 
 def test_the_panels_own_pages_are_outside(tmp_path):
@@ -130,7 +163,7 @@ def test_the_panels_own_pages_are_outside(tmp_path):
         desk.hit = "discover"
         r = rec(tmp_path, desk)
         r.handle(down("Discover", url))
-        assert r.paused and out(tmp_path)["note"] == "Outside sites come later: recording paused."
+        assert r.paused and out(tmp_path)["note"] == OUTSIDE
         assert lessons.load(tmp_path, r.name)["pages"] == []
 
 

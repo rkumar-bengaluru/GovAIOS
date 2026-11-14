@@ -3,6 +3,18 @@
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
 Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-tasks`); 2026-11-07 Job Apply; before that 2026-11-08 Claude Code and Codex governance (PRs #16, #17).
 
+## Outcome check per step (2026-11-14, from the WebArena comparison)
+
+- **Each taught step records what it changed; every run waits for that change or stops.** Today the engine checks the
+  page before a step (`wait_for_page`) and the click point, but nothing after: a click that changes nothing still counts
+  as done (automationexercise "Add to cart", 2026-11-13). Idea from WebArena's evaluators (url_match, must_include,
+  program_html), done after every step instead of once at the end.
+- Gains: the audit shows proof ("Approve & promote → Promoted 7 → 8"), not just "clicked"; a silent miss stops with
+  "click done, result not seen"; Repeat stops cleanly when the list stops shrinking.
+- Open for design: what Studio records as the outcome (new URL, an element that appears, a count that moves), how long a
+  run waits, and what the stop card offers.
+- Related: save one-line `role 'name'` snapshots before and after each step in the audit, for readable diffs on a failure.
+
 ## JobLens apply (app JobLens, flow `job_apply`; branch `feat/joblens-tasks`, 2026-11-08)
 
 - ~~List JobLens applications in `/job-apply`~~ built 2026-11-08: the run reads JobLens in Chrome, one panel task per Ready
@@ -174,6 +186,14 @@ Dated plan: `docs/research/roadmap.md` (target USENIX Security '27 cycle 2, pape
 - **Panel**: `/ext/state` runs `propose` on every poll (watch latency); malformed lesson JSON gives 500 in `/ext/done`; the new-app audit scan trusts unsigned lines (Touch ID still required).
 - **Extension**: a page can hide the ● Recording sign; "did not start" note stays until the next Teach.
 - **Flaky test**: `test_teach_records_lesson_and_stops_task` (observer path) fails about 1 in 3 runs.
+
+## Teach on sites marked allowed (2026-11-13, branch `feat/teach-allowed-sites`)
+
+- **No waiver yet**: "no terms found: I'll go ahead" (spec rule 12) is still plan 4; Studio's Site terms only takes allowed / forbidden / unclear.
+- **Terms are asked in Studio, not the side panel**: the side panel only says recording paused on an unmarked site.
+- **Covered click: Retrain** is not offered on the "Something is in the way" card; it needs Teach this page from a stopped run (spec rule 8, plan 4).
+- **Recorder notes**: every refusal shows "Run could not find this"; say which check failed (name, unique spec, pop-up) so it can be diagnosed.
+- **A Chrome grant outlives the verdict**: the per-site permission stays after a verdict expires or turns forbidden (the recorder still pauses there).
 
 ## Teach extension, plan 3 leftovers (2026-11-13, branch `feat/teach-extension-plan3`)
 

@@ -39,7 +39,16 @@ act("connect", async () => {
   else r.json.note = r.status === 0 ? "The panel is not reachable at 127.0.0.1:8765." : "That code did not work.";
   return r;
 });
-act("teach", () => { lost = false; return send({ teach: true }); });
+act("teach", async () => {
+  lost = false;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const u = tab && tab.url ? new URL(tab.url) : null;
+  if (u && u.protocol === "https:") {   // an outside site: Chrome asks once per site; GOV-AIOS still checks its terms
+    const ok = await chrome.permissions.request({ origins: [u.origin + "/*"] }).catch(() => false);
+    if (!ok) return { json: { note: "Chrome did not allow GOV-AIOS Teach on this site." } };
+  }
+  return send({ teach: true });
+});
 act("pause", ev("pause"));
 act("resume", ev("resume"));
 act("cancel", ev("cancel"));

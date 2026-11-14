@@ -103,7 +103,9 @@ class MacDesktop:
         pid = self._target_pid()
         fpid, win = self._focused()
         if fpid is None or fpid != pid:
-            raise InputRefused("input refused: target app is not frontmost")
+            front = NSRunningApplication.runningApplicationWithProcessIdentifier_(fpid) if fpid else None
+            name = str(front.localizedName() or "")[:40] if front is not None else "none"
+            raise InputRefused(f"input refused: target app is not frontmost ({name} is)")   # app name only: says who took it
         if self._window is not None and (win is None or not CFEqual(win, self._window)):
             raise InputRefused("input refused: focused window is not the verified window")
         return pid
