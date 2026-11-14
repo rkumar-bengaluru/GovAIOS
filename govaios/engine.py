@@ -81,6 +81,32 @@ def outcomes_of(steps, in_repeat=False):
                 yield from outcomes_of(v["do"], in_repeat)
 
 
+def _clicks(steps):
+    for s in steps:
+        if s.get("action") == "click":
+            yield s
+        yield from _clicks(s.get("steps", []))
+        for v in s.get("on_match", {}).values():
+            if isinstance(v, dict) and isinstance(v.get("do"), list):
+                yield from _clicks(v["do"])
+
+
+def outcomes_missing(wf, pages):
+    """Labels of submit presses no step's outcome covers, in flow order; only flows with an own destination."""
+    if not any(own(d) for d in wf.get("destinations", [])):
+        return []
+    covered = {o["for"] for _, o, _ in outcomes_of(wf["steps"])}
+    labels = []
+    for s in _clicks(wf["steps"]):
+        pid, _, el = s.get("target", "").partition(".")
+        spec = pages.get(pid, {}).get("elements", {}).get(el)
+        if spec and spec.get("risk") == "submit" and s["id"] not in covered:
+            label = spec.get("name") or spec.get("name_matches")
+            if label not in labels:
+                labels.append(label)
+    return labels
+
+
 # ---------- element location (neutral roles only) ----------
 
 def matches(node, spec):
@@ -413,6 +439,8 @@ class Runner:
         if self.approvals.flow_ok(self.flow["id"], digest):
             return
         f = self.flow
+        if missing := outcomes_missing(f, self.pages):
+            raise Stop("needs an outcome before approval: re-teach " + ", ".join(missing))
         ok, how = self.ask(approval_question(f, self.deliver), f"approve flow {f['id']}")
         self._audit("flow_approval", flow_hash=digest, decision="allow" if ok else "deny",
                     approver="admin", channel="touch_id", auth=how, shown=self.shown)

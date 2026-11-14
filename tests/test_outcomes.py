@@ -201,3 +201,34 @@ def test_outcome_for_unknown_step_rejected():
 def test_item_left_only_inside_a_repeat():
     with pytest.raises(Stop, match="item_left"):
         check_learned([{"id": "r2", "action": "click", "target": f"{PG}.done", "outcomes": [LEFT]}])
+
+
+def _runner(tmp_path, monkeypatch, **kw):
+    monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
+    return Runner(make(tmp_path, **kw), Desk(["Ada"]), tmp_path)
+
+
+def test_missing_lists_unchecked_press(tmp_path, monkeypatch):
+    r = _runner(tmp_path, monkeypatch)
+    assert engine.outcomes_missing(r.flow, r.pages) == ["Approve & promote"]
+    r = _runner(tmp_path, monkeypatch, r2={"outcomes": [COUNT]})
+    assert engine.outcomes_missing(r.flow, r.pages) == []
+
+
+def test_outside_only_flow_not_checked(tmp_path, monkeypatch):
+    r = _runner(tmp_path, monkeypatch)
+    r.flow["destinations"] = ["https://boards.greenhouse.io"]
+    assert engine.outcomes_missing(r.flow, r.pages) == []
+
+
+def test_approve_flow_refuses_before_touch_id(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(engine.auth, "approve", lambda *a, **k: calls.append(a) or (True, "biometric"))
+    with pytest.raises(Stop, match="^needs an outcome"):
+        _runner(tmp_path, monkeypatch).approve_flow()
+    assert calls == []
+
+
+def test_approved_digest_keeps_running(tmp_path, monkeypatch):
+    assert go(tmp_path, monkeypatch, Desk(["Ada"])) is None
+    assert "unchecked" in (tmp_path / "audit.jsonl").read_text()
