@@ -1839,6 +1839,12 @@ def _lesson_form(P, name):
     return re.search(r"name=p value='([0-9a-f]+)'", page)[1], page
 
 
+def _ticked(P, name):
+    """The lesson form with every proposed outcome ticked."""
+    p, page = _lesson_form(P, name)
+    return {"p": p, **{k: "1" for k in re.findall(r"name='(out:[0-9]+:[0-9]+:[0-9]+)'", page)}}
+
+
 def _snap(P):
     files = [*P.flows.glob("*.yaml"), *(P.flows.parent / "pages").glob("*.yaml"), *(P.home / "apply").glob("answers*")]
     return {f: f.read_bytes() for f in files}
@@ -2617,15 +2623,21 @@ def _teach_lesson(P):
     home = Node("document", "JobLens", children=[Node("heading", "Applications"), Node("link", "Discover")])
     disc = Node("document", "JobLens", children=[Node("heading", "Discover"), Node("button", "Review")])
 
+    def shown(n):   # the Discover page as the recorder saw it, Promoted (n)
+        return capture.tree(Node("document", "JobLens", children=[Node("heading", "Discover"), Node("button", "Review"),
+                                                                   Node("tab", f"Promoted ({n})")]))
+
     def click(name, risk="navigate"):
         return {"kind": "click", "spec": {"role": "link" if name == "Discover" else "button", "name": name},
-                "label": name, "value": "", "secure": False, "submit": risk != "navigate", "risk": risk, "sure": True}
+                "label": name, "value": "", "secure": False, "submit": risk != "navigate", "risk": risk, "sure": True,
+                "before": capture.tree(home) if name == "Discover" else shown(7)}
     name = lessons.new_name("teach_new")
     lessons.write(P.home, name, {"flow": "teach_new", "digest": None, "step": None, "at": "2026-11-12T10:00:00", "new_app": True,
                                  "pages": [{"url": "http://localhost:8100/", "title": "JobLens · Applications",
                                             "tree": capture.tree(home), "events": [click("Discover")]},
                                            {"url": "http://localhost:8100/discover", "title": "JobLens · Discover",
-                                            "tree": capture.tree(disc), "events": [click("Review"), click("Approve & promote", "submit")]}]})
+                                            "tree": capture.tree(disc), "events": [click("Review"), click("Approve & promote", "submit")]}],
+                                 "done_tree": shown(8), "done_url": "http://localhost:8100/discover"})
     applyfiles.write_json(P.home, applyfiles.TEACH_OPEN, {"lesson": name})
     return name
 
@@ -2668,7 +2680,11 @@ def test_ext_done_retry_after_a_failed_bind(panel, monkeypatch):
 
 def test_new_app_lesson_approves_the_draft(panel):
     name = _done(panel)
-    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    page = _lesson_form(panel, name)[1]
+    assert "Promoted 7 → 8 (+1), checked after: Approve &amp; promote" in page
+    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])   # nothing ticked
+    assert _tells(panel)[-1].endswith("Not approved: needs an outcome: Approve & promote.") and not panel.asked
+    panel.post("/lesson/approve", name=name, **_ticked(panel, name))
     text = "Approve the new app Approve shortlisted and what GOV-AIOS learned"
     assert panel.asked.count(text) == 1 and panel.asked[-1] == text
     app = next(a for a in list_apps(panel.flows, panel.home) if a.id == "studio_approve_shortlisted")
@@ -2689,7 +2705,7 @@ def test_approvals_sends_a_teach_draft_to_its_lesson(panel):
     page = panel.get("/approvals")[1]
     assert f"href='/lesson/{name}'>Approve it with what I learned</a>" in page
     assert "name=flow value='studio_approve_shortlisted'><button>Approve" not in page
-    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    panel.post("/lesson/approve", name=name, **_ticked(panel, name))
     assert "studio_approve_shortlisted" in Approvals(panel.home / "approvals.json").snapshot()["flows"]
 
 
@@ -2717,13 +2733,13 @@ def test_new_app_lesson_never_re_approves_after_revoke(panel):
     name = _done(panel)
     pages = panel.flows.parent / "pages"
     before = {f: f.read_bytes() for f in (*panel.flows.glob("*.yaml"), *pages.glob("*.yaml"))}
-    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    panel.post("/lesson/approve", name=name, **_ticked(panel, name))
     assert Approvals(panel.home / "approvals.json").snapshot()["flows"].get("studio_approve_shortlisted")
     panel.post("/revoke", kind="flow", flow="studio_approve_shortlisted")
     for f in (*panel.flows.glob("*.yaml"), *pages.glob("*.yaml")):   # the app's bytes as they were when bound
         f.unlink() if f not in before else f.write_bytes(before[f])
     n = len(panel.asked)
-    panel.post("/lesson/approve", name=name, p=_lesson_form(panel, name)[0])
+    panel.post("/lesson/approve", name=name, **_ticked(panel, name))
     assert "Approve Approve shortlisted first" in _tells(panel)[-1] and len(panel.asked) == n
     assert "studio_approve_shortlisted" not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
 

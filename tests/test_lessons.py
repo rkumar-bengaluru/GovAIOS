@@ -328,7 +328,8 @@ def test_joblens_lesson_builds_two_cases(tmp_path):
     d, raw = read_bound(app, tmp_path / "pages")
     assert les["digest"] == d
     prop = lessons.propose(les, tmp_path / "pages", Bank())
-    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml",
+                         require_outcomes=False)
     on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
     new = prop["pages"][1]["id"]
     assert list(on) == ["joblens_applications", new, "unknown"]
@@ -364,7 +365,7 @@ def test_own_app_submit_click_is_a_press(tmp_path):
     steps = prop["pages"][1]["steps"]
     assert steps[2]["kind"] == "click" and steps[2]["press"] is True
     assert all(s["kind"] != "hand_over" for p in prop["pages"] for s in p["steps"])
-    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml")
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", require_outcomes=False)
     wf = yaml.safe_load(plan["flow"][1])["workflow"]
     on = next(s for s in wf["steps"] if s["id"] == "on_start")["on_match"]
     do = on[prop["pages"][1]["id"]]["do"]
@@ -439,7 +440,7 @@ def test_build_wraps_the_round_in_repeat(tmp_path):
     les, app = joblens(tmp_path)
     _, raw = read_bound(app, tmp_path / "pages")
     prop = lessons.propose(les, tmp_path / "pages", Bank())
-    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10}, require_outcomes=False)
     on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
     new = prop["pages"][1]["id"]
     review = f"{new}.button_review"
@@ -463,7 +464,7 @@ def test_repeat_refusals_and_same_bytes(tmp_path):
     prop = lessons.propose(les, tmp_path / "pages", Bank())
 
     def build(prop=prop, **kw):
-        return lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", **kw)
+        return lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", **kw, require_outcomes=False)
     a, b = build(repeats={1: 10}), build(repeats={1: 10})   # tick, untick, tick: same flow, same digest
     assert build(repeats={1: 10})["flow"] == a["flow"] and a["flow"] == b["flow"] and a["digest"] == b["digest"]
     assert build()["flow"] != a["flow"]
@@ -485,7 +486,7 @@ def test_closing_hand_over_follows_the_repeat(tmp_path):
     _, raw = read_bound(app, tmp_path / "pages")
     prop = lessons.propose(les, tmp_path / "pages", Bank())
     prop["pages"][1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None, "keep": True})
-    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10})
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", {1: 10}, require_outcomes=False)
     on = next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
     do = on[prop["pages"][1]["id"]]["do"]
     assert [d["action"] for d in do] == ["click", "repeat", "hand_over"]
@@ -505,3 +506,137 @@ def test_known_page_storing_navigate_is_raised_to_submit_when_the_recorder_reads
     assert press["target"] == f"{p2['id']}.approve_promote"
     assert p2["yaml"]["page"]["elements"]["approve_promote"]["risk"] == "submit"
     assert "approve_promote" in p2["added"]   # shown as "Adds to this page", and the page is rewritten
+
+
+# ---------- outcomes: proposed per press, ticked by the admin, written by build ----------
+
+def _discover(promoted, names, inbox=3):
+    from govaios import capture
+    return capture.tree(Node("document", "JobLens", children=[
+        Node("heading", "Discover"), Node("tab", f"Shortlisted ({len(names)})"), Node("tab", f"Promoted ({promoted})"),
+        Node("link", f"Inbox ({inbox})"),
+        *[Node("row", "", children=[Node("cell", c), Node("button", "Review")]) for c in names]]))
+
+
+def joblens_outcomes(tmp_path, inbox_after=3):
+    """joblens() with each click's "before" tree and a Done tree: Promoted 7 -> 8, Acme left the list."""
+    from govaios import capture
+    les, app = joblens(tmp_path)
+    home = capture.tree(Node("document", "JobLens", children=[Node("heading", "Applications"), Node("link", "Discover")]))
+    les["pages"][0]["events"][0]["before"] = home
+    for e in les["pages"][1]["events"]:
+        e["before"] = _discover(7, ["Acme", "Globex"])
+    les["done_tree"], les["done_url"] = _discover(8, ["Globex"], inbox_after), "http://localhost:8100/discover"
+    return les, app
+
+
+def _press(prop):
+    return next((i, j) for i, p in enumerate(prop["pages"]) for j, s in enumerate(p["steps"]) if s.get("press"))
+
+
+def test_propose_count_and_item_left(tmp_path):
+    les, _ = joblens_outcomes(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    i, j = _press(prop)
+    outs = prop["pages"][i]["steps"][j]["outcomes"]
+    [c] = [o for o in outs if o["kind"] == "count" and o["label"] == "Promoted"]
+    assert (c["role"], c["before"], c["after"], c["change"], c["at"], c["page"]) == \
+        ("tab", 7, 8, 1, [1, 2], prop["pages"][1]["id"])
+    assert {"kind": "item_left", "at": [1, 2], "page": prop["pages"][1]["id"]} in outs
+    assert all(s.get("outcomes") is None for p in prop["pages"] for s in p["steps"] if not s.get("press"))
+
+
+def test_propose_hr_after_later_click(tmp_path):
+    from govaios import capture
+
+    def hr(n):
+        return capture.tree(tree(Node("button", "Schedule"), Node("tab", f"Scheduled ({n})"), title="HR"))
+    les = lesson(tmp_path, page(tree(Node("button", "Schedule"), Node("tab", "Scheduled (3)"), title="HR"), [
+        {**ev("click", "button", "Schedule"), "risk": "submit", "sure": True, "before": hr(3)},
+        {"kind": "click", "spec": {"role": "tab", "name_matches": "^Scheduled \\(\\d+\\)$"}, "label": "Scheduled",
+         "risk": "navigate", "sure": True, "before": hr(3)}], "http://localhost:8100/hr"))
+    les["done_tree"] = hr(4)
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert p["steps"][0]["press"] and p["steps"][1]["kind"] == "click"
+    assert p["steps"][0]["outcomes"] == [{"kind": "count", "role": "tab", "label": "Scheduled", "before": 3,
+                                          "after": 4, "change": 1, "at": [0, 1], "page": p["id"]}]
+
+
+def test_old_lesson_without_trees_proposes_no_outcome(tmp_path):
+    les, _ = joblens(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    i, j = _press(prop)
+    assert prop["pages"][i]["steps"][j]["outcomes"] == []
+
+
+def _plan(tmp_path, les, app, prop, deleted=(), **kw):
+    from govaios.approvals import read_bound
+    _, raw = read_bound(app, tmp_path / "pages")
+    return lessons.build(les, prop, set(deleted), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml", **kw)
+
+
+def _tick(prop, want):
+    i, j = _press(prop)
+    return {(i, j): [k for k, o in enumerate(prop["pages"][i]["steps"][j]["outcomes"]) if want(o)]}
+
+
+def test_spurious_counts_are_proposed_unticked(tmp_path):
+    les, app = joblens_outcomes(tmp_path, inbox_after=4)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    i, j = _press(prop)
+    assert any(o.get("label") == "Inbox" and o["change"] == 1 for o in prop["pages"][i]["steps"][j]["outcomes"])
+    plan = _plan(tmp_path, les, app, prop, outcomes=_tick(prop, lambda o: o.get("label") == "Promoted"))
+    assert b"inbox" not in plan["flow"][1].lower()
+    assert all(b"Inbox" not in b for b in plan["pages"].values())
+
+
+def test_edits_reads_outcome_ticks():
+    from govaios.panel import lesson as lesson_ui
+    prop = {"pages": [{"steps": [{}, {}, {"outcomes": [{"kind": "item_left", "at": [0, 2], "page": "p"}]}]}],
+            "bank": []}
+    assert lesson_ui.edits(prop, {"out:0:2:0": "1"})[3] == {(0, 2): [0]}
+    for bad in ("out:9:9:9", "out:0:2:1", "out:0:1:0"):
+        with pytest.raises(ValueError):
+            lesson_ui.edits(prop, {bad: "1"})
+
+
+def test_lesson_page_shows_unticked_proposals(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = joblens_outcomes(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    html = lesson_ui.page("n", les, prop, set(), {}, "")
+    assert "<input type=checkbox name='out:1:2:0' value=1>" in html
+    assert "Promoted 7 → 8 (+1), checked after: Approve &amp; promote" in html
+    assert "this round&#x27;s item left the list, checked after: Approve &amp; promote" in html
+
+
+def test_build_writes_outcomes_and_element(tmp_path):
+    from govaios import engine
+    les, app = joblens_outcomes(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    new = prop["pages"][1]["id"]
+    plan = _plan(tmp_path, les, app, prop, outcomes=_tick(prop, lambda o: o.get("label") == "Promoted"))
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    on = next(s for s in wf["steps"] if s["id"] == "on_start")["on_match"]
+    press = on[new]["do"][-1]
+    assert press["outcomes"] == [{"for": press["id"], "kind": "count", "target": f"{new}.promoted_count", "change": 1}]
+    pg = yaml.safe_load(plan["pages"][tmp_path / "pages" / f"{new}.yaml"])["page"]
+    assert pg["elements"]["promoted_count"] == {"role": "tab", "name_matches": "^Promoted \\(\\d+\\)$", "risk": "navigate"}
+    engine.check_learned(wf["steps"], {new: pg})
+    # with the Repeat ticked, the item_left proposal goes on the press inside the round
+    plan = _plan(tmp_path, les, app, prop, repeats={1: 10}, outcomes=_tick(prop, lambda o: True))
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    press = next(s for s in wf["steps"] if s["id"] == "on_start")["on_match"][new]["do"][1]["steps"][-1]
+    assert [o["kind"] for o in press["outcomes"]].count("item_left") == 1 and press["outcomes"][0]["for"] == press["id"]
+    pg = yaml.safe_load(plan["pages"][tmp_path / "pages" / f"{new}.yaml"])["page"]
+    engine.check_learned(wf["steps"], {new: pg})
+
+
+def test_build_refuses_press_without_outcome(tmp_path):
+    les, app = joblens_outcomes(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    with pytest.raises(ValueError, match="^needs an outcome: Approve & promote$"):
+        _plan(tmp_path, les, app, prop)
+    assert _plan(tmp_path, les, app, prop, require_outcomes=False)   # Try it never presses
+    with pytest.raises(ValueError, match="the step an outcome is checked after was removed"):
+        _plan(tmp_path, les, app, prop, deleted=[_press(prop)], outcomes=_tick(prop, lambda o: True))

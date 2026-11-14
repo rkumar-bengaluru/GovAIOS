@@ -1712,7 +1712,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 lesson_lock.release()
         return post
 
-    def lesson_plan(f):
+    def lesson_plan(f, require_outcomes):
         """A posted lesson's checks, then lessons.build: a namespace (name, back, lesson, app, fid, sandbox, pages_dir,
         new_app, plan), or where to send the browser when it is refused (None: not found). Writes nothing."""
         name = f.get("name", "")
@@ -1721,7 +1721,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         back = f"/lesson/{name}"
         try:
             lesson, proposal, app, _, _ = lesson_ctx(name)
-            deleted, keeps, repeats = lesson_ui.edits(proposal, f)
+            deleted, keeps, repeats, outcomes = lesson_ui.edits(proposal, f)
         except lesson_ui.BadCap as e:
             tell(f"Not approved: {e}.")
             return back
@@ -1753,7 +1753,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return back
         try:
             plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir,
-                                 home / applyfiles.BANK, repeats)
+                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
@@ -1762,7 +1762,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     def approve_lesson(f):
         """The only place a lesson changes a flow, page files or the bank: checked, then Touch ID, then written."""
-        c = lesson_plan(f)
+        c = lesson_plan(f, True)
         if not isinstance(c, SimpleNamespace):
             return c
         name, back, app, fid, sandbox, pages_dir, new_app, plan = (c.name, c.back, c.app, c.fid, c.sandbox,
@@ -1800,7 +1800,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if not panel.session.active():
             tell(NO_SESSION)
             return "/"
-        c = lesson_plan(f)
+        c = lesson_plan(f, False)   # a Try never presses (spec Settled 5)
         if not isinstance(c, SimpleNamespace):
             return c
         if c.sandbox:

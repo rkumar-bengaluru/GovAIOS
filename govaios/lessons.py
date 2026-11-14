@@ -197,7 +197,7 @@ def propose(lesson, pages_dir, bank) -> dict:
     """The change a lesson proposes. Pure: reads pages_dir, never writes."""
     known = _known(pages_dir)
     taken = {f.stem for f in Path(pages_dir).glob("*.yaml")}   # unreadable files too: never overwritten
-    out_pages, ops, keys = [], [], {e.key for e in bank.entries}
+    out_pages, ops, keys, marks = [], [], {e.key for e in bank.entries}, []
     for lp in lesson["pages"]:
         root = studio._as_nodes(lp["tree"])[0]
         hit = next(((pid, p) for pid, p in known if _identifies(p, root)), None)
@@ -213,7 +213,9 @@ def propose(lesson, pages_dir, bank) -> dict:
             page["elements"] = {k: v for k, v in page["elements"].items() if k in anchors}
         steps, added = [], []
         evs = lp["events"]
+        marks.append([])
         for i, ev in enumerate(evs):
+            marks[-1].append(len(steps))   # the lines made before event i
             kind, label, spec = ev["kind"], ev.get("label") or "", ev.get("spec")
             if kind == "click" and i + 1 < len(evs) and evs[i + 1]["kind"] == "attach":
                 continue   # the file chooser's own button: the attach covers it
@@ -268,11 +270,86 @@ def propose(lesson, pages_dir, bank) -> dict:
                     ops.append(op)
         out_pages.append({"id": pid, "new": new, "yaml": {"page": page}, "steps": steps,
                           "added": added})
+    _outcomes(lesson, out_pages, marks)
     if out_pages and not all(own(lp["url"]) for lp in lesson["pages"]) \
             and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[-1]["steps"]):
         out_pages[-1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None,
                                        "keep": True})
     return {"pages": out_pages, "bank": ops}
+
+
+def _counts(tree):
+    """{(role, prefix): N} for each "Prefix (N)" node that is the only one of its role and prefix."""
+    from .recorder import COUNT   # recorder imports lessons
+    seen = {}
+    for n in studio._as_nodes(tree)[0].walk():
+        if m := COUNT.match(n.name or ""):
+            seen.setdefault((n.role, m[1]), []).append(engine.count_of(n.name))
+    return {k: v[0] for k, v in seen.items() if len(v) == 1}   # the engine reads a count only from one node
+
+
+def _round(tree, spec, page):
+    """(clicked item's label, how many items carry it) in tree, or None."""
+    root = studio._as_nodes(tree)[0]
+    hit, cands = engine.find_all(root, spec, page), engine.item_candidates(root, spec, page)
+    item = next((c for c in cands if hit and any(x is hit[0] for x in c.walk())), None)
+    if item is None:
+        return None
+    label = engine.item_label(item, engine.item_target(item, spec, page))
+    return label, sum(engine.item_label(c, engine.item_target(c, spec, page)) == label for c in cands)
+
+
+def _outcomes(lesson, out_pages, marks):
+    """Each press line's "outcomes": what changed after it, read from the recorder's trees (see the brief, Task 6)."""
+    seq = [(i, e) for i, m in enumerate(marks) for e in range(len(m))]
+
+    def line(i, e):   # the last line made by event e
+        m = marks[i]
+        return (m[e + 1] if e + 1 < len(m) else len(out_pages[i]["steps"])) - 1
+
+    def made_by(i, j):   # the event that made line j
+        return max(e for e, m in enumerate(marks[i]) if m <= j)
+    presses = {(i, made_by(i, j)): j for i, p in enumerate(out_pages) for j, s in enumerate(p["steps"]) if s.get("press")}
+    can = repeatable({"pages": out_pages}, lesson)
+    done = lesson.get("done_tree")
+    if done:
+        droot = studio._as_nodes(done)[0]
+        done_pid = next((p["id"] for p in reversed(out_pages) if _identifies(p["yaml"]["page"], droot)),
+                        out_pages[-1]["id"])
+    for (i, e), j in presses.items():
+        outs = out_pages[i]["steps"][j]["outcomes"] = []
+        before = lesson["pages"][i]["events"][e].get("before")
+        if not before:
+            continue   # a lesson recorded before trees were kept
+        afters, f = [], seq.index((i, e))
+        for g, (pi, pe) in enumerate(seq[f + 1:], f + 1):
+            if t := lesson["pages"][pi]["events"][pe].get("before"):   # the tree after the event before it
+                afters.append((t, seq[g - 1], out_pages[pi]["id"]))
+            if (pi, pe) in presses:
+                break   # what follows the next press is that press's
+        else:
+            if done:
+                afters.append((done, seq[-1], done_pid))
+        afters = [(t, [a[0], line(*a)], pid) for t, a, pid in afters if line(*a) >= 0]
+        was = _counts(before)
+        for t, at, pid in afters:
+            for (role, label), n in _counts(t).items():
+                if was.get((role, label), n) != n and not any(o.get("label") == label and o["role"] == role for o in outs):
+                    outs.append({"kind": "count", "role": role, "label": label, "before": was[(role, label)],
+                                 "after": n, "change": n - was[(role, label)], "at": at, "page": pid})
+        if i in can and j >= can[i]:   # inside the page's repeatable range
+            page = out_pages[i]["yaml"]["page"]
+            r = out_pages[i]["steps"][can[i]]
+            spec = page["elements"][r["target"].split(".", 1)[1]]
+            t0 = lesson["pages"][i]["events"][made_by(i, can[i])].get("before")
+            was = _round(t0, spec, page) if t0 else None
+            nxt = next(((t, at, pid) for t, at, pid in afters if pid == out_pages[i]["id"]), None)
+            if was and nxt:
+                root = studio._as_nodes(nxt[0])[0]
+                left = sum(engine.item_label(c, engine.item_target(c, spec, page)) == was[0]
+                           for c in engine.item_candidates(root, spec, page))
+                if left < was[1]:
+                    outs.append({"kind": "item_left", "at": nxt[1], "page": nxt[2]})
 
 
 def _identifies(page, root):
@@ -361,9 +438,10 @@ def repeatable(proposal, lesson) -> dict:
     return out
 
 
-def _cases(proposal, deleted, ids, on, repeats=None):
+def _cases(proposal, deleted, ids, on, repeats=None, made=None):
     """The on_match cases a proposal adds to a step whose cases are on; ids: the flow's step ids (grown here).
-    repeats: {page index: (line index, cap)}: that line to the page's last kept line become one repeat step."""
+    repeats: {page index: (line index, cap)}: that line to the page's last kept line become one repeat step.
+    made: filled with {(page index, line index): the flow step built from that line}."""
     out, last = {}, len(proposal["pages"]) - 1
     for i, p in enumerate(proposal["pages"]):
         if p["id"] in on or p["id"] in out:   # the flow already handles this page: its own case stays
@@ -384,6 +462,8 @@ def _cases(proposal, deleted, ids, on, repeats=None):
                     n += 1
                 ids.add(f"learned_{p['id']}_{n}")
                 s = {"id": f"learned_{p['id']}_{n}", **s}
+                if made is not None:
+                    made[(i, j)] = s
                 if j == at:
                     rep = {"id": f"learned_{p['id']}_r{j}", "action": "repeat", "item": s["target"], "max": cap,
                            "steps": []}
@@ -404,13 +484,41 @@ def preview(lesson, pages_dir, bank) -> tuple[list[str], str]:
     return lines, yaml.safe_dump(_cases(proposal, set(), set(), {}), sort_keys=False)
 
 
-def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path, repeats=None) -> dict:
+def _count_key(els, role, label):
+    """The page element that reads "label (N)": an existing one with that spec, else a new key."""
+    spec = {"role": role, "name_matches": f"^{re.escape(label)} \\(\\d+\\)$", "risk": "navigate"}
+    base = f"{studio._slug(label) or role}_count"
+    k, i = base, 2
+    while k in els and els[k] != spec:
+        k, i = f"{base}_{i}", i + 1
+    if k not in els:
+        els[k] = spec
+    return k
+
+
+def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path, repeats=None, outcomes=None,
+          require_outcomes=True) -> dict:
     """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
     "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
     raw: read_bound's {path: bytes} from the digest check: the flow is built from those bytes, never re-read.
     deleted: {(page index, line index)}; keeps: {bank line index: keep}; repeats: {page index: cap}. ValueError when it cannot be written
-    (the bank ops are tried against bank_path's bank as it is now, writing nothing)."""
+    (the bank ops are tried against bank_path's bank as it is now, writing nothing). outcomes: {(page index, press
+    line index): [ticked proposal index]}; require_outcomes: every submit press needs one (Try it never presses)."""
     pages_dir = Path(pages_dir)
+    proposal, adds = copy.deepcopy(proposal), []   # count elements go on the after pages: never the caller's proposal
+    by_id = {p["id"]: p for p in proposal["pages"]}
+    for (i, j), ks in (outcomes or {}).items():
+        for k in ks:
+            o = proposal["pages"][i]["steps"][j]["outcomes"][k]
+            if o["kind"] == "count":
+                p = by_id[o["page"]]
+                key = _count_key(p["yaml"]["page"]["elements"], o["role"], o["label"])
+                if not p["new"] and key not in p["added"]:
+                    p["added"].append(key)
+                adds.append(((i, j), tuple(o["at"]), {"kind": "count", "target": f"{o['page']}.{key}",
+                                                      "change": o["change"]}))
+            else:
+                adds.append(((i, j), tuple(o["at"]), {"kind": "item_left"}))
     pages, fresh = {}, set()
     for p, lp in zip(proposal["pages"], lesson["pages"]):
         if p["new"] or p["added"]:   # a known page gaining nothing is not rewritten
@@ -440,7 +548,13 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
         raise ValueError("this page has no list to repeat on")
     if any(proposal["pages"][i]["id"] in on for i in repeats or {}):
         raise ValueError("this page is already in the app; Repeat not added")
-    cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on, {i: (can[i], c) for i, c in (repeats or {}).items()})
+    made = {}
+    cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on, {i: (can[i], c) for i, c in (repeats or {}).items()},
+                   made)
+    for press, at, o in adds:
+        if press not in made or at not in made:
+            raise ValueError("the step an outcome is checked after was removed")
+        made[at].setdefault("outcomes", []).append({"for": made[press]["id"], **o})
     on.update(cases)
     n = sum(len(c["do"]) for c in cases.values())
     if any(s.get("press") and s["keep"] and (i, j) not in deleted for i, p in enumerate(proposal["pages"])
@@ -461,13 +575,21 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     data = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True).encode()
     if yaml.safe_load(data) != doc:
         raise ValueError("the new flow does not read back the same")
-    h = hashlib.sha256(data)   # read_bound's digest, over the bytes approved here: what the files must hold after
+    h, schemas = hashlib.sha256(data), {}   # read_bound's digest, over the bytes approved here: what the files must hold after
     for pid in sorted(pages_used(doc["workflow"])):
         pp = pages_dir / f"{pid}.yaml"
         try:   # a page bound only now (a known page's new case) is read here, before Touch ID
-            h.update(pages[pp] if pp in pages else raw[pp] if pp in raw else pp.read_bytes())
+            b = pages[pp] if pp in pages else raw[pp] if pp in raw else pp.read_bytes()
         except FileNotFoundError:
             raise ValueError(f"page {pid} is missing") from None
+        h.update(b)
+        schemas[pid] = (yaml.safe_load(b) or {}).get("page", {})
+    try:
+        engine.check_learned(wf["steps"], schemas)   # now with the pages: each count target is an element
+    except engine.Stop as e:
+        raise ValueError(str(e)) from None
+    if require_outcomes and (missing := engine.outcomes_missing(wf, schemas)):
+        raise ValueError("needs an outcome: " + ", ".join(missing))
     ops = [{**o, "keep": keeps.get(i, o["keep"])} for i, o in enumerate(proposal["bank"])]
     formfill.apply_ops(Path(bank_path), ops, dry=True)   # a bad op is refused here, before Touch ID and any write
     kept = sum(1 for o in ops if o["keep"] == "bank")
