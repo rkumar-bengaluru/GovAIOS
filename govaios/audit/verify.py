@@ -1,5 +1,12 @@
 """Standalone audit verifier: python verify.py audit.jsonl audit_pubkey.pem
-Imports only stdlib + cryptography so it can be copied out and run alone."""
+Proof packet:               python verify.py --packet packet.json
+Imports only stdlib + cryptography so it can be copied out and run alone.
+
+Packet mode checks each entry's hash and signature, the per-run chain (run_prev from 64 zeros,
+run_seq 1..n, one run, flow_start first), the context entries and the export entry. It does not check prev.
+Fingerprint rule (item_left outcomes): sha256 hex of f"{run}\\n{round}\\n{norm(identity)}", where norm =
+Unicode NFC, strip, collapse whitespace, casefold. A fingerprint is a commitment: anyone who can guess
+the item's name can recompute it and confirm it."""
 import base64
 import hashlib
 import json
@@ -64,7 +71,90 @@ def verify(log_path: Path, pubkey_path: Path) -> VerifyResult:
     return VerifyResult(True, n, None, None)
 
 
+@dataclass
+class PacketResult:
+    ok: bool
+    complete: bool
+    notes: list
+    problem: str | None
+
+
+def _signed(e, pub):
+    """None when e's hash and signature hold, else the problem."""
+    try:
+        h, sig = e["hash"], e["sig"]
+        body = {k: v for k, v in e.items() if k not in ("hash", "sig")}
+        canon = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        if hashlib.sha256(canon).hexdigest() != h:
+            return "bad hash"
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return "bad hash"
+    try:
+        pub.verify(base64.b64decode(sig, validate=True), h.encode(), ec.ECDSA(hashes.SHA256()))
+    except (InvalidSignature, ValueError, TypeError):
+        return "bad signature"
+    return None
+
+
+def verify_packet(p: dict) -> PacketResult:
+    def fail(problem):
+        return PacketResult(False, False, [], problem)
+
+    try:
+        pub = serialization.load_pem_public_key(p["pubkey"].encode())
+        entries, context, export, run = p["entries"], p["context"], p["export"], p["run"]
+        if not entries or entries[0].get("kind") != "flow_start":
+            return fail("flow_start is not first")
+        prev = ZERO
+        for i, e in enumerate(entries, 1):
+            bad = _signed(e, pub)
+            if bad:
+                return fail(bad)
+            if e.get("run") != run:
+                return fail("entry from another run")
+            if e.get("run_prev") != prev:
+                return fail(f"run_prev broken at entry {i}")
+            if e.get("run_seq") != i:
+                return fail(f"run_seq gap at entry {i}")
+            prev = e["hash"]
+        for e in context:
+            bad = _signed(e, pub)
+            if bad:
+                return fail(bad)
+            if e.get("flow_hash") != entries[0].get("flow_hash"):
+                return fail("context is for another flow")
+        bad = _signed(export, pub)
+        if bad:
+            return fail(bad)
+        if export.get("target") != run:
+            return fail("export is for another run")
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        return fail(f"malformed packet: {e}")
+    notes = []
+    outs = [e for e in entries if e["kind"] == "outcome"]
+    if any(e.get("outcome") == "unchecked" for e in outs):
+        notes.append("no outcome check")
+    counted = {e.get("step") for e in outs if e.get("outcome") == "confirmed" and "count_after" in e}
+    itemed = {e.get("step") for e in outs if "fingerprint" in e}
+    if counted - itemed:
+        notes.append("count changed; item not matched")
+    return PacketResult(True, entries[-1]["kind"] in ("flow_end", "stop"), notes, None)
+
+
 def main(argv) -> int:
+    if len(argv) == 2 and argv[0] == "--packet":
+        try:
+            r = verify_packet(json.loads(Path(argv[1]).read_text()))
+        except (OSError, ValueError) as e:
+            print(f"FAIL: {e}")
+            return 1
+        if not r.ok:
+            print(f"FAIL: {r.problem}")
+            return 1
+        print(f"OK packet {'complete' if r.complete else 'incomplete (no end entry)'}")
+        for n in r.notes:
+            print(n)
+        return 0
     if len(argv) != 2:
         print("usage: verify.py audit.jsonl audit_pubkey.pem")
         return 1
