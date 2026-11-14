@@ -239,3 +239,10 @@ def test_repeat_audit_has_no_item_text(tmp_path, monkeypatch):
     go(tmp_path, monkeypatch, ["Ada Lovelace", "Alan Turing"])
     text = (tmp_path / "audit.jsonl").read_text()
     assert "Ada" not in text and "Turing" not in text and '"fingerprint"' in text
+
+
+def test_repeat_stuck_round_leaks_no_item_text(tmp_path, monkeypatch):
+    d, why = go(tmp_path, monkeypatch, ["Ada Lovelace", "Alan Turing"], stuck={1})
+    text = (tmp_path / "audit.jsonl").read_text()
+    assert why and "Alan" not in why and "Turing" not in why
+    assert "Alan" not in text and "Turing" not in text and "Ada" not in text
