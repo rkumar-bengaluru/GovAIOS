@@ -277,6 +277,8 @@ class Runner:
         self.ticket = ticket   # panel run: a one-use ticket stands in for the Touch ID start proof
         self.inputs = inputs   # validated in _run, not here: the panel builds a Runner only to approve the flow
         self.run_id = None
+        self._run_seq = 0
+        self._run_prev = "0" * 64   # per-run chain: each entry names the hash of the one before it
         if ticket is not None:
             from .panel import tickets
             self.run_id = tickets.run_id(ticket)
@@ -313,8 +315,12 @@ class Runner:
         """One signed entry; console shows only kind, step and decision (no content)."""
         if self.ctx.get("task"):   # JobLens: which job's task this line belongs to
             f.setdefault("item", self.ctx["task"])
-        self.audit.append(kind, flow=self.flow["id"], flow_version=self.flow["version"],
-                          executor=self.executor, step=self.step, **f)
+        if self.run_id:
+            f.update(run=self.run_id, run_seq=self._run_seq + 1, run_prev=self._run_prev)
+        entry = self.audit.append(kind, flow=self.flow["id"], flow_version=self.flow["version"],
+                                  executor=self.executor, step=self.step, **f)
+        if self.run_id:   # only after a successful append, so a failed write leaves the chain unchanged
+            self._run_seq, self._run_prev = entry["run_seq"], entry["hash"]
         print(f"[{datetime.now():%H:%M:%S}] {kind} {self.step or ''} {f.get('decision') or ''}".rstrip(), flush=True)
 
     def _act(self, name, fn, *args, target=None):

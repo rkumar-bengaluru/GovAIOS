@@ -29,7 +29,7 @@ def fake_auth(monkeypatch):
     monkeypatch.setattr(engine.auth, "screen_locked", lambda: False)
 
 
-def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, deliver=None, ticket=None, mint=False):
+def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, deliver=None, ticket=None, mint=False, run_id=None):
     src = tmp_path / "src"
     shutil.copytree(REPO / "flows", src / "flows")
     shutil.copytree(REPO / "pages", src / "pages")
@@ -44,6 +44,7 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, d
         t = t.replace("  steps:\n", f"  deliver: {deliver}\n  steps:\n", 1)
     f.write_text(t)
     r = Runner(f, desk(answers), tmp_path, ticket=ticket)
+    r.run_id = run_id or r.run_id
     if preapprove:
         r.approvals.approve_flow(r.flow["id"], r.digest)
     if mint:   # a panel would mint this for the approved flow
@@ -56,6 +57,20 @@ def run(tmp_path, answers, desk=FakeDesktop, directory=None, preapprove=False, d
         err = e
     entries = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
     return r, entries, err
+
+
+def test_run_entries_chain_by_run_prev(tmp_path):
+    r, es, err = run(tmp_path, [True] * 10, run_id="run-abc")
+    mine = [e for e in es if e.get("run") == "run-abc"]
+    assert mine[0]["kind"] == "flow_start" and mine[0]["run_seq"] == 1 and mine[0]["run_prev"] == "0" * 64
+    assert [e["run_seq"] for e in mine] == list(range(1, len(mine) + 1))
+    assert all(b["run_prev"] == a["hash"] for a, b in zip(mine, mine[1:]))
+    assert len(mine) == len(es)
+
+
+def test_cli_run_has_no_run_fields(tmp_path):
+    r, es, err = run(tmp_path, [True] * 10)
+    assert not any("run" in e or "run_seq" in e or "run_prev" in e for e in es)
 
 
 def test_run_writes_start_and_end(tmp_path):
