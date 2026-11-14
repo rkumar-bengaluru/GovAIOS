@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 from urllib.parse import urlsplit
 
-from . import auth, capture, runstate, studio, terms
+from . import auth, capture, fingerprint, runstate, studio, terms
 from .agents import user_home
 from .applyfiles import ASK, BANK, CARDS, LESSON_LIVE, REPLY, RESULT, SANDBOX, TASKS, TEACH_IN, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
@@ -883,15 +883,16 @@ class Runner:
                 deadline = time.time() + 10   # the item leaves once the app answers: wait as page checks wait
                 while len(self.items(s["item"])[3]) >= c:
                     if time.time() > deadline:
-                        raise Stop(f"{label} is still on the list after its round")
+                        raise Stop(f"round {k + 1}: the item is still on the list after its round")
                     time.sleep(1)
                 k += 1
-                self._audit("repeat", target=label, outcome="done")
+                self._audit("repeat", round=k, fingerprint=fingerprint.of(self.run_id or "", k, label), outcome="done")
         except Stop as e:
-            self._audit("repeat", target=label, outcome="error")
+            fp = {"fingerprint": fingerprint.of(self.run_id or "", k + 1, label)} if label else {}
+            self._audit("repeat", round=k + 1, outcome="error", **fp)
             if _ends_run(e) or label is None:   # a run stop keeps the message the run checks; no round yet: as is
                 raise
-            raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
+            raise Stop(f"repeat stopped on round {k + 1} after {k} done: {e}") from e
         self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
 
     def _click_uncovered(self, node, locate, ref, before):
