@@ -218,3 +218,12 @@ def test_not_seen_clears_queue(panel):
     P.srv.panel.tick()
     assert P.srv.panel.queue == [] and len(P.made) == 1
     assert _outcomes(P) == ["queued", "cleared"]
+
+
+def test_not_seen_through_the_run_reason_clears_queue(panel):
+    P = panel; _busy_with_inbox_queued(P)
+    P.made[0].done, P.made[0].code = True, 1   # the engine path: stopped_reason stays None
+    P.made[0].reason = "result not seen: Approve & promote was pressed, its result did not appear"
+    P.srv.panel.tick()
+    assert P.srv.panel.queue == [] and len(P.made) == 1
+    assert _outcomes(P) == ["queued", "cleared"]

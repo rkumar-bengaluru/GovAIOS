@@ -342,6 +342,17 @@ def test_approve_draft_uses_native_dialog(panel):
     assert len(P.asked) == 2
 
 
+def test_approve_own_app_without_outcome_says_why(panel):
+    import shutil
+    import test_outcomes as TO
+    src = TO.make(panel.home.parent / "o")
+    (panel.flows / "jl.yaml").write_text(src.read_text().replace('id: jl\n', 'id: jl\n  name: JobLens test\n', 1))
+    for f in src.parent.parent.joinpath("pages").glob("*.yaml"):
+        shutil.copy(f, panel.flows.parent / "pages" / f.name)
+    panel.post("/approve", flow="jl")
+    assert "needs an outcome" in _tells(panel)[-1] and not panel.asked
+
+
 def test_audit_pages_moved(panel):
     P = panel
     log = AuditLog(P.home)

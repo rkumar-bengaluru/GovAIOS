@@ -101,7 +101,7 @@ def outcomes_missing(wf, pages):
         pid, _, el = s.get("target", "").partition(".")
         spec = pages.get(pid, {}).get("elements", {}).get(el)
         if spec and spec.get("risk") == "submit" and s["id"] not in covered:
-            label = spec.get("name") or spec.get("name_matches")
+            label = spec.get("name") or spec.get("name_matches") or el
             if label not in labels:
                 labels.append(label)
     return labels
@@ -1112,7 +1112,7 @@ class Runner:
         if url and (origin(url) != origin(before) or there.scheme not in ("http", "https")
                     or (there.path, there.query) == (here.path, here.query)):   # "#top", javascript: stay clicks
             url = None
-        for attempt in range(2):                         # one bounded retry (Rule 10)
+        for attempt in range(1 if spec["risk"] == "submit" else 2):   # one bounded retry (Rule 10); a submit is never pressed twice
             if url:
                 self._go(url)
             else:

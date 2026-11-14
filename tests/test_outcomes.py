@@ -211,6 +211,9 @@ def _runner(tmp_path, monkeypatch, **kw):
 def test_missing_lists_unchecked_press(tmp_path, monkeypatch):
     r = _runner(tmp_path, monkeypatch)
     assert engine.outcomes_missing(r.flow, r.pages) == ["Approve & promote"]
+    del r.pages[PG]["elements"]["approve_promote"]["name"]   # no name at all: the element key labels it
+    assert engine.outcomes_missing(r.flow, r.pages) == ["approve_promote"]
+    r = _runner(tmp_path, monkeypatch)
     r = _runner(tmp_path, monkeypatch, r2={"outcomes": [COUNT]})
     assert engine.outcomes_missing(r.flow, r.pages) == []
 
@@ -232,3 +235,11 @@ def test_approve_flow_refuses_before_touch_id(tmp_path, monkeypatch):
 def test_approved_digest_keeps_running(tmp_path, monkeypatch):
     assert go(tmp_path, monkeypatch, Desk(["Ada"])) is None
     assert "unchecked" in (tmp_path / "audit.jsonl").read_text()
+
+
+def test_submit_press_is_never_retried(tmp_path, monkeypatch):
+    d = Desk(["Ada"])
+    e = go(tmp_path, monkeypatch, d, r2={"verify_page": OTHER})   # the page never arrives
+    assert str(e).endswith(f"after click expected {OTHER}")
+    assert d.calls.count(("click", "Approve & promote")) == 1
+    assert len([o for o in outcomes(tmp_path) if o["outcome"] == "unchecked"]) <= 1

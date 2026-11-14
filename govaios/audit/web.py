@@ -1267,8 +1267,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             packaged = identity.check()["bundle_id"] == "com.govaios.cli"
             Runner(hit.path, None, home, "gov_runner" if packaged else "gov_runner_dev").approve_flow()
             tell(f"{hit.name} is approved.")
-        except Stop:
-            tell(f"{hit.name} was not approved.")
+        except Stop as e:
+            tell(f"{hit.name} was not approved: {e}.")
         return "/approvals"
 
     def setup_post(f):
