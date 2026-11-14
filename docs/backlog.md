@@ -3,17 +3,20 @@
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
 Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-tasks`); 2026-11-07 Job Apply; before that 2026-11-08 Claude Code and Codex governance (PRs #16, #17).
 
-## Outcome check per step (2026-11-14, from the WebArena comparison)
+## Outcome check per step (built 2026-11-14, branch `feat/outcome-checks`)
 
-- **Each taught step records what it changed; every run waits for that change or stops.** Today the engine checks the
-  page before a step (`wait_for_page`) and the click point, but nothing after: a click that changes nothing still counts
-  as done (automationexercise "Add to cart", 2026-11-13). Idea from WebArena's evaluators (url_match, must_include,
-  program_html), done after every step instead of once at the end.
-- Gains: the audit shows proof ("Approve & promote → Promoted 7 → 8"), not just "clicked"; a silent miss stops with
-  "click done, result not seen"; Repeat stops cleanly when the list stops shrinking.
-- Open for design: what Studio records as the outcome (new URL, an element that appears, a count that moves), how long a
-  run waits, and what the stop card offers.
-- Related: save one-line `role 'name'` snapshots before and after each step in the audit, for readable diffs on a failure.
+Built: Studio proposes each press's outcome (count moved, item left the list), the admin ticks it, a data-changing press
+cannot be approved without one, each run polls and writes a signed `outcome` entry, "result not seen" ends the run and
+clears the queue, and a run exports as a proof packet checked by `verify.py --packet`. Design:
+`docs/superpowers/specs/2026-11-14-outcome-checks-design.md`.
+
+Open (cut from the first build):
+- **"Value changed on the item"** outcome (status Pending to Scheduled) and **"new address"** outcome.
+- **Item matching from run inputs** (needs typed text asked at Run); until then the HR case is proven by count only.
+- **Live proposals in the side panel.**
+- **Full-log membership check** in the verifier.
+- **Secure Enclave signing** of packets (today the on-disk audit key).
+- Related: one-line `role 'name'` snapshots before and after each step, for readable diffs on a failure.
 
 ## JobLens apply (app JobLens, flow `job_apply`; branch `feat/joblens-tasks`, 2026-11-08)
 

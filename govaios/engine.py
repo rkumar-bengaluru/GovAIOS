@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 from urllib.parse import urlsplit
 
-from . import auth, capture, runstate, studio, terms
+from . import auth, capture, fingerprint, runstate, studio, terms
 from .agents import user_home
 from .applyfiles import ASK, BANK, CARDS, LESSON_LIVE, REPLY, RESULT, SANDBOX, TASKS, TEACH_IN, read_json, remove, write_json
 from .formfill import (ASKABLE, cv_path, FIELD_ROLES, BankError, answer_for, load_bank, locate, normalize, ok_value,
@@ -36,11 +36,14 @@ FORM_PASSES = 3
 ASK_TIMEOUT_S = 900
 TEACH_IDLE_S = 1800   # the teaching card ends after 30 min with no new event
 LIVE_LINES = 50
+OUTCOME_POLL_S = 15   # how long a run looks for a press's taught result
+RESULT_NOT_SEEN = "result not seen"
+OUTCOME_KINDS = ("count", "item_left")
 
 
 # A stop inside one JobLens task that ends the whole run, not just that job: safety and the admin's own choices.
 RUN_STOPS = ("emergency stop", "screen_locked", "revoked", "no answer from admin", "bad reply", "ended by admin",
-             "the browser has no window in front", "Try it stops here")
+             "the browser has no window in front", "Try it stops here", RESULT_NOT_SEEN)
 COVERED_ASKS = 3   # "Something is in the way" cards per click before the run stops
 TRY_STOP = ("Try it stops here: the real run will press {}. Close the pop-up, or press Run: it starts from your "
             "start page.")
@@ -59,6 +62,49 @@ class Denied(Stop):
 
 def _emergency_stop(signum, frame):
     raise Stop("emergency stop")
+
+
+def count_of(name):
+    """The trailing "(N)" of a label ("Promoted (8)" -> 8), else None."""
+    m = re.search(r"\((\d+)\)\s*$", name or "")
+    return int(m[1]) if m else None
+
+
+def outcomes_of(steps, in_repeat=False):
+    """(step, outcome, inside a repeat's steps) for every taught outcome, nested and learned steps included."""
+    for s in steps:
+        for o in s.get("outcomes") or []:
+            yield s, o, in_repeat
+        yield from outcomes_of(s.get("steps", []), in_repeat or s.get("action") == "repeat")
+        for v in s.get("on_match", {}).values():
+            if isinstance(v, dict) and isinstance(v.get("do"), list):
+                yield from outcomes_of(v["do"], in_repeat)
+
+
+def _clicks(steps):
+    for s in steps:
+        if s.get("action") == "click":
+            yield s
+        yield from _clicks(s.get("steps", []))
+        for v in s.get("on_match", {}).values():
+            if isinstance(v, dict) and isinstance(v.get("do"), list):
+                yield from _clicks(v["do"])
+
+
+def outcomes_missing(wf, pages):
+    """Labels of submit presses no step's outcome covers, in flow order; only flows with an own destination."""
+    if not any(own(d) for d in wf.get("destinations", [])):
+        return []
+    covered = {o["for"] for _, o, _ in outcomes_of(wf["steps"])}
+    labels = []
+    for s in _clicks(wf["steps"]):
+        pid, _, el = s.get("target", "").partition(".")
+        spec = pages.get(pid, {}).get("elements", {}).get(el)
+        if spec and spec.get("risk") == "submit" and s["id"] not in covered:
+            label = spec.get("name") or spec.get("name_matches") or el
+            if label not in labels:
+                labels.append(label)
+    return labels
 
 
 # ---------- element location (neutral roles only) ----------
@@ -177,6 +223,18 @@ def check_learned(steps, pages=None):
     for i in sorted(learned):
         if ids.count(i) > 1:
             raise Stop(f"duplicate step id: {i}")
+    for _, o, in_repeat in outcomes_of(steps):
+        if not isinstance(o, dict) or o.get("for") is None or o["for"] not in ids:
+            raise Stop(f"outcome for {o.get('for') if isinstance(o, dict) else o}: no such step")
+        if o.get("kind") not in OUTCOME_KINDS:
+            raise Stop(f"outcome kind must be one of {', '.join(OUTCOME_KINDS)}")
+        if o["kind"] == "item_left" and not in_repeat:
+            raise Stop("an item_left outcome must be on a step inside a repeat")
+        t = o.get("target")
+        if o["kind"] == "count" and not (isinstance(t, str) and re.fullmatch(r"[^.]+\.[^.]+", t)
+                                         and type(o.get("change")) is int
+                                         and (pages is None or t.split(".")[1] in pages.get(t.split(".")[0], {}).get("elements", {}))):
+            raise Stop(f"count outcome for {o['for']}: target must be an element of its page and change a whole number")
 
 
 def check_repeat(d, pages=None):
@@ -277,6 +335,8 @@ class Runner:
         self.ticket = ticket   # panel run: a one-use ticket stands in for the Touch ID start proof
         self.inputs = inputs   # validated in _run, not here: the panel builds a Runner only to approve the flow
         self.run_id = None
+        self._run_seq = 0
+        self._run_prev = "0" * 64   # per-run chain: each entry names the hash of the one before it
         if ticket is not None:
             from .panel import tickets
             self.run_id = tickets.run_id(ticket)
@@ -308,13 +368,21 @@ class Runner:
             self.pages[pid] = yaml.safe_load(raw[self.pages_dir / f"{pid}.yaml"])["page"]
         check_learned(self.flow["steps"], self.pages)
         self.ctx = {}
+        self.outcomes = [o for _, o, _ in outcomes_of(self.flow["steps"])]
+        self.counts = {}     # count target -> its last value seen on an identified page
+        self._pending = {}   # press step id -> {"button", "todo": [[outcome, before, round info]]}
 
     def _audit(self, kind, **f):
         """One signed entry; console shows only kind, step and decision (no content)."""
         if self.ctx.get("task"):   # JobLens: which job's task this line belongs to
             f.setdefault("item", self.ctx["task"])
-        self.audit.append(kind, flow=self.flow["id"], flow_version=self.flow["version"],
-                          executor=self.executor, step=self.step, **f)
+        if self.run_id:
+            f.update(run=self.run_id, run_seq=self._run_seq + 1, run_prev=self._run_prev)
+        f.setdefault("step", self.step)
+        entry = self.audit.append(kind, flow=self.flow["id"], flow_version=self.flow["version"],
+                                  executor=self.executor, **f)
+        if self.run_id:   # only after a successful append, so a failed write leaves the chain unchanged
+            self._run_seq, self._run_prev = entry["run_seq"], entry["hash"]
         print(f"[{datetime.now():%H:%M:%S}] {kind} {self.step or ''} {f.get('decision') or ''}".rstrip(), flush=True)
 
     def _act(self, name, fn, *args, target=None):
@@ -371,6 +439,8 @@ class Runner:
         if self.approvals.flow_ok(self.flow["id"], digest):
             return
         f = self.flow
+        if missing := outcomes_missing(f, self.pages):
+            raise Stop("needs an outcome before approval: re-teach " + ", ".join(missing))
         ok, how = self.ask(approval_question(f, self.deliver), f"approve flow {f['id']}")
         self._audit("flow_approval", flow_hash=digest, decision="allow" if ok else "deny",
                     approver="admin", channel="touch_id", auth=how, shown=self.shown)
@@ -421,11 +491,90 @@ class Runner:
             root = self.snapshot()
             if root is not None and re.search(self.pages[page_id]["identification"].get("title_matches", ""), root.name):
                 self._audit("verify", outcome=page_id)
-                return root
+                return self._remember(page_id, root)
         page, root = self.wait_for_page([page_id], 10)
         if not page:
             raise Stop(f"not on {page_id}")
+        return self._remember(page_id, root)
+
+    def _count(self, target, root):
+        page_id, el_id = target.split(".")
+        hits = find_all(root, self.pages[page_id]["elements"][el_id], self.pages[page_id])
+        return count_of(hits[0].name) if len(hits) == 1 else None
+
+    def _remember(self, page_id, root):
+        """Each count outcome's value on this identified page: a press's "before"."""
+        for o in self.outcomes:
+            if o["kind"] == "count" and o["target"].split(".")[0] == page_id:
+                if (v := self._count(o["target"], root)) is not None:
+                    self.counts[o["target"]] = v
         return root
+
+    def _left(self, item, label, root):
+        """How many list items on root carry this round's identity (two profiles may share a name)."""
+        page = self.pages[item.split(".")[0]]
+        spec = page["elements"][item.split(".")[1]]
+        return sum(item_label(c, item_target(c, spec, page)) == label for c in item_candidates(root, spec, page))
+
+    def _befores(self, s, spec):
+        """Each of this press's outcomes with its "before"; a Stop here comes before anything is pressed."""
+        button = spec.get("name") or spec.get("name_matches")
+        todo = []
+        for o in (o for o in self.outcomes if o["for"] == s["id"]):
+            if o["kind"] == "count":
+                if (before := self.counts.get(o["target"])) is None:
+                    raise Stop(f"cannot check {button}: {o['target']} not seen before the press")
+                todo.append([o, before, None])
+            else:
+                rnd = self.ctx.get("round")
+                if rnd is None:
+                    raise Stop(f"cannot check {button}: no round item before the press")
+                todo.append([o, rnd[2], rnd])
+        return {"button": button, "todo": todo}
+
+    def _check_outcomes(self, step):
+        """Poll about every 1 s, up to OUTCOME_POLL_S, until all this step's outcomes hold on two reads in a row."""
+        checks = [(pid, t) for o in step["outcomes"] for pid, p in self._pending.items() for t in p["todo"] if t[0] is o]
+        if not checks:
+            return
+        pids = sorted({t[0]["target"].split(".")[0] if t[0]["kind"] == "count" else t[2][0].split(".")[0]
+                       for _, t in checks})
+        deadline, held = time.time() + OUTCOME_POLL_S, 0
+        while True:
+            page, root = self.current_page(pids)
+            seen = []
+            for _, (o, before, rnd) in checks:
+                if o["kind"] == "count":
+                    v = self._count(o["target"], root) if page == o["target"].split(".")[0] else None
+                    seen.append((v, v is not None and v == before + o["change"]))
+                else:
+                    v = self._left(rnd[0], rnd[1], root) if page == rnd[0].split(".")[0] else None
+                    seen.append((v, v is not None and v < before))
+            held = held + 1 if all(ok for _, ok in seen) else 0
+            if held >= 2 or time.time() > deadline:
+                break
+            time.sleep(1)
+        result = "confirmed" if held >= 2 else "not_seen"
+        for (pid, (o, before, rnd)), (v, _) in zip(checks, seen):
+            extra = ({"target": o["target"], "expected": before + o["change"]} if o["kind"] == "count"
+                     else {"round": rnd[3], "fingerprint": fingerprint.of(self.run_id or "", rnd[3], rnd[1])})
+            self._audit("outcome", outcome=result, step=pid, count_before=before, count_after=v, **extra)
+            todo = self._pending[pid]["todo"]
+            todo.remove(next(t for t in todo if t[0] is o))
+        if result == "not_seen":
+            button = self._pending[checks[0][0]]["button"]
+            for pid, _ in checks:
+                self._pending.pop(pid, None)
+            raise Stop(f"{RESULT_NOT_SEEN}: {button} was pressed, its result did not appear")
+        for pid, _ in checks:
+            if pid in self._pending and not self._pending[pid]["todo"]:
+                del self._pending[pid]
+
+    def _not_checked(self):
+        """Presses whose outcome was never looked for (the run or task stopped first)."""
+        for pid in list(self._pending):
+            del self._pending[pid]
+            self._audit("outcome", outcome="not_checked", step=pid)
 
     def items(self, ref):
         """(root, page, ref's spec, the list items holding ref's element) on a fresh, identified snapshot."""
@@ -499,8 +648,10 @@ class Runner:
             self.steps(self.flow["steps"])
         except Exception as e:   # fail closed: any failure is a recorded stop
             self._capture(str(e) if isinstance(e, Stop) else type(e).__name__)
+            self._not_checked()
             self._audit("stop",reason=str(e) if isinstance(e, Stop) else type(e).__name__)
             raise
+        self._not_checked()
         self.step = None
         self._audit("flow_end", outcome="done")
 
@@ -542,6 +693,8 @@ class Runner:
                 raise Stop("emergency stop")
             self.step = s["id"]
             out = getattr(self, "do_" + s["action"])(s)
+            if s.get("outcomes"):
+                self._check_outcomes(s)
             if out == ("end",):   # a learned page ended this list (the job is done)
                 return
             if isinstance(out, tuple) and out[0] == "skip_to":
@@ -719,6 +872,7 @@ class Runner:
                         pass
                     raise
                 self._capture(reason)
+                self._not_checked()
                 self._audit("action", action="task_stop", reason=reason, outcome="error")
                 if self.card("stopped", reason) == "end":
                     raise Stop("ended by admin") from None
@@ -868,24 +1022,27 @@ class Runner:
                         raise Stop(f"repeat: {n} {spec.get('name') or s['item']} found but none inside a row or card")
                     break
                 c, label = len(cands), item_label(cands[0], item_target(cands[0], spec, page))
-                self.ctx["round"] = (s["item"], label)
+                same = sum(item_label(x, item_target(x, spec, page)) == label for x in cands)
+                self.ctx["round"] = (s["item"], label, same, k + 1)   # same: "before" of an item_left outcome
                 try:
                     self.steps(s["steps"])   # steps[0] clicks the item (do_click finds it in the first candidate)
                 finally:
                     self.ctx.pop("round", None)
                     self.step = s["id"]
                 deadline = time.time() + 10   # the item leaves once the app answers: wait as page checks wait
-                while len(self.items(s["item"])[3]) >= c:
+                polled = any(o["kind"] == "item_left" for _, o, _ in outcomes_of(s["steps"]))   # its poll replaces this
+                while not polled and len(self.items(s["item"])[3]) >= c:
                     if time.time() > deadline:
-                        raise Stop(f"{label} is still on the list after its round")
+                        raise Stop(f"round {k + 1}: the item is still on the list after its round")
                     time.sleep(1)
                 k += 1
-                self._audit("repeat", target=label, outcome="done")
+                self._audit("repeat", round=k, fingerprint=fingerprint.of(self.run_id or "", k, label), outcome="done")
         except Stop as e:
-            self._audit("repeat", target=label, outcome="error")
+            fp = {"fingerprint": fingerprint.of(self.run_id or "", k + 1, label)} if label else {}
+            self._audit("repeat", round=k + 1, outcome="error", **fp)
             if _ends_run(e) or label is None:   # a run stop keeps the message the run checks; no round yet: as is
                 raise
-            raise Stop(f"repeat stopped on {label} after {k} done: {e}") from e
+            raise Stop(f"repeat stopped on round {k + 1} after {k} done: {e}") from e
         self._audit("repeat", outcome="cap" if k == s["max"] else "none_left", reason=f"{k} done")
 
     def _click_uncovered(self, node, locate, ref, before):
@@ -930,7 +1087,9 @@ class Runner:
             names = (getattr(node, "name", "") or "", spec.get("name") or "", spec.get("name_matches") or "")
             if spec["risk"] in ("submit", "payment") or any(_CHANGE.search(n) or _PAY.search(n) for n in names):
                 raise Stop(TRY_STOP.format(names[0] or names[1] or ref))
+        pending = None
         if spec["risk"] == "submit":
+            pending = self._befores(s, spec)
             url = self.d.current_url(self.app)
             fid = self.flow["id"]
             # ask only if policy would allow the press with a grant: never prompt for a press that is denied anyway
@@ -953,13 +1112,18 @@ class Runner:
         if url and (origin(url) != origin(before) or there.scheme not in ("http", "https")
                     or (there.path, there.query) == (here.path, here.query)):   # "#top", javascript: stay clicks
             url = None
-        for attempt in range(2):                         # one bounded retry (Rule 10)
+        for attempt in range(1 if spec["risk"] == "submit" else 2):   # one bounded retry (Rule 10); a submit is never pressed twice
             if url:
                 self._go(url)
             else:
                 self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
                 node, spec = locate()   # positions changed after scrolling
                 self._click_uncovered(node, locate, ref, before)
+            if pending is not None:
+                if pending["todo"]:
+                    self._pending[s["id"]] = pending
+                else:
+                    self._audit("outcome", outcome="unchecked", step=s["id"])
             if "verify_page" not in s:
                 return
             page, _ = self.wait_for_page([s["verify_page"]], s.get("timeout_seconds", 15))

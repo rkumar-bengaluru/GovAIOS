@@ -26,6 +26,7 @@ import os
 import shutil
 from govaios.formfill import BankError, add_answer, load_bank, ok_value, read_bank, stage_text
 from govaios.approvals import Approvals, pages_used, read_bound
+from govaios.audit import packet
 from govaios.audit.log import AuditLog
 from govaios.auth import shown_digest
 from govaios.audit.verify import verify
@@ -168,7 +169,7 @@ def _seq(e):
     return s if type(s) is int else None
 
 
-PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "apply_card", "bank_updated", "run_queue")
+PANEL_KINDS = ("ui_login", "session_open", "session_end", "setting", "claude_start", "apply_answer", "apply_fix", "apply_card", "bank_updated", "run_queue", "packet_export")
 
 
 def _runs(entries):
@@ -374,6 +375,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     text = f"{panel.name}, the {app} try is done: it stopped before a change."
                 else:
                     why = r.stopped_reason or getattr(r, "reason", None) or f"exit {r.code}"
+                    if str(why).startswith("result not seen"):   # the next queued run could press the same thing again
+                        clear_queue("a press's result was not seen; check the app before running again.")
                     cap = getattr(r, "capture", None)
                     tell(f"{app} stopped: {why}" + (f" Saved page: captures/{cap}" if cap else ""))
                     text = f"{panel.name}, the {app} flow stopped: {why}."
@@ -712,14 +715,27 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         return _page(f"<h1>{escape(known.get(app_id, app_id))}</h1>{banner()}{table}"
                      f"<p><a href='/audit'>Apps</a> | <a href='/audit/log'>Full log</a></p>", here="/audit")
 
-    def run(seq):
+    def run(seq, csrf):
         for r in _runs(_entries(log))[0]:
             if r[0]["seq"] == seq:
                 head = "".join(f"<th>{c}</th>" for c in COLS)
                 rows = "".join("<tr>" + "".join(_td(e.get(c)) for c in COLS) + "</tr>" for e in r)
-                return _page(f"<h1>Run {int(seq)}</h1>{banner()}<table><tr>{head}</tr>{rows}</table>"
+                form = (f"<form method=post action='/audit/run/{int(seq)}/packet'>{hidden(csrf)}"
+                        f"<button>Export proof packet</button></form>") if r[0].get("run") else ""
+                return _page(f"<h1>Run {int(seq)}</h1>{banner()}<table><tr>{head}</tr>{rows}</table>{form}"
                              f"<p><a href='/audit'>Apps</a></p>", here="/audit")
         return None
+
+    def export_packet(seq):
+        """(filename, JSON bytes) of the run's proof packet after a signed packet_export entry, or None."""
+        run_id = next((r[0].get("run") for r in _runs(_entries(log))[0] if r[0]["seq"] == seq), None)
+        if not run_id:
+            return None
+        last = log._last()
+        exp = log.append("packet_export", target=run_id, chain_count=last[0], chain_head=last[1])
+        entries = [e for e, _ in _entries(log) if e]
+        p = packet.build(entries, run_id, exp, log.pub_path.read_text())
+        return f"govaios-proof-{seq}.json", json.dumps(p, indent=1).encode()
 
     def fulllog():
         head = "".join(f"<th>{c}</th>" for c in ["seq", "ts", *COLS])
@@ -1251,8 +1267,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             packaged = identity.check()["bundle_id"] == "com.govaios.cli"
             Runner(hit.path, None, home, "gov_runner" if packaged else "gov_runner_dev").approve_flow()
             tell(f"{hit.name} is approved.")
-        except Stop:
-            tell(f"{hit.name} was not approved.")
+        except Stop as e:
+            tell(f"{hit.name} was not approved: {e}.")
         return "/approvals"
 
     def setup_post(f):
@@ -1676,6 +1692,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             st = lessons._find(yaml.safe_load(app.path.read_bytes())["workflow"]["steps"], lesson.get("step"))
             cases = set((st or {}).get("on_match", {}))
         grown, others = {p["id"] for p in proposal["pages"] if p["added"]}, {}
+        grown |= {o["page"] for p in proposal["pages"] for s in p["steps"] for o in s.get("outcomes") or []
+                  if o.get("adds")}   # a ticked count rewrites that known page
         for a in apps() if grown else ():
             if a.id != lesson.get("flow"):
                 for pid in grown & pages_used(yaml.safe_load(a.path.read_bytes())["workflow"]):
@@ -1712,7 +1730,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 lesson_lock.release()
         return post
 
-    def lesson_plan(f):
+    def lesson_plan(f, require_outcomes):
         """A posted lesson's checks, then lessons.build: a namespace (name, back, lesson, app, fid, sandbox, pages_dir,
         new_app, plan), or where to send the browser when it is refused (None: not found). Writes nothing."""
         name = f.get("name", "")
@@ -1721,7 +1739,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         back = f"/lesson/{name}"
         try:
             lesson, proposal, app, _, _ = lesson_ctx(name)
-            deleted, keeps, repeats = lesson_ui.edits(proposal, f)
+            deleted, keeps, repeats, outcomes = lesson_ui.edits(proposal, f)
         except lesson_ui.BadCap as e:
             tell(f"Not approved: {e}.")
             return back
@@ -1753,7 +1771,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return back
         try:
             plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir,
-                                 home / applyfiles.BANK, repeats)
+                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
@@ -1762,7 +1780,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
 
     def approve_lesson(f):
         """The only place a lesson changes a flow, page files or the bank: checked, then Touch ID, then written."""
-        c = lesson_plan(f)
+        c = lesson_plan(f, True)
         if not isinstance(c, SimpleNamespace):
             return c
         name, back, app, fid, sandbox, pages_dir, new_app, plan = (c.name, c.back, c.app, c.fid, c.sandbox,
@@ -1800,7 +1818,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         if not panel.session.active():
             tell(NO_SESSION)
             return "/"
-        c = lesson_plan(f)
+        c = lesson_plan(f, False)   # a Try never presses (spec Settled 5)
         if not isinstance(c, SimpleNamespace):
             return c
         if c.sandbox:
@@ -2203,7 +2221,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                         else lesson_page(ls[1], sess[1]) if ls
                         else market_page() if u.path == "/market" else studio_page(sess[1]) if u.path == "/studio" else agent_page(ap, sess[1]) if ap
                         else market_setup_page(sess[1], mk[1]) if mk
-                        else cc_session_page(by_slash(cs[1]), cs[2]) if cs else run(int(m[1])) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
+                        else cc_session_page(by_slash(cs[1]), cs[2]) if cs else run(int(m[1]), sess[1]) if m else app_page(a[1]) if a and APP_ID.fullmatch(a[1]) else None)
             except Exception:  # tampered data must not leak a traceback; body stays fixed
                 return self._send(500, "internal error")
             self._send(200, page) if page else self._send(404)
@@ -2214,7 +2232,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             if path.startswith("/ext/"):
                 return self._ext("POST", path)
             act = POSTS.get(path)
-            if act is None and path not in ("/signin", "/signin/code", "/signout"):
+            pk = re.fullmatch(r"/audit/run/([0-9]{1,9})/packet", path)
+            if act is None and not pk and path not in ("/signin", "/signin/code", "/signout"):
                 return self._send(405)
             sess = self._session()
             origin = self.headers.get("Origin")  # absent is fine (row 37); a wrong one is not
@@ -2241,6 +2260,15 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                     state["sessions"].pop(sess[2], None)
                 clear_queue("signed out.")
                 return self._redirect("/")
+            if pk:
+                try:
+                    out = export_packet(int(pk[1]))
+                except Exception:
+                    return self._send(500, "internal error")
+                if out is None:
+                    return self._send(404)
+                return self._send(200, out[1].decode(), ctype="application/json",
+                                  extra=(("Content-Disposition", f'attachment; filename="{out[0]}"'),))
             try:
                 loc = act(f)
             except Exception:   # body stays fixed; nothing about the failure reaches the page
