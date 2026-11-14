@@ -209,3 +209,12 @@ def test_queue_is_empty_even_if_the_session_end_audit_fails(panel, monkeypatch):
     P.say(code_at(_secret(P), time.time() + 30))
     P.srv.panel.tick()
     assert len(P.made) == 1
+
+
+def test_not_seen_clears_queue(panel):
+    P = panel; _busy_with_inbox_queued(P)
+    P.made[0].done = True
+    P.made[0].stopped_reason = "result not seen: Approve & promote was pressed, its result did not appear"
+    P.srv.panel.tick()
+    assert P.srv.panel.queue == [] and len(P.made) == 1
+    assert _outcomes(P) == ["queued", "cleared"]
