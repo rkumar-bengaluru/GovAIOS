@@ -449,3 +449,60 @@ def test_runs_exclude_panel_entries_and_other_flows():
     assert odd == 0 and _outcome(runs[0]) == "stop"
     open_run = _runs([(e, "") for e in es[:8]])[0][0]   # no flow_end: never decided by a panel entry
     assert [e["seq"] for e in open_run] == [1, 3] and _outcome(open_run) == "action"
+
+
+def _packet_server(tmp_path, ui):
+    import json
+    entries = [("flow_start", {"flow": "alpha", "flow_hash": "H", "run": "r1", "run_seq": 1, "run_prev": "0" * 64})]
+    srv, get = _app_server(tmp_path, ui, entries)
+    log = AuditLog(tmp_path / "home")
+    e = json.loads(log.path.read_text().splitlines()[0])
+    log.append("outcome", flow="alpha", run="r1", run_seq=2, run_prev=e["hash"], step="s1", outcome="confirmed",
+               count_before=1, count_after=2, expected=1)
+    log.append("flow_end", flow="alpha", run="r1", run_seq=3, run_prev=log._last()[1], outcome="done")
+    log.append("flow_start", flow="alpha")   # a CLI run: no run id
+    return srv, get, log
+
+
+def test_run_page_shows_export_only_for_panel_runs(tmp_path, ui):
+    srv, get, log = _packet_server(tmp_path, ui)
+    assert "Export proof packet" in get("/audit/run/1")[1] and "confirmed" in get("/audit/run/1")[1]
+    assert "Export proof packet" not in get("/audit/run/4")[1]
+    srv.shutdown(); srv.server_close()
+
+
+def test_export_needs_session_and_csrf(tmp_path, ui):
+    srv, get, log = _packet_server(tmp_path, ui)
+    port = srv.server_address[1]
+    import http.client
+    def post(body, cookie=None):
+        c = http.client.HTTPConnection("127.0.0.1", port)
+        h = {"Content-Type": "application/x-www-form-urlencoded"}
+        if cookie:
+            h["Cookie"] = f"s={cookie}"
+        c.request("POST", "/audit/run/1/packet", body=body, headers=h)
+        return c.getresponse().status
+    sid = _client(srv, ui)[1]
+    assert post("csrf=x") == 403 and post("csrf=x", sid) == 403
+    assert get("/audit/run/1/packet")[0] == 404
+    assert '"packet_export"' not in log.path.read_text()
+    srv.shutdown(); srv.server_close()
+
+
+def test_export_returns_packet_and_audits(tmp_path, ui):
+    import json, re, http.client
+    from govaios.audit.verify import verify_packet
+    srv, get, log = _packet_server(tmp_path, ui)
+    req, sid = _client(srv, ui)
+    csrf = re.search(r"name=csrf value='([^']+)'", req("/audit/run/1", cookie=sid)[1])[1]
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+    c.request("POST", "/audit/run/1/packet", body=urlencode({"csrf": csrf}),
+              headers={"Content-Type": "application/x-www-form-urlencoded", "Cookie": f"s={sid}"})
+    r = c.getresponse()
+    body = json.loads(r.read())
+    assert r.status == 200 and r.getheader("Content-Type") == "application/json"
+    assert r.getheader("Content-Disposition") == 'attachment; filename="govaios-proof-1.json"'
+    assert verify_packet(body).ok
+    last = json.loads(log.path.read_text().splitlines()[-1])
+    assert last["kind"] == "packet_export" and last["target"] == "r1"
+    srv.shutdown(); srv.server_close()

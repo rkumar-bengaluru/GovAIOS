@@ -22,19 +22,24 @@ class BadCap(ValueError):
 
 
 def edits(proposal, form):
-    """(deleted {(page, line)}, keeps {bank line: keep}, repeats {page: cap}) from the posted form; ValueError
-    on anything else."""
-    deleted, keeps, repeats = set(), {}, {}
+    """(deleted {(page, line)}, keeps {bank line: keep}, repeats {page: cap}, outcomes {(page, line): [ticked
+    proposal]}) from the posted form; ValueError on anything else."""
+    deleted, keeps, repeats, outcomes = set(), {}, {}, {}
     for k, v in form.items():
         if k in ("csrf", "name", "p"):
             continue
         d, b = re.fullmatch(r"del:([0-9]{1,3}):([0-9]{1,3})", k), re.fullmatch(r"keep:([0-9]{1,3})", k)
         r = re.fullmatch(r"(rep|cap):([0-9]{1,3})", k)
+        o = re.fullmatch(r"out:([0-9]{1,3}):([0-9]{1,3}):([0-9]{1,3})", k)
         if r and int(r[2]) < len(proposal["pages"]) and (r[1] == "cap" or v == "1"):
             continue   # read below: a cap counts only when its Repeat is ticked
         if d and v == "1" and int(d[1]) < len(proposal["pages"]) \
                 and int(d[2]) < len(proposal["pages"][int(d[1])]["steps"]):
             deleted.add((int(d[1]), int(d[2])))
+        elif o and v == "1" and int(o[1]) < len(proposal["pages"]) \
+                and int(o[2]) < len(proposal["pages"][int(o[1])]["steps"]) \
+                and int(o[3]) < len(proposal["pages"][int(o[1])]["steps"][int(o[2])].get("outcomes") or []):
+            outcomes.setdefault((int(o[1]), int(o[2])), []).append(int(o[3]))
         elif b and int(b[1]) < len(proposal["bank"]) and v in dict(KEEPS):
             keeps[int(b[1])] = v
         else:
@@ -45,7 +50,21 @@ def edits(proposal, form):
             if not re.fullmatch(r"[0-9]{1,3}", cap) or not 1 <= int(cap) <= 100:
                 raise BadCap("the Repeat's limit must be a whole number from 1 to 100")
             repeats[int(k[4:])] = int(cap)
-    return deleted, keeps, repeats
+    return deleted, keeps, repeats, outcomes
+
+
+def _outcome_line(proposal, o, others):
+    i, j = o["at"]
+    after = escape(str(proposal["pages"][i]["steps"][j].get("label"))[:200])
+    if o["kind"] == "count":
+        adds = ""
+        if o.get("adds"):
+            adds = f"; if ticked, adds <code>{escape(o['adds'])}</code> to <code>{escape(o['page'])}</code>"
+            if others.get(o["page"]):
+                adds += f", approving again: {escape(', '.join(others[o['page']]))}"
+        return (f"{escape(o['label'][:200])} {o['before']} → {o['after']} ({o['change']:+d}), "
+                f"checked after: {after}{adds}")
+    return escape("this round's item left the list, checked after: ") + after
 
 
 def _bank_line(i, o):
@@ -74,7 +93,11 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
                 note = " (not replayed)" if s["kind"] != "hand_fill" else ""
                 rows.append(f"<li>{text}{note}</li>")
             else:
-                rows.append(f"<li>{text} <label><input type=checkbox name='del:{i}:{j}' value=1> Delete</label></li>")
+                outs = "".join(f"<li><label><input type=checkbox name='out:{i}:{j}:{k}' value=1> "
+                               f"{_outcome_line(proposal, o, others)}</label></li>" for k, o in enumerate(s.get("outcomes") or []))
+                outs = f"<ul>{outs}</ul>" if outs else ""
+                rows.append(f"<li>{text} <label><input type=checkbox name='del:{i}:{j}' value=1> Delete</label>"
+                            f"{outs}</li>")
         offer = ""
         if (j := can.get(i)) is not None and p["id"] not in flow_cases:
             offer = (f"<p class=note><label><input type=checkbox name='rep:{i}' value=1> Repeat from "

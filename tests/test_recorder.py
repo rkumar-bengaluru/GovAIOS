@@ -59,7 +59,8 @@ def test_down_records_a_click_step(tmp_path):
     assert p["url"] == HOME and p["title"] == "JobLens · Applications"
     (e,) = p["events"]
     assert e == {"kind": "click", "spec": {"role": "link", "name": "Discover"}, "label": "Discover", "value": "",
-                 "secure": False, "submit": False, "risk": "navigate", "sure": True}
+                 "secure": False, "submit": False, "risk": "navigate", "sure": True,
+                 "before": p["tree"]}
     o = out(tmp_path)
     assert o == {"run": "r1", "lesson": r.name, "paused": False, "note": "",
                  "lines": ["JobLens · Applications: click Discover"]}
@@ -299,3 +300,40 @@ def test_stored_tree_holds_no_field_values(tmp_path):
     r.handle(down("Discover"))
     text = (tmp_path / lessons.DIR / r.name).read_text()
     assert "Email" in text and "me@x.com" not in text
+
+
+def test_each_press_keeps_its_tree(tmp_path):
+    first = discover_tree(Node("tab", "Promoted", handle="t"))
+    second = discover_tree(Node("tab", "Promoted (8)", handle="t"))
+    desk = Desk(DISCOVER, {DISCOVER: [first, second]})
+    desk.hit = "t"
+    r = rec(tmp_path, desk)
+    r.handle(down("Promoted", DISCOVER, "tab"))
+    r.handle(down("Promoted (8)", DISCOVER, "tab"))
+    a, b = lessons.load(tmp_path, r.name)["pages"][0]["events"]
+    assert a["before"] != b["before"] and "Promoted (8)" in str(b["before"]) and desk.calls == 2
+
+
+def test_done_keeps_a_tree(tmp_path):
+    r = rec(tmp_path, Desk(HOME, {HOME: [home_tree()]}))
+    r.handle({"kind": "done"})
+    doc = lessons.load(tmp_path, r.name)
+    assert "Applications" in str(doc["done_tree"]) and doc["done_url"] == HOME and r.done
+
+
+def test_done_on_an_outside_page_keeps_no_tree(tmp_path):
+    r = rec(tmp_path, Desk("http://localhost:8100/x", {"http://localhost:8100/x": [home_tree()]}))
+    r.desk.url = "https://example.org/"
+    r.handle({"kind": "done"})
+    assert r.done and "done_tree" not in lessons.load(tmp_path, r.name)
+
+
+def test_trees_have_no_values(tmp_path):
+    t = home_tree()
+    t.children.append(Node("text_field", "Email", value="secret"))
+    desk = Desk(HOME, {HOME: [t]})
+    desk.hit = "discover"
+    r = rec(tmp_path, desk)
+    r.handle(down("Discover"))
+    r.handle({"kind": "done"})
+    assert "secret" not in (tmp_path / lessons.DIR / r.name).read_text()

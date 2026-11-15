@@ -104,13 +104,13 @@ def go(tmp_path, monkeypatch, names, stuck=(), desk=None, within=False, **kw):
 
 def repeats(tmp_path):
     lines = (tmp_path / "audit.jsonl").read_text().splitlines()
-    return [(e.get("target"), e["outcome"], e.get("reason")) for e in map(json.loads, lines) if e["kind"] == "repeat"]
+    return [(e.get("round"), e["outcome"], e.get("reason")) for e in map(json.loads, lines) if e["kind"] == "repeat"]
 
 
 def test_repeat_does_every_row_until_none_left(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada", "Ben", "Cy"])
     assert why is None and d.order == ["Ada", "Ben", "Cy"] and d.rows == []
-    assert repeats(tmp_path) == [("Ada", "done", None), ("Ben", "done", None), ("Cy", "done", None),
+    assert repeats(tmp_path) == [(1, "done", None), (2, "done", None), (3, "done", None),
                                  (None, "none_left", "3 done")]
     assert d.calls[-1] == ("click", "Done")
 
@@ -129,8 +129,8 @@ def test_repeat_cap_stops_at_max(tmp_path, monkeypatch):
 
 def test_repeat_stops_on_a_row_that_did_not_go(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada", "Ben", "Cy"], stuck={1})
-    assert why == "repeat stopped on Ben after 1 done: Ben is still on the list after its round"
-    assert repeats(tmp_path) == [("Ada", "done", None), ("Ben", "error", None)]
+    assert why == "repeat stopped on round 2 after 1 done: round 2: the item is still on the list after its round"
+    assert repeats(tmp_path) == [(1, "done", None), (2, "error", None)]
     assert d.order == ["Ada", "Ben"]
 
 
@@ -165,12 +165,12 @@ def test_repeat_round_click_is_the_item_s_own_button(tmp_path, monkeypatch):
 def test_repeat_with_duplicate_names_does_each_row(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada", "Ada", "Ada"])
     assert why is None and d.rows == []
-    assert repeats(tmp_path) == [("Ada", "done", None)] * 3 + [(None, "none_left", "3 done")]
+    assert repeats(tmp_path) == [(1, "done", None), (2, "done", None), (3, "done", None), (None, "none_left", "3 done")]
 
 
 def test_repeat_duplicate_name_that_did_not_go_stops(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada", "Ada"], stuck={0})
-    assert why == "repeat stopped on Ada after 0 done: Ada is still on the list after its round"
+    assert why == "repeat stopped on round 1 after 0 done: round 1: the item is still on the list after its round"
 
 
 def test_repeat_clicks_the_item_once_per_round(tmp_path, monkeypatch):
@@ -197,23 +197,23 @@ def test_repeat_item_spec_with_within_still_finds_each_row(tmp_path, monkeypatch
 def test_repeat_items_outside_rows_never_end_as_none_left(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada", "Ben"], desk={"box": "group"})
     assert why == "repeat: 2 Review found but none inside a row or card" and d.reviews == 0
-    assert repeats(tmp_path) == [(None, "error", None)]
+    assert repeats(tmp_path) == [(1, "error", None)]
 
 
 def test_repeat_list_that_changed_during_the_round_stops(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada", "Ben"], desk={"swap": True})
-    assert why == "repeat stopped on Ada after 0 done: the list changed during the round" and d.reviews == 0
+    assert why == "repeat stopped on round 1 after 0 done: the list changed during the round" and d.reviews == 0
 
 
 def test_repeat_row_that_leaves_on_a_later_poll_is_done(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada", "Ben"], desk={"slow": True})
     assert why is None and d.rows == []
-    assert repeats(tmp_path) == [("Ada", "done", None), ("Ben", "done", None), (None, "none_left", "2 done")]
+    assert repeats(tmp_path) == [(1, "done", None), (2, "done", None), (None, "none_left", "2 done")]
 
 
 def test_repeat_run_stop_inside_a_round_is_not_wrapped(tmp_path, monkeypatch):
     d, why = go(tmp_path, monkeypatch, ["Ada"], desk={"estop": True})
-    assert why == "emergency stop" and repeats(tmp_path) == [("Ada", "error", None)]
+    assert why == "emergency stop" and repeats(tmp_path) == [(1, "error", None)]
 
 
 def test_later_lesson_never_reuses_a_repeat_sub_step_id():
@@ -233,3 +233,16 @@ def test_item_label_prefers_a_cell_over_the_rows_whole_text():
     btn = N("button", "Review")
     row = N("row", "Ada Lovelace " + "long " * 80, children=[btn, N("cell", "Ada")])
     assert engine.item_label(row, btn) == "Ada"
+
+
+def test_repeat_audit_has_no_item_text(tmp_path, monkeypatch):
+    go(tmp_path, monkeypatch, ["Ada Lovelace", "Alan Turing"])
+    text = (tmp_path / "audit.jsonl").read_text()
+    assert "Ada" not in text and "Turing" not in text and '"fingerprint"' in text
+
+
+def test_repeat_stuck_round_leaks_no_item_text(tmp_path, monkeypatch):
+    d, why = go(tmp_path, monkeypatch, ["Ada Lovelace", "Alan Turing"], stuck={1})
+    text = (tmp_path / "audit.jsonl").read_text()
+    assert why and "Alan" not in why and "Turing" not in why
+    assert "Alan" not in text and "Turing" not in text and "Ada" not in text

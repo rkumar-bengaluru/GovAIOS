@@ -87,6 +87,15 @@ class Recorder:
             self.cancelled = True
             remove(self.home, f"{lessons.DIR}/{self.name}", TEACH_OPEN)
         elif kind == "done":
+            url, root = self.desk.current_url(self.app), None
+            if self._ok(url):
+                root = self.desk.web_root(self.app)
+            if root is not None:   # the page Done was pressed on is what a run must end on
+                self.doc["done_tree"], self.doc["done_url"] = _blank(root), _key(url)
+                try:
+                    lessons.write(self.home, self.name, self.doc)
+                except OSError:
+                    self.note = UNSAVED
             self.done = True   # TEACH_OPEN stays: the panel binds the lesson, then removes it
         elif kind == "pause":
             key, root = _key(self.desk.current_url(self.app)), self.desk.web_root(self.app)
@@ -100,11 +109,14 @@ class Recorder:
             self._down(ev)
         self._out()
 
-    def _down(self, ev):
-        url = self.desk.current_url(self.app)
+    def _ok(self, url):
         s = urlsplit(url)
         own = s.scheme == "http" and s.hostname in OWN and s.port != PANEL_PORT   # never the panel's own pages
-        if not own and not (s.scheme == "https" and terms.verdict(self.home, url, ()) == "allowed"):
+        return own or (s.scheme == "https" and terms.verdict(self.home, url, ()) == "allowed")
+
+    def _down(self, ev):
+        url = self.desk.current_url(self.app)
+        if not self._ok(url):
             self.paused, self.note, self.at = True, OUTSIDE, None
             return
         if _key(ev.get("url")) != _key(url) or ev.get("x") is None or ev.get("y") is None:
@@ -139,7 +151,7 @@ class Recorder:
             page = {**page, "events": []}
             pages.append(page)
         e = {"kind": "click", "spec": spec, "label": n.name, "value": "", "secure": False,
-             "submit": risk != "navigate", "risk": risk, "sure": sure}
+             "submit": risk != "navigate", "risk": risk, "sure": sure, "before": _blank(root)}
         page["events"].append(e)
         try:
             lessons.write(self.home, self.name, self.doc)
