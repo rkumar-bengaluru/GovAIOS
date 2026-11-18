@@ -1739,7 +1739,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         back = f"/lesson/{name}"
         try:
             lesson, proposal, app, _, _ = lesson_ctx(name)
-            deleted, keeps, repeats, outcomes = lesson_ui.edits(proposal, f)
+            deleted, keeps, repeats, outcomes, sources = lesson_ui.edits(proposal, f)
         except lesson_ui.BadCap as e:
             tell(f"Not approved: {e}.")
             return back
@@ -1771,7 +1771,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return back
         try:
             plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir,
-                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes)
+                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes, sources)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
@@ -1825,12 +1825,28 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             tell("A Studio lesson has no app to try.")
             return c.back
         tid, root = f"try_{c.app.id}", home / "try"
+        doc, dropped = yaml.safe_load(c.plan["flow"][1]), set()
+
+        def recorded(steps):   # a Try types what the lesson recorded, never asks for it (spec, My calls 9)
+            for s in steps:
+                if s.get("id") in c.plan["tried"]:
+                    dropped.add(s.pop("value_from", "").removeprefix("input."))
+                    s.pop("bank", None)
+                    s["value"] = c.plan["tried"][s["id"]]
+                recorded(s.get("steps", []))
+                for v in s.get("on_match", {}).values():
+                    if isinstance(v, dict) and isinstance(v.get("do"), list):
+                        recorded(v["do"])
+        recorded(doc["workflow"]["steps"])
+        ins = {k: v for k, v in (doc["workflow"].pop("inputs", None) or {}).items() if k not in dropped}
+        if ins:
+            tell("This app asks for inputs at Run; Try it cannot run it. Approve it, then Run.")
+            return c.back
         try:
             if root.is_symlink():
                 root.unlink()
             elif root.exists():
                 shutil.rmtree(root)   # each Try replaces the last one's tree
-            doc = yaml.safe_load(c.plan["flow"][1])
             doc["workflow"].update({"id": tid, "try": True})
             for d in (root, root / "flows", root / "pages"):
                 d.mkdir(mode=0o700)

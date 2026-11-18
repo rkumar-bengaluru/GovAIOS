@@ -2897,6 +2897,59 @@ def test_try_approval_is_revoked_when_the_report_raises(panel, monkeypatch):
     assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
 
 
+def _typed_lesson(P, name):
+    """Adds "Home address" typed on Discover, before the press, to the lesson Done bound."""
+    from govaios import lessons
+    doc = lessons.load(P.home, name)
+    evs = doc["pages"][1]["events"]
+    evs.insert(len(evs) - 1, {"kind": "type", "spec": {"role": "text_field", "name": "Home address"},
+                              "label": "Home address", "value": "9 Willow Terrace", "secure": False, "risk": "modify",
+                              "sure": True, "before": None})
+    lessons.write(P.home, name, doc)
+
+
+def _try_steps(P):
+    wf = yaml.safe_load(Path(P.made[-1].flow_path).read_text())["workflow"]
+    return wf, [d for s in wf["steps"] for c in s.get("on_match", {}).values() if isinstance(c, dict)
+                for d in c.get("do", [])]
+
+
+def test_try_types_recorded_values(panel):
+    _open(panel)
+    name = _done(panel)
+    _typed_lesson(panel, name)
+    p, page = _lesson_form(panel, name)
+    assert "value=input checked>" in page
+    panel.post("/lesson/try", name=name, p=p)
+    wf, steps = _try_steps(panel)
+    [t] = [d for d in steps if d["action"] == "type"]
+    assert t["value"] == "9 Willow Terrace" and "value_from" not in t and "bank" not in t
+    assert "inputs" not in wf and "type_text" in wf["permissions"]["allow"]
+    assert panel.made[-1].started
+    from govaios.engine import Runner
+    Runner(panel.made[-1].flow_path, None, panel.home)   # the engine loads the Try copy: its checks pass
+
+
+def test_try_refused_when_the_app_already_asks_for_inputs(panel):
+    from govaios import lessons
+    from govaios.approvals import read_bound
+    _open(panel)
+    name = _done(panel)
+    _typed_lesson(panel, name)
+    flow = panel.flows / "studio_approve_shortlisted.yaml"
+    doc = yaml.safe_load(flow.read_text())
+    doc["workflow"]["inputs"] = {"employee": {"label": "Employee", "pattern": "E-[0-9]{4}"}}
+    flow.write_text(yaml.safe_dump(doc, sort_keys=False))
+    les = lessons.load(panel.home, name)
+    les["digest"] = read_bound(flow, panel.flows.parent / "pages")[0]
+    lessons.write(panel.home, name, les)
+    n = len(panel.asked)
+    panel.post("/lesson/try", name=name, p=_lesson_form(panel, name)[0])
+    assert _tells(panel)[-1].endswith("This app asks for inputs at Run; Try it cannot run it. Approve it, then Run.")
+    assert panel.made == [] and len(panel.asked) == n
+
+
+
 def test_try_prefix_is_reserved_in_the_apps_folder(panel):
     (panel.flows / "hand.yaml").write_text("workflow:\n  id: try_hand\n  app: Hand\n  name: Hand\n  version: 1\n"
                                            "  permissions: { allow: [launch_application], max_element_risk: read }\n"

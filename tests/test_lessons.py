@@ -726,3 +726,153 @@ def test_request_on_known_page_keeps_stored_rating(tmp_path):
     press = p2["steps"][-1]
     assert press.get("press") is True and press["label"].endswith(" (kept at submit: known page)")
     assert p2["yaml"]["page"]["elements"]["request_release_of_pr_2026_03"]["risk"] == "submit"
+
+
+# --- typed text (teach-typed-text Task 4)
+
+def _typed(tmp_path, *fields):
+    """The JobLens lesson with fields (label, value) typed on Discover before the press; (lesson, app)."""
+    les, app = joblens(tmp_path)
+    evs = les["pages"][1]["events"]
+    for label, value in fields:
+        les["pages"][1]["tree"]["children"].append({"role": "text_field", "name": label})
+        evs.insert(len(evs) - 1, {"kind": "type", "spec": {"role": "text_field", "name": label}, "label": label,
+                                  "value": value, "secure": False, "risk": "modify", "sure": True, "before": None})
+    return les, app
+
+
+def _type_lines(prop):
+    return [(i, j, s) for i, p in enumerate(prop["pages"]) for j, s in enumerate(p["steps"]) if s["kind"] == "type"]
+
+
+def _typed_flow(tmp_path, bank=Bank(), fields=(("Home address", "9 Willow Terrace"),), src=None):
+    les, app = _typed(tmp_path, *fields)
+    prop = lessons.propose(les, tmp_path / "pages", bank)
+    lines = _type_lines(prop)
+    sources = {(i, j): (src, s["label"]) for i, j, s in lines} if src else None
+    plan = _plan(tmp_path, les, app, prop, require_outcomes=False, sources=sources)
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    steps = [d for c in next(s for s in wf["steps"] if s["id"] == "on_start")["on_match"].values()
+             if isinstance(c, dict) for d in c["do"] if d["action"] == "type"]
+    return prop, plan, wf, steps
+
+
+def test_propose_type_line_defaults_to_input(tmp_path):
+    les, _ = _typed(tmp_path, ("Home address", "9 Willow Terrace"))
+    [(_, _, s)] = _type_lines(lessons.propose(les, tmp_path / "pages", Bank()))
+    assert (s["source"], s["input"], s["value"], s["bank_key"], s["keep"]) == \
+        ("input", "home_address", "9 Willow Terrace", None, True)
+    assert s["bank_op"]["op"] == "add" and s["bank_op"]["key"]
+
+
+def test_propose_type_line_bank_when_label_known(tmp_path):
+    les, _ = _typed(tmp_path, ("City", "Pune"))
+    prop = lessons.propose(les, tmp_path / "pages", Bank((Entry("city", ("City",), "Bengaluru"),)))
+    [(_, _, s)] = _type_lines(prop)
+    assert (s["source"], s["bank_key"], s["bank_op"]) == ("bank", "city", None)   # a change op is never offered
+    assert prop["bank"] == []
+
+
+def test_input_name_slug():
+    assert [lessons._input_name(x) for x in ("Home address", "", "2nd line", "Ünïcode?!", "x" * 50)] == \
+        ["home_address", "text", "t_2nd_line", "n_code", "x" * 40]
+
+
+def test_build_type_literal(tmp_path):
+    _, plan, wf, [s] = _typed_flow(tmp_path, src="literal")
+    assert {k: v for k, v in s.items() if k != "id"} == {"action": "type", "target": s["target"],
+                                                       "value": "9 Willow Terrace"}
+    assert "inputs" not in wf and "type_text" in wf["permissions"]["allow"]
+
+
+def test_build_type_input(tmp_path):
+    _, plan, wf, [s] = _typed_flow(tmp_path)
+    assert set(s) == {"id", "action", "target", "value_from"} and s["value_from"] == "input.home_address"
+    assert wf["inputs"]["home_address"] == {"label": "Home address (on JobLens · Discover)",
+                                            "pattern": "[^\\x00-\\x1f]{1,200}"}
+    assert "type_text" in wf["permissions"]["allow"]
+    page = yaml.safe_load(next(b for b in plan["pages"].values() if b"home_address" in b))["page"]
+    assert page["elements"]["home_address"]["risk"] == "modify"
+
+
+def test_build_type_bank(tmp_path):
+    prop, plan, wf, [s] = _typed_flow(tmp_path, src="bank")
+    [(_, _, line)] = _type_lines(prop)
+    assert set(s) == {"id", "action", "target", "bank"} and s["bank"] == line["bank_op"]["key"]
+    assert {**line["bank_op"], "keep": "bank"} in plan["ops"] and "type_text" in wf["permissions"]["allow"]
+
+
+def test_build_type_raises_max_element_risk_to_modify(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = _typed(tmp_path, ("Home address", "9 Willow Terrace"))
+    doc = yaml.safe_load(app.read_text())
+    doc["workflow"]["permissions"]["max_element_risk"] = "navigate"
+    app.write_text(yaml.safe_dump(doc, sort_keys=False))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    press = _press(prop)
+    plan = lessons.build(les, prop, {press}, {}, read_bound(app, tmp_path / "pages")[1], app, tmp_path / "pages",
+                         tmp_path / "answers.yaml", require_outcomes=False)
+    assert yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"] == "modify"
+
+
+def test_build_input_names_clash_get_suffix(tmp_path):
+    _, _, wf, steps = _typed_flow(tmp_path, fields=(("Amount", "1"), ("Amount", "2")))
+    assert [s["value_from"] for s in steps] == ["input.amount", "input.amount_2"]
+    assert list(wf["inputs"]) == ["amount", "amount_2"]
+
+
+def test_build_input_name_clashes_with_an_existing_input(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = _typed(tmp_path, ("Home address", "9 Willow Terrace"))
+    doc = yaml.safe_load(app.read_text())
+    doc["workflow"]["inputs"] = {"home_address": {"label": "Old", "pattern": "x"}}
+    app.write_text(yaml.safe_dump(doc, sort_keys=False))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    plan = lessons.build(les, prop, set(), {}, read_bound(app, tmp_path / "pages")[1], app, tmp_path / "pages",
+                         tmp_path / "answers.yaml", require_outcomes=False)
+    assert list(yaml.safe_load(plan["flow"][1])["workflow"]["inputs"]) == ["home_address", "home_address_2"]
+
+
+def test_build_old_lesson_unchanged(tmp_path):
+    import hashlib
+    les, app = joblens(tmp_path)
+    plan = _plan(tmp_path, les, app, lessons.propose(les, tmp_path / "pages", Bank()), require_outcomes=False)
+    h = hashlib.sha256(plan["flow"][1])
+    for p in sorted(plan["pages"]):
+        h.update(plan["pages"][p])
+    # the bytes this lesson built before typed text (commit 189578f); a change to the shipped pages changes it too
+    assert h.hexdigest() == "e6d0f21fb22953570305418d0d088d351d46a7709a90956dbf51255caa7e8523"
+    assert plan["tried"] == {}
+
+
+def test_build_tried_holds_recorded_values(tmp_path):
+    _, plan, _, [s] = _typed_flow(tmp_path)
+    assert plan["tried"] == {s["id"]: "9 Willow Terrace"}
+
+
+def test_lesson_page_shows_source_choices(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _typed(tmp_path, ("Home <b>address", "9 <Willow> & Terrace"))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    i, j, s = _type_lines(prop)[0]
+    s["bank_op"] = None
+    html = lesson_ui.page("n", les, prop, set(), {}, "")
+    assert f"<input type=radio name='src:{i}:{j}' value=input checked>" in html
+    assert f"<input type=radio name='src:{i}:{j}' value=literal>" in html
+    assert f"name='lab:{i}:{j}'" in html and f"value=bank" not in html
+    assert "9 &lt;Willow&gt; &amp; Terrace" in html and "<Willow>" not in html
+
+
+def test_edits_reads_sources():
+    from govaios.panel import lesson as lesson_ui
+    line = {"kind": "type", "label": "Home address", "source": "input", "bank_key": None, "bank_op": None}
+    prop = {"pages": [{"steps": [line, {"kind": "click"}]}], "bank": []}
+    assert lesson_ui.edits(prop, {"src:0:0": "literal"})[4] == {(0, 0): ("literal", "Home address")}
+    assert lesson_ui.edits(prop, {"lab:0:0": "New address"})[4] == {(0, 0): ("input", "New address")}
+    assert lesson_ui.edits(prop, {})[4] == {}
+    for bad in ({"src:0:0": "bank"}, {"src:0:0": "other"}, {"src:0:1": "input"}, {"lab:0:0": "x" * 61},
+                {"lab:0:0": "a\nb"}, {"src:1:0": "input"}):
+        with pytest.raises(ValueError):
+            lesson_ui.edits(prop, bad)
+    line["bank_key"] = "city"
+    assert lesson_ui.edits(prop, {"src:0:0": "bank"})[4] == {(0, 0): ("bank", "Home address")}

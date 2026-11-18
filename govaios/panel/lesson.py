@@ -9,7 +9,8 @@ from govaios import lessons
 
 KEEPS = (("bank", "Keep in bank"), ("job", "This job only"), ("drop", "Don't keep"))
 WORDS = {"click": "Click", "fill_form": "Fill the form from the bank", "attach_file": "Attach your CV",
-         "hand_over": "Hand over: you check and submit", "hand_fill": "You fill this yourself"}
+         "hand_over": "Hand over: you check and submit", "hand_fill": "You fill this yourself", "type": "Type"}
+SOURCES = ("literal", "input", "bank")
 
 
 def digest(proposal):
@@ -23,14 +24,17 @@ class BadCap(ValueError):
 
 def edits(proposal, form):
     """(deleted {(page, line)}, keeps {bank line: keep}, repeats {page: cap}, outcomes {(page, line): [ticked
-    proposal]}) from the posted form; ValueError on anything else."""
-    deleted, keeps, repeats, outcomes = set(), {}, {}, {}
+    proposal]}, sources {(page, type line): (source, input label)}) from the posted form; ValueError on anything else."""
+    deleted, keeps, repeats, outcomes, src, lab = set(), {}, {}, {}, {}, {}
     for k, v in form.items():
         if k in ("csrf", "name", "p"):
             continue
         d, b = re.fullmatch(r"del:([0-9]{1,3}):([0-9]{1,3})", k), re.fullmatch(r"keep:([0-9]{1,3})", k)
         r = re.fullmatch(r"(rep|cap):([0-9]{1,3})", k)
         o = re.fullmatch(r"out:([0-9]{1,3}):([0-9]{1,3}):([0-9]{1,3})", k)
+        t = re.fullmatch(r"(src|lab):([0-9]{1,3}):([0-9]{1,3})", k)
+        line = (proposal["pages"][int(t[2])]["steps"][int(t[3])] if t and int(t[2]) < len(proposal["pages"])
+                and int(t[3]) < len(proposal["pages"][int(t[2])]["steps"]) else {})
         if r and int(r[2]) < len(proposal["pages"]) and (r[1] == "cap" or v == "1"):
             continue   # read below: a cap counts only when its Repeat is ticked
         if d and v == "1" and int(d[1]) < len(proposal["pages"]) \
@@ -42,6 +46,11 @@ def edits(proposal, form):
             outcomes.setdefault((int(o[1]), int(o[2])), []).append(int(o[3]))
         elif b and int(b[1]) < len(proposal["bank"]) and v in dict(KEEPS):
             keeps[int(b[1])] = v
+        elif line.get("kind") == "type" and t[1] == "src" and v in SOURCES \
+                and (v != "bank" or line.get("bank_key") or line.get("bank_op")):
+            src[(int(t[2]), int(t[3]))] = v
+        elif line.get("kind") == "type" and t[1] == "lab" and len(v) <= 60 and not re.search(r"[\x00-\x1f\x7f]", v):
+            lab[(int(t[2]), int(t[3]))] = v.strip()
         else:
             raise ValueError("unknown field")
     for k, v in form.items():
@@ -50,7 +59,9 @@ def edits(proposal, form):
             if not re.fullmatch(r"[0-9]{1,3}", cap) or not 1 <= int(cap) <= 100:
                 raise BadCap("the Repeat's limit must be a whole number from 1 to 100")
             repeats[int(k[4:])] = int(cap)
-    return deleted, keeps, repeats, outcomes
+    sources = {at: (src.get(at, proposal["pages"][at[0]]["steps"][at[1]]["source"]),
+                    lab.get(at) or proposal["pages"][at[0]]["steps"][at[1]]["label"][:60]) for at in {*src, *lab}}
+    return deleted, keeps, repeats, outcomes, sources
 
 
 def _outcome_line(proposal, o, others):
@@ -78,6 +89,20 @@ def _bank_line(i, o):
             f"<select id=keep{i} name='keep:{i}'>{opts}</select></li>")
 
 
+def _sources(i, j, s):
+    """The typed value's three sources, as radios; bank only when a key exists or would be added."""
+    def radio(v, words):
+        on = " checked" if v == s["source"] else ""
+        return f"<li><label><input type=radio name='src:{i}:{j}' value={v}{on}> {words}</label></li>"
+    key = s.get("bank_key") or (s.get("bank_op") or {}).get("key")
+    bank = (radio("bank", f"From the bank: <code>{escape(key)}</code>" + ("" if s.get("bank_key") else " (a new key)"))
+            if key else "")
+    asked = radio("input", f"Asked at Run, as <code>{escape(s['input'])}</code>")
+    return (f"<ul>{radio('literal', 'Always this text')}{asked}"
+            f"<li><label for='lab{i}_{j}'>Its label at Run</label> <input id='lab{i}_{j}' name='lab:{i}:{j}' "
+            f"maxlength=60 value='{escape(s['label'][:60])}'></li>{bank}</ul>")
+
+
 def page(name, lesson, proposal, flow_cases, others, hidden):
     """The page body. flow_cases: page ids the flow's step already handles (their steps are not added);
     others: {known page gaining elements: names of the other apps that use it}."""
@@ -89,6 +114,8 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
             text = f"{WORDS.get(s['kind'], escape(s['kind']))}: {escape(str(s.get('label'))[:200])}"
             if s.get("press"):
                 text = f"Press: {escape(str(s.get('label'))[:200])} (asks Touch ID before the first run's press)"
+            if s["kind"] == "type":
+                text += f" “{escape(s['value'][:200])}”"
             if s["kind"] == "hand_fill" or not s["keep"]:
                 note = " (not replayed)" if s["kind"] != "hand_fill" else ""
                 rows.append(f"<li>{text}{note}</li>")
@@ -96,6 +123,8 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
                 outs = "".join(f"<li><label><input type=checkbox name='out:{i}:{j}:{k}' value=1> "
                                f"{_outcome_line(proposal, o, others)}</label></li>" for k, o in enumerate(s.get("outcomes") or []))
                 outs = f"<ul>{outs}</ul>" if outs else ""
+                if s["kind"] == "type":
+                    outs += _sources(i, j, s)
                 rows.append(f"<li>{text} <label><input type=checkbox name='del:{i}:{j}' value=1> Delete</label>"
                             f"{outs}</li>")
         offer = ""

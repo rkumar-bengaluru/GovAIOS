@@ -3,6 +3,19 @@
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
 Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-tasks`); 2026-11-07 Job Apply; before that 2026-11-08 Claude Code and Codex governance (PRs #16, #17).
 
+## Teach typed text, EnterpriseMock (G0 built 2026-11-18, branch `feat/teach-typed-text`)
+
+Built: Teach records text typed into a field; the lesson page picks each value's source (always this text, asked
+at Run, or from the bank); build writes `type` steps and flow inputs; Try types the recorded value. Design:
+`docs/superpowers/specs/2026-11-18-teach-typed-text-design.md`.
+
+Open:
+- **Dropdowns (`select`)**: left for G3, pending a live macOS check of how they read in the accessibility tree.
+- **EnterpriseMock per-app write count**: needed so a Save press has an outcome to tick (P3 "Change E-0004's home
+  address" cannot be approved without one).
+- **Typing then pressing Enter** (no button press) records nothing and shows no note.
+- **Try with an earlier lesson's inputs**: an app that already asks for inputs at Run cannot be tried.
+
 ## Outcome check per step (built 2026-11-14, branch `feat/outcome-checks`)
 
 Built: Studio proposes each press's outcome (count moved, item left the list), the admin ticks it, a data-changing press
