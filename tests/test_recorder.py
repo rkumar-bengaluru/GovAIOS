@@ -2,7 +2,7 @@
 from govaios import applyfiles, lessons
 from govaios.desktop import Node
 from govaios import terms
-from govaios.recorder import OUTSIDE, Recorder
+from govaios.recorder import MISMATCH, OUTSIDE, Recorder
 
 HOME, DISCOVER = "http://localhost:8100/", "http://localhost:8100/discover"
 
@@ -337,3 +337,116 @@ def test_trees_have_no_values(tmp_path):
     r.handle(down("Discover"))
     r.handle({"kind": "done"})
     assert "secret" not in (tmp_path / lessons.DIR / r.name).read_text()
+
+
+FORM = "http://localhost:8100/form"
+
+
+def form_tree(*kids):
+    return Node("document", "JobLens", children=[Node("heading", "Profile"), *kids, Node("button", "Save", handle="save")])
+
+
+def save(*types, url=FORM):
+    return {**down("Save", url, "button"), "types": list(types)}
+
+
+def test_type_records_value_read_from_the_tree(tmp_path):
+    from govaios.engine import find_all
+    tree = form_tree(Node("text_field", "Home address", value="9 Willow Terrace"))
+    desk = Desk(FORM, {FORM: [tree]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("Home address"))
+    t, _ = lessons.load(tmp_path, r.name)["pages"][0]["events"]
+    assert t == {"kind": "type", "spec": t["spec"], "label": "Home address", "value": "9 Willow Terrace",
+                 "secure": False, "risk": "modify", "sure": True, "before": t["before"]}
+    assert len(find_all(tree, t["spec"], {"elements": {}})) == 1
+    assert "9 Willow Terrace" not in str(t["before"]) and desk.calls == 1   # one snapshot for the types and the press
+    assert out(tmp_path)["lines"][0] == "JobLens · Profile: type into Home address"
+
+
+def test_type_secure_field_refused(tmp_path):
+    desk = Desk(FORM, {FORM: [form_tree(Node("native:AXSecureTextField", "Password", value="hunter2"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("Password"))
+    assert [e["kind"] for e in lessons.load(tmp_path, r.name)["pages"][0]["events"]] == ["click"]
+    assert out(tmp_path)["note"] == "Password fields are never recorded: you type them at Run."
+    assert "hunter2" not in (tmp_path / lessons.DIR / r.name).read_text()
+
+
+def test_type_restricted_label_refused(tmp_path):
+    desk = Desk(FORM, {FORM: [form_tree(Node("text_field", "Passport number", value="Z1234567"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("Passport number"))
+    assert "Z1234567" not in (tmp_path / lessons.DIR / r.name).read_text()
+    assert out(tmp_path)["note"] == "Password fields are never recorded: you type them at Run."
+
+
+def test_type_multi_line_refused(tmp_path):
+    desk = Desk(FORM, {FORM: [form_tree(Node("text_area", "Cover note", value="Hi\nthere"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("Cover note"))
+    assert [e["kind"] for e in lessons.load(tmp_path, r.name)["pages"][0]["events"]] == ["click"]
+    assert out(tmp_path)["note"] == "Multi-line text is not supported yet: type it by hand at Run."
+
+
+def test_type_two_fields_same_name_refused(tmp_path):
+    desk = Desk(FORM, {FORM: [form_tree(Node("text_field", "Name", value="a"), Node("text_field", "Name", value="b"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("Name"))
+    assert [e["kind"] for e in lessons.load(tmp_path, r.name)["pages"][0]["events"]] == ["click"]
+    assert out(tmp_path)["note"] == MISMATCH
+
+
+def test_type_name_not_found_refused(tmp_path):
+    desk = Desk(FORM, {FORM: [form_tree(Node("text_field", "Name", value="a"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("City"))
+    r.handle(save(""))   # a nameless field is never matched
+    assert [e["kind"] for e in lessons.load(tmp_path, r.name)["pages"][0]["events"]] == ["click", "click"]
+    assert out(tmp_path)["note"] == MISMATCH
+
+
+def test_type_again_replaces(tmp_path):
+    first = form_tree(Node("text_field", "City", value="Pune"))
+    second = form_tree(Node("text_field", "City", value="Delhi"))
+    desk = Desk(FORM, {FORM: [first, second]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("City"))
+    r.handle(save("City"))
+    evs = lessons.load(tmp_path, r.name)["pages"][0]["events"]
+    assert [e["kind"] for e in evs] == ["click", "type", "click"]   # the latest typing moves to its latest place
+    assert evs[1]["value"] == "Delhi" and len(r.lines) == 3
+
+
+def test_type_then_press_keeps_order(tmp_path):
+    desk = Desk(FORM, {FORM: [form_tree(Node("text_field", "City", value="Pune"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("City"))
+    assert [e["kind"] for e in lessons.load(tmp_path, r.name)["pages"][0]["events"]] == ["type", "click"]
+    assert out(tmp_path)["note"] == ""
+
+
+def test_type_outside_origin_pauses(tmp_path):
+    site = "https://example.com/"
+    desk = Desk(site, {site: [form_tree(Node("text_field", "City", value="Pune"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("City", url=site))
+    assert r.paused and out(tmp_path)["note"] == OUTSIDE
+    assert lessons.load(tmp_path, r.name)["pages"] == []
+
+
+def test_down_on_another_page_says_missed(tmp_path):
+    desk = Desk(HOME, {HOME: [home_tree()]})
+    desk.hit = "discover"
+    r = rec(tmp_path, desk)
+    r.handle({**down("Discover"), "x": None})
+    assert out(tmp_path)["note"] == "Missed that press. Do it again."

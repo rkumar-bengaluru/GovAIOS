@@ -2592,6 +2592,18 @@ def test_ext_event_appended_with_run_id(panel):
     assert _ext(panel, "/ext/event", {"kind": "x" * 5000}, token=tok)[0] == 400   # body over 4096
 
 
+def test_ext_event_keeps_types_on_down(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    last = lambda: json.loads((panel.home / "apply/teach_in.jsonl").read_text().splitlines()[-1])
+    assert _ext(panel, "/ext/event", {"kind": "down", "types": ["City", 5, "n" * 300] + ["x"] * 30}, token=tok)[0] == 200
+    assert last()["types"] == ["City", "n" * 200] + ["x"] * 18   # strings only, each 200 at most, 20 at most
+    _ext(panel, "/ext/event", {"kind": "down", "types": "City"}, token=tok)
+    assert "types" not in last()
+
+
 def test_studio_disconnect_ends_open_lesson(panel):
     from govaios import applyfiles
     _paired(panel)

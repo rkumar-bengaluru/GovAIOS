@@ -61,3 +61,14 @@ def test_extension_unpairs_only_on_401_and_skips_the_panel():
 
 def test_content_js_ignores_non_primary_buttons():
     assert "e.button !== 0" in (EXT / "content.js").read_text()
+
+
+def test_content_js_sends_typed_fields_with_the_press():
+    src = (EXT / "content.js").read_text()
+    down = src[src.index("const onDown"):src.index("const host")]
+    assert "types" in down and "kind: \"down\"" in down and "dirty.clear()" in down
+
+
+def test_content_js_never_reports_password():
+    src = (EXT / "content.js").read_text()
+    assert '"password"' in src and '"hidden"' in src
