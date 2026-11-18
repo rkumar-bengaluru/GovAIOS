@@ -110,6 +110,10 @@ real effect is `modify`. Teach rates them `submit` today (`lessons.level`'s defa
    mid-recording.
 2. Asked at Run is the default; Always this text is never pre-selected.
 3. The audit records the source, not the value.
+4. **Dropdowns (`select`)**: the same `change` report covers them almost for free. The value is the popup button's
+   chosen title, and the runner uses `_enter("select", …)`, which already exists. I'd include it only if the macOS tree
+   shows the chosen option reliably in a live check; otherwise it is left for G3. No other part of G3 (combo boxes,
+   radios) is in this build.
 5. **Teach lessons get a new event kind, `type`**, so the observer's old `fill` events (job_apply's `fill_form` path) build
    exactly as today. Only `type` events become `type` lines.
 6. **The recorder finds the field by name, not by point.** It looks for exactly one text field or text area with the
@@ -125,10 +129,6 @@ real effect is `modify`. Teach rates them `submit` today (`lessons.level`'s defa
    recorded value is the honest one to show. A Try needs no inputs.
 10. **Input names that clash get a suffix**: `address`, then `address_2`. Run lists each one with its label and the page
     it is typed on.
-4. **Dropdowns (`select`)**: the same `change` report covers them almost for free. The value is the popup button's
-   chosen title, and the runner uses `_enter("select", …)`, which already exists. I'd include it only if the macOS tree
-   shows the chosen option reliably in a live check; otherwise it is left for G3. No other part of G3 (combo boxes,
-   radios) is in this build.
 
 ## Acceptance
 
