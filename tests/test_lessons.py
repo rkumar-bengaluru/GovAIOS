@@ -681,7 +681,7 @@ def test_level_request_buttons_are_modify():
 
 
 def test_level_search_and_filter_are_navigate():
-    for n in ("Search", "Filter employees", "Filter invoices", "Apply filter"):
+    for n in ("Search", "Filter employees", "Filter invoices", "Apply filter", "Apply filters"):
         assert lessons.level("button", n) == "navigate"
 
 
@@ -765,12 +765,33 @@ def test_propose_type_line_defaults_to_input(tmp_path):
     assert s["bank_op"]["op"] == "add" and s["bank_op"]["key"]
 
 
+def _city(tmp_path, typed):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _typed(tmp_path, ("City", typed))
+    prop = lessons.propose(les, tmp_path / "pages", Bank((Entry("city", ("City",), "Bengaluru <B>"),)))
+    [(i, j, s)] = _type_lines(prop)
+    return prop, s, lesson_ui.page("n", les, prop, set(), {}, ""), f"name='src:{i}:{j}'"
+
+
 def test_propose_type_line_bank_when_label_known(tmp_path):
-    les, _ = _typed(tmp_path, ("City", "Pune"))
-    prop = lessons.propose(les, tmp_path / "pages", Bank((Entry("city", ("City",), "Bengaluru"),)))
-    [(_, _, s)] = _type_lines(prop)
-    assert (s["source"], s["bank_key"], s["bank_op"]) == ("bank", "city", None)   # a change op is never offered
+    prop, s, html, src = _city(tmp_path, "Bengaluru <B>")
+    assert (s["source"], s["bank_key"], s["bank_value"], s["bank_op"]) == ("bank", "city", "Bengaluru <B>", None)
     assert prop["bank"] == []
+    assert f"<input type=radio {src} value=bank checked> From the bank: <code>city</code> = “Bengaluru &lt;B&gt;”" in html
+
+
+def test_propose_type_line_input_when_bank_answer_differs(tmp_path):
+    _, s, html, src = _city(tmp_path, "Pune")   # Run would type the bank's answer, not what the page shows
+    assert (s["source"], s["bank_key"], s["bank_op"]) == ("input", "city", None)   # a change op is never offered
+    assert f"<input type=radio {src} value=input checked>" in html
+    assert f"<input type=radio {src} value=bank> From the bank: <code>city</code> = “Bengaluru &lt;B&gt;”" in html
+
+
+def test_propose_skips_a_secure_type_event(tmp_path):
+    les, _ = _typed(tmp_path, ("Home address", "9 Willow Terrace"))
+    next(e for e in les["pages"][1]["events"] if e["kind"] == "type")["secure"] = True
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert _type_lines(prop) == [] and "9 Willow Terrace" not in str(prop)
 
 
 def test_input_name_slug():

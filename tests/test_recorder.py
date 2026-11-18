@@ -381,7 +381,7 @@ def test_type_restricted_label_refused(tmp_path):
     r = rec(tmp_path, desk)
     r.handle(save("Passport number"))
     assert "Z1234567" not in (tmp_path / lessons.DIR / r.name).read_text()
-    assert out(tmp_path)["note"] == "Password fields are never recorded: you type them at Run."
+    assert out(tmp_path)["note"] == "This field is not recorded: type it by hand at Run."
 
 
 def test_type_multi_line_refused(tmp_path):

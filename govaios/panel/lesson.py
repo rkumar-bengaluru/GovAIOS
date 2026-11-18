@@ -95,8 +95,9 @@ def _sources(i, j, s):
         on = " checked" if v == s["source"] else ""
         return f"<li><label><input type=radio name='src:{i}:{j}' value={v}{on}> {words}</label></li>"
     key = s.get("bank_key") or (s.get("bank_op") or {}).get("key")
-    bank = (radio("bank", f"From the bank: <code>{escape(key)}</code>" + ("" if s.get("bank_key") else " (a new key)"))
-            if key else "")
+    answer = s.get("bank_value") if s.get("bank_key") else (s.get("bank_op") or {}).get("value")
+    bank = (radio("bank", f"From the bank: <code>{escape(key)}</code> = “{escape(str(answer or '')[:200])}”"
+                  + ("" if s.get("bank_key") else " (a new key)")) if key else "")
     asked = radio("input", f"Asked at Run, as <code>{escape(s['input'])}</code>")
     return (f"<ul>{radio('literal', 'Always this text')}{asked}"
             f"<li><label for='lab{i}_{j}'>Its label at Run</label> <input id='lab{i}_{j}' name='lab:{i}:{j}' "

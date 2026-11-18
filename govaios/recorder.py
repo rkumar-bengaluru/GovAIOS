@@ -21,6 +21,7 @@ OUTSIDE = "This site's terms are not marked allowed in Studio: recording paused.
 UNSAVED = "Could not save this step. Do it again."
 MISSED = "Missed that press. Do it again."
 SECRET = "Password fields are never recorded: you type them at Run."
+HELD = "This field is not recorded: type it by hand at Run."
 MULTI = "Multi-line text is not supported yet: type it by hand at Run."
 SECURE = "native:AXSecureTextField"
 TYPED = ("text_field", "text_area", SECURE)
@@ -142,7 +143,7 @@ class Recorder:
             return root
         n = hits[0]
         if n.role == SECURE or restricted(Field("", n.name, "text", (), False)):
-            self.note = SECRET
+            self.note = SECRET if n.role == SECURE else HELD
             return root
         if any(ord(c) < 32 or ord(c) == 127 for c in n.value or ""):
             self.note = MULTI

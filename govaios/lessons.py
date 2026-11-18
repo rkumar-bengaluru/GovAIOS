@@ -79,7 +79,7 @@ def bind(home, name, flow_id, digest, step) -> None:
 
 _PAY = re.compile(r"\b(pay|buy|checkout)\b", re.I)
 _CHANGE = re.compile(r"\b(approve|promote|reject|delete|save|send|submit|apply(?!\s+filters?\b)|confirm)\b", re.I)
-_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand|search|filter|apply filter)\b", re.I)
+_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand|search|filter|apply filters?)\b", re.I)
 REQUEST = re.compile(r"\s*request\s+\w", re.I)   # "Request payment of ...": files a pending item, never a plain press
 
 
@@ -257,12 +257,15 @@ def propose(lesson, pages_dir, bank) -> dict:
             elif kind == "click":
                 line = {"kind": "click", "label": text, "target": target,
                         "keep": keep}   # a click after the hand over is dead: replay stops there
-            elif kind == "type" and k:
-                op = _bank_op(label, ev.get("value") or "", bank, keys, ops)
+            elif kind == "type" and k and not ev.get("secure"):
+                value = ev.get("value") or ""
+                op = _bank_op(label, value, bank, keys, ops)
                 nl = normalize(label)
-                known = next((e.key for e in bank.entries if nl and nl in {normalize(x) for x in e.labels}), None)
-                line = {"kind": "type", "label": text, "target": target, "keep": keep, "value": ev.get("value") or "",
-                        "source": "bank" if known else "input", "bank_key": known,
+                known = next((e for e in bank.entries if nl and nl in {normalize(x) for x in e.labels}), None)
+                line = {"kind": "type", "label": text, "target": target, "keep": keep, "value": value,
+                        # bank only by default when Run would type what the admin typed
+                        "source": "bank" if known and known.answer == value else "input",
+                        "bank_key": known and known.key, "bank_value": known and known.answer,
                         "bank_op": op if op and op["op"] == "add" else None, "input": _input_name(label)}
             elif kind == "attach":
                 line = {"kind": "attach_file", "label": label if chk is None else text, "target": target,
