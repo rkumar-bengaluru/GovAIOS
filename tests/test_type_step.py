@@ -68,6 +68,7 @@ def go(tmp_path, monkeypatch, desk, step, inputs=None, given=None, **kw):
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
     r = Runner(make(tmp_path, step, inputs, **kw), desk, tmp_path, inputs=given)
     r.approvals.approve_flow("tf", r.digest)
+    r.approvals.approve_destination("tf", SITE)
     try:
         r.run()
     except Stop as e:
@@ -166,6 +167,7 @@ def test_type_value_never_in_audit(tmp_path, monkeypatch):
     monkeypatch.setattr(engine.auth, "prove", lambda *a, **k: (True, "biometric"))
     r = Runner(flow, d, tmp_path, inputs={"address": "SECRET-INPUT"})
     r.approvals.approve_flow("tf", r.digest)
+    r.approvals.approve_destination("tf", SITE)
     r.run()
     text = (tmp_path / "audit.jsonl").read_text()
     assert "SECRET-LITERAL" not in text and "SECRET-INPUT" not in text
@@ -211,3 +213,10 @@ def test_check_learned_type_needs_one_source():
         {"id": "r1", "action": "click", "target": f"{PG}.row"}, {**t, "id": "r2"}]}
     with pytest.raises(Stop, match="type needs one of"):   # inside a repeat too
         check_learned(learned(rep))
+
+
+def test_type_on_an_undeclared_origin_denied(tmp_path, monkeypatch):
+    d = Desk()
+    d.url = "https://elsewhere.example/form"   # same title, another site
+    assert "denied type_text" in str(go(tmp_path, monkeypatch, d, {"value": "x"}))
+    assert typed(d) == [] and not any(c[0] == "click" for c in d.calls if isinstance(c, tuple))

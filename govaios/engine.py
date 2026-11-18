@@ -1459,7 +1459,6 @@ class Runner:
         if RISK_ORDER.index(risk) > min(RISK_ORDER.index("modify"),
                                         RISK_ORDER.index(self.flow["permissions"]["max_element_risk"])):
             raise Stop(f"{ref}: typing into a {risk} element denied")   # decide() caps clicks only
-        self.gate("type_text", risk, target=ref)
         if "value" in s:
             value, source = s["value"], "literal"
         elif "value_from" in s:
@@ -1480,6 +1479,8 @@ class Runner:
         label = (node.name or ref)[:80]
         if node.role == "native:AXSecureTextField":
             raise Stop(f"{ref}: never types into a password field")
+        # the URL checked is the one typed into: a same-titled page on another site is denied
+        self.gate("type_text", risk, target=ref, destination=self.d.current_url(self.app))
         self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
         node, _ = self.page_element(ref)   # positions changed after scrolling
         self._act("click", self.d.click, node, target=ref)
