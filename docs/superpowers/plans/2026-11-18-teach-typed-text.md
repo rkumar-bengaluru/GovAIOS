@@ -94,6 +94,18 @@ and the line is a press.
 - [ ] **Step 4: Run the tests and the full suite.** Expected: PASS.
 - [ ] **Step 5: Commit.** `feat(lessons): Request buttons are modify; Search and Filter navigate`
 
+**Amendments (architect review, binding; they override the steps above where they differ):**
+- `_LOOK` can't rescue "Apply filter": `_CHANGE` matches `apply` first (lessons.py:81). Change `_CHANGE`'s `apply` to
+  `apply(?!\s+filters?\b)`. Don't move `_LOOK` earlier: "Review and submit" would become navigate.
+- Put the request rule after the role check (lessons.py:87), not at the very top of `level`.
+- `propose` already takes a new page's element risk from `ev["risk"]` (lessons.py:229-230). Keep
+  `test_request_press_on_new_page_is_plain_click` as a pin, but it may pass before the change. No `propose` change is
+  needed unless a test shows one.
+- **Try must not press "Request …" buttons.** Each creates a real pending item. The Try guard at engine.py:1086-1089 must
+  also stop on a target whose name matches the request rule. Add `test_try_stops_before_request_button`.
+- **Known page note (spec, My calls 7):** when a known page keeps a stored `submit` for a "Request …" label, the line's
+  label gets the suffix ` (kept at submit: known page)`.
+
 ### Task 2: The runner's `type` step
 
 **Files:**
@@ -138,6 +150,24 @@ and the line is a press.
   - Add `check_learned(steps, pages=None, inputs=None)` validation for `type`.
 - [ ] **Step 4: Run the tests and the full suite.** Expected: PASS.
 - [ ] **Step 5: Commit.** `feat(engine): a type step types one value into one field`
+
+**Amendments (architect review, binding; they override the steps above where they differ):**
+- **Clear first, then check.** `type_into` (macos.py:448) and `_enter` type at the caret and never clear, and P3's address
+  field is prefilled. So `do_type`:
+  1. clicks and checks focus (`focused_is`);
+  2. presses `select_all`, then `delete_back` (keys in roles.yaml:62, as `fill()` does at engine.py:1246);
+  3. types with `type_into`;
+  4. re-reads the node and Stops `typed value did not hold: <label>` unless its value equals the typed value.
+  - Don't call `_enter`. Add `test_type_replaces_a_prefilled_field`.
+- **No control characters from any source.** A value with any `[\x00-\x1f]` character Stops in `do_type`, whatever its
+  source: a `\n` acts as a hidden Enter that submits the form. `check_learned` refuses a literal that has one. Add
+  `test_type_literal_with_newline_refused`.
+- **Audit:** `_act` has no extra fields (engine.py:388-396). Follow `fill()`'s shape:
+  `self._audit("action", action="type_text", target=<ref>, source=<literal|input.x|bank:k>, outcome=...)`
+  (engine.py:1250). Never pass the value to `_capture`'s extra.
+- **Risk ceiling:** `decide` caps clicks only (policy.py:35-37). `do_type` refuses an element risk above `modify` or
+  above the flow's `max_element_risk`, as `do_attach_file` does (engine.py:1442-1445).
+- The Runner's own `check_learned` call (engine.py:361) passes the flow's inputs.
 
 ### Task 3: Teach records typed text
 
@@ -192,6 +222,26 @@ and the line is a press.
     - Update the module docstring: clicks and typed text. Stored trees still have every value blanked.
 - [ ] **Step 4: Run the tests and the full suite.** Expected: PASS.
 - [ ] **Step 5: Commit.** `feat(teach): record typed text, read from the accessibility tree`
+
+**Amendments (architect review, binding; they override the steps above where they differ):**
+- **Ordering:** background.js handles each message in its own async chain (background.js:32-34), so a separate `type`
+  message can arrive after the press.
+  - Content.js sends **no separate `type` message**. The `down` message carries `types: [name, ...]` (the dirty fields,
+    at most 20), and the set is cleared.
+  - `/ext/event` keeps `types` (a list of strings, each at most 200 characters, at most 20 of them).
+  - `Recorder.handle` processes each `types` entry with `_type` **before** `_down`, all on the same `web_root` read where
+    possible.
+  - The `type` kind isn't needed in `/ext/event`'s kinds. Drop `test_ext_event_accepts_type` and add
+    `test_ext_event_keeps_types_on_down`.
+  - Rewrite `test_content_js_reports_type_before_press` as a check that `onDown`'s message includes `types`.
+- A `down` the recorder drops at recorder.py:122 (wrong page, or no point) sets a note now, not silence. The note is
+  `"Missed that press. Do it again."`.
+- **Multi-line values:** a value with a newline or control character isn't recorded. The note is
+  `"Multi-line text is not supported yet: type it by hand at Run."`.
+- **Restricted labels:** a label that `formfill.restricted()` flags is refused, with the same note as a password.
+- `_line` renders a `type` event as `"{title}: type into {label}"` (recorder.py:48, used at :78 and :163).
+- Typing a field again removes the old event and **appends** the new one, so the step's position follows the latest
+  typing.
 
 ### Task 4: Lesson review picks the source; build writes the step and inputs; Try types the recorded value
 
@@ -252,6 +302,24 @@ and the line is a press.
   - the EnterpriseMock per-app write count is needed for Save outcomes.
 - [ ] **Step 4: Run the tests and the full suite.** Expected: PASS.
 - [ ] **Step 5: Commit.** `feat(studio): pick each typed value's source; build writes type steps and inputs`
+
+**Amendments (architect review, binding; they override the steps above where they differ):**
+- `_do` takes no sources parameter, and it is called at lessons.py:459, lessons.py:486 and panel/lesson.py:118. So
+  `build` writes the chosen source and input name onto its deep-copied proposal lines **before** `_cases`, and `_do`
+  reads them from the line.
+- **Bank ops from type lines are `add` only.** If `_bank_op` returns `change` or `label`, the line has `bank_op = None`
+  and offers bank only when `bank_key` is set. `edits()` refuses `src=bank` on the server when neither is set.
+- `edits()`'s new return value: update its caller at web.py:1742 and the tests.
+- `build` raises `max_element_risk` to `modify` when a kept `type` step exists and it is lower (as lessons.py:565-569).
+- **Try:**
+  - `plan["tried"]` is keyed by **step id**: `{step id: recorded value}`.
+  - `try_lesson` rewrites those steps in the Try copy to `value: <recorded>`, dropping `value_from` and `bank`.
+  - It removes the inputs only those steps declared.
+  - If the copy still declares inputs (from an earlier lesson), it refuses with the note
+    `"This app asks for inputs at Run; Try it cannot run it. Approve it, then Run."`, and nothing runs.
+  - Rename the test: `test_try_types_recorded_values`.
+- **Run form (spec, My calls 10):** each input's label is shown with the page it is typed on, written as the label
+  `"<label> (on <page title>)"` at build.
 
 ## Live check (the admin, on the Mac, after merge)
 
