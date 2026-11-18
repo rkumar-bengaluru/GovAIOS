@@ -103,6 +103,13 @@ real effect is `modify`. Teach rates them `submit` today (`lessons.level`'s defa
   guard is unchanged: an EnterpriseMock flow's `max_element_risk: modify` stops a run that meets a real Pay or Release
   button. Rule 4 still applies to any element rated payment.
 
+### Save, Create, Send and Match stay submit (decided by the admin, 2026-11-18)
+
+They change data, so they keep their outcome ("things that change data in the target system require an outcome").
+**EnterpriseMock dependency:** each app shows a count the agent user can see, and the count goes up by one with every
+write. For example, "Recent changes (12)" on the page shown after a Save. The count outcome is then proposed as for
+JobLens. This is built in EnterpriseMock, not here. P3's live acceptance needs it.
+
 ## My calls (open to correction)
 
 1. The typed-value choice is made on the **lesson review page** in the panel, not live in the side panel as the Teach
