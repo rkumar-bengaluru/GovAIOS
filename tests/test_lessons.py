@@ -670,3 +670,59 @@ def test_build_refuses_when_only_the_at_line_is_deleted(tmp_path):
     assert _plan(tmp_path, les, app, prop, outcomes=ticks)
     with pytest.raises(ValueError, match="the step an outcome is checked after was removed"):
         _plan(tmp_path, les, app, prop, deleted=[(1, 3)], outcomes=ticks)
+
+
+# ---------- ratings for "Request ...", Search and Filter ----------
+
+def test_level_request_buttons_are_modify():
+    assert lessons.level("button", "Request payment of invoice INV-1001") == "modify"
+    assert lessons.level("button", "Request bank change for E-0012") == "modify"
+    assert lessons.level("button", "Requested items") != "modify"
+
+
+def test_level_search_and_filter_are_navigate():
+    for n in ("Search", "Filter employees", "Filter invoices", "Apply filter"):
+        assert lessons.level("button", n) == "navigate"
+
+
+def test_level_unchanged_for_save_pay_submit():
+    assert lessons.level("button", "Save address for E-0004") == "submit"
+    assert lessons.level("button", "Create invoice") == "submit"
+    assert lessons.level("button", "Pay invoice INV-1001") == "payment"
+    assert lessons.level("button", "Review and submit") == "submit"
+    assert lessons.level("button", "Apply") == "submit"
+
+
+def _request_lesson(tmp_path, label):
+    les, app = joblens(tmp_path)
+    les["pages"][1]["url"] = "http://localhost:8100/payruns/PR-2026-03"
+    les["pages"][1]["events"][-1] = {"kind": "click", "spec": {"role": "button", "name": label}, "label": label,
+                                     "value": "", "secure": False, "submit": True, "risk": "modify", "sure": True}
+    return les, app
+
+
+def test_request_press_on_new_page_is_plain_click(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = _request_lesson(tmp_path, "Request release of PR-2026-03")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    p = prop["pages"][1]
+    assert p["new"] and p["steps"][-1]["kind"] == "click" and "press" not in p["steps"][-1]
+    assert p["yaml"]["page"]["elements"]["request_release_of_pr_2026_03"]["risk"] == "modify"
+    _, raw = read_bound(app, tmp_path / "pages")
+    plan = lessons.build(les, prop, set(), {}, raw, app, tmp_path / "pages", tmp_path / "answers.yaml",
+                         require_outcomes=True)
+    assert yaml.safe_load(plan["flow"][1])["workflow"]["permissions"]["max_element_risk"] == "modify"
+
+
+def test_request_on_known_page_keeps_stored_rating(tmp_path):
+    les, _ = _request_lesson(tmp_path, "Request release of PR-2026-03")
+    pages = tmp_path / "pages"
+    p = lessons.propose(les, pages, Bank())["pages"][1]
+    page = p["yaml"]["page"]
+    page["elements"]["request_release_of_pr_2026_03"]["risk"] = "submit"
+    (pages / f"{p['id']}.yaml").write_text(yaml.safe_dump({"page": page}))
+    p2 = lessons.propose(les, pages, Bank())["pages"][1]
+    assert not p2["new"]
+    press = p2["steps"][-1]
+    assert press.get("press") is True and press["label"].endswith(" (kept at submit: known page)")
+    assert p2["yaml"]["page"]["elements"]["request_release_of_pr_2026_03"]["risk"] == "submit"

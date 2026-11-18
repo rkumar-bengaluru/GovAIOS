@@ -1083,9 +1083,9 @@ class Runner:
         else:
             ref = tgt
         if self.flow.get("try") is True:   # before the press grant and the gate: a Try never asks to press
-            from .lessons import _CHANGE, _PAY   # lessons imports engine
+            from .lessons import _CHANGE, _PAY, REQUEST   # lessons imports engine
             names = (getattr(node, "name", "") or "", spec.get("name") or "", spec.get("name_matches") or "")
-            if spec["risk"] in ("submit", "payment") or any(_CHANGE.search(n) or _PAY.search(n) for n in names):
+            if spec["risk"] in ("submit", "payment") or any(_CHANGE.search(n) or _PAY.search(n) or REQUEST.match(n) for n in names):
                 raise Stop(TRY_STOP.format(names[0] or names[1] or ref))
         pending = None
         if spec["risk"] == "submit":

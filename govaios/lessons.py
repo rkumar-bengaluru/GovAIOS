@@ -78,14 +78,17 @@ def bind(home, name, flow_id, digest, step) -> None:
 
 
 _PAY = re.compile(r"\b(pay|buy|checkout)\b", re.I)
-_CHANGE = re.compile(r"\b(approve|promote|reject|delete|save|send|submit|apply|confirm)\b", re.I)
-_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand)\b", re.I)
+_CHANGE = re.compile(r"\b(approve|promote|reject|delete|save|send|submit|apply(?!\s+filters?\b)|confirm)\b", re.I)
+_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand|search|filter|apply filter)\b", re.I)
+REQUEST = re.compile(r"\s*request\s+\w", re.I)   # "Request payment of ...": files a pending item, never a plain press
 
 
 def level(role: str, name: str) -> str:
     """The risk of pressing a recorded element, by the plan's ruling (payment beats submit)."""
     if role in ("tab", "link", "radio"):
         return "navigate"
+    if REQUEST.match(name):
+        return "modify"
     if _PAY.search(name):
         return "payment"
     if _CHANGE.search(name):
@@ -231,6 +234,8 @@ def propose(lesson, pages_dir, bank) -> dict:
             target = f"{pid}.{k}" if k else None
             line, keep = None, sure and not (kind == "click" and any(s["kind"] == "hand_over" for s in steps))
             text = label + ("" if sure else " (check this target)")   # off until the admin checks it
+            if kind == "click" and k and not new and REQUEST.match(label) and look["elements"][k].get("risk") == "submit":
+                text += " (kept at submit: known page)"   # a "Request ..." button the page already stores at submit
             if kind == "attach" and k and k != chk:
                 text += f" via the button {evs[i - 1].get('label') or '?'!r}"   # the button replay clicks
             if kind == "click" and not k:
