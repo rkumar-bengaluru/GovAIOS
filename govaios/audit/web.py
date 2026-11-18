@@ -2186,7 +2186,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 n = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 n = -1
-            if not 0 <= n <= 4096:
+            # an event's 20 typed field names (200 characters each, up to 3 bytes in UTF-8) must fit
+            if not 0 <= n <= (16384 if path == "/ext/event" else 4096):
                 return self._send(400, "{}", ctype="application/json")
             try:
                 st, obj = ext(method, path, self.headers, self.rfile.read(n))

@@ -2488,7 +2488,8 @@ EXT = "chrome-extension://" + "a" * 32
 def _ext(P, path, body=None, token=None, origin=EXT, method=None):
     c = http.client.HTTPConnection("127.0.0.1", P.srv.server_address[1])
     h = {k: v for k, v in (("Origin", origin), ("X-GovAIOS-Token", token)) if v}
-    c.request(method or "POST", path, body=json.dumps({} if body is None else body), headers=h)
+    # raw UTF-8, as Chrome's JSON.stringify sends it
+    c.request(method or "POST", path, body=json.dumps({} if body is None else body, ensure_ascii=False).encode(), headers=h)
     r = c.getresponse()
     return r.status, json.loads(r.read() or b"null"), r
 
@@ -2589,7 +2590,8 @@ def test_ext_event_appended_with_run_id(panel):
     assert last["run"] == panel.srv.panel.run_id and last["kind"] == "down" and last["x"] == 3 and len(last["name"]) == 200
     assert set(last) <= {"run", "kind", "x", "y", "name", "role", "tag", "url", "t"} and "y" not in last
     assert _ext(panel, "/ext/event", {"kind": "bogus"}, token=tok)[0] == 400
-    assert _ext(panel, "/ext/event", {"kind": "x" * 5000}, token=tok)[0] == 400   # body over 4096
+    assert _ext(panel, "/ext/event", {"kind": "x" * 17000}, token=tok)[0] == 400   # body over 16384
+    assert _ext(panel, "/ext/state", {"kind": "x" * 5000}, token=tok)[0] == 400   # other paths: over 4096
 
 
 def test_ext_event_keeps_types_on_down(panel):
@@ -2600,6 +2602,9 @@ def test_ext_event_keeps_types_on_down(panel):
     last = lambda: json.loads((panel.home / "apply/teach_in.jsonl").read_text().splitlines()[-1])
     assert _ext(panel, "/ext/event", {"kind": "down", "types": ["City", 5, "n" * 300] + ["x"] * 30}, token=tok)[0] == 200
     assert last()["types"] == ["City", "n" * 200] + ["x"] * 18   # strings only, each 200 at most, 20 at most
+    names = ["पता" * 66 + "घर" for _ in range(20)]   # 200 Devanagari characters each: about 12 KB of UTF-8
+    s = _ext(panel, "/ext/event", {"kind": "down", "name": "Save", "url": "https://x.example/form", "types": names}, token=tok)[0]
+    assert s == 200 and last()["types"] == names
     _ext(panel, "/ext/event", {"kind": "down", "types": "City"}, token=tok)
     assert "types" not in last()
 
