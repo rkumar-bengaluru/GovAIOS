@@ -29,7 +29,8 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 
 
 NO_DEST = object()
-LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat")   # what a taught page may do (Studio lessons)
+LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat", "type")   # what a taught page may do (Studio lessons)
+CONTROL = re.compile(r"[\x00-\x1f]")   # never typed: a newline acts as a hidden Enter
 ITEM_ROLES = ("row", "article")   # what a repeat round works on: one list item
 MAX_LEARNED = 10   # learned pages run within one classify_page call
 FORM_PASSES = 3
@@ -188,7 +189,18 @@ def identify(page, root):
     return True
 
 
-def check_learned(steps, pages=None):
+def check_type(d, inputs=None):
+    """A type step names exactly one source; inputs: the flow's declared inputs (None: names are not checked)."""
+    if sum(k in d for k in ("value", "value_from", "bank")) != 1:
+        raise Stop("learned steps: type needs one of value, value_from, bank")
+    if "value" in d and not (isinstance(d["value"], str) and not CONTROL.search(d["value"])):
+        raise Stop("learned steps: a typed value cannot hold a control character")   # a newline is a hidden Enter
+    if "value_from" in d and not (isinstance(d["value_from"], str) and d["value_from"].startswith("input.")
+                                  and (inputs is None or d["value_from"].removeprefix("input.") in inputs)):
+        raise Stop(f"learned steps: type value_from {d['value_from']} is not an input of this flow")
+
+
+def check_learned(steps, pages=None, inputs=None):
     """A learned page case {do: [steps], then: again|end}: only the allowed actions, each with its own id."""
     ids = []
 
@@ -212,11 +224,15 @@ def check_learned(steps, pages=None):
                         raise Stop(f"learned steps: {d.get('action')} not allowed")
                     ids.append(d["id"])
                     learned.add(d["id"])
+                    if d["action"] == "type":
+                        check_type(d, inputs)
                     if d["action"] == "repeat":
                         check_repeat(d, pages)
                         for x in d["steps"]:
                             ids.append(x["id"])
                             learned.add(x["id"])
+                            if x["action"] == "type":
+                                check_type(x, inputs)
 
     learned = set()
     walk(steps)
@@ -366,7 +382,7 @@ class Runner:
         self.pages = {}
         for pid in sorted(pages_used(self.flow)):
             self.pages[pid] = yaml.safe_load(raw[self.pages_dir / f"{pid}.yaml"])["page"]
-        check_learned(self.flow["steps"], self.pages)
+        check_learned(self.flow["steps"], self.pages, self.flow.get("inputs") or {})
         self.ctx = {}
         self.outcomes = [o for _, o, _ in outcomes_of(self.flow["steps"])]
         self.counts = {}     # count target -> its last value seen on an identified page
@@ -1434,6 +1450,49 @@ class Runner:
                     a["pending"].append(f)
         self.ask_pending()
         self.write_result()
+
+    def do_type(self, s):
+        """One value into one text field: cleared first, then read back. The value is never logged, only its source."""
+        ref = self.ref(s["target"])
+        page_id, el = ref.split(".")
+        risk = self.pages[page_id]["elements"][el].get("risk", "modify")
+        if RISK_ORDER.index(risk) > min(RISK_ORDER.index("modify"),
+                                        RISK_ORDER.index(self.flow["permissions"]["max_element_risk"])):
+            raise Stop(f"{ref}: typing into a {risk} element denied")   # decide() caps clicks only
+        self.gate("type_text", risk, target=ref)
+        if "value" in s:
+            value, source = s["value"], "literal"
+        elif "value_from" in s:
+            source = s["value_from"]
+            value = (self.inputs or {}).get(source.removeprefix("input."))
+        else:
+            source = f"bank:{s['bank']}"
+            try:
+                bank = load_bank(self.home / BANK, user_home())
+            except BankError as e:
+                raise Stop(f"answer bank: {e}") from None
+            value = next((e.answer for e in bank.entries if e.key == s["bank"]), None)
+            if value is None:
+                raise Stop(f"answer bank has no {s['bank']}")
+        if not isinstance(value, str) or CONTROL.search(value):   # from any source: a newline would submit the form
+            raise Stop(f"{ref}: no value to type, or it holds a control character")
+        node, _ = self.page_element(ref)
+        label = (node.name or ref)[:80]
+        if node.role == "native:AXSecureTextField":
+            raise Stop(f"{ref}: never types into a password field")
+        self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
+        node, _ = self.page_element(ref)   # positions changed after scrolling
+        self._act("click", self.d.click, node, target=ref)
+        if not self.d.focused_is(node):
+            self._audit("action", action="type_text", target=ref, source=source, outcome="not_focused")
+            raise Stop(f"could not type into {label}")
+        self._act("press", self.d.press, "select_all", target=ref)   # the field may be prefilled
+        self._act("press", self.d.press, "delete_back", target=ref)
+        self._act("type_into", self.d.type_into, node, value, target=ref)
+        held = self.page_element(ref)[0].value == value
+        self._audit("action", action="type_text", target=ref, source=source, outcome="done" if held else "mismatch")
+        if not held:
+            raise Stop(f"typed value did not hold: {label}")
 
     def do_attach_file(self, s):
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
