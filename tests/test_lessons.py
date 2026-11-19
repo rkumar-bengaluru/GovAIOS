@@ -1116,3 +1116,119 @@ def test_done_page_after_a_typed_field(tmp_path):
     les["done_tree"], les["done_url"] = _tickets(_table(["Ticket"], [["T-1"]])), "http://localhost:8100/tickets"
     prop = lessons.propose(les, tmp_path / "pages", Bank())   # the type line once hid the known pages' list
     assert prop["pages"][-1]["done"] and [r["key"] for r in prop["reads"]] == ["ticket_table"]
+
+
+# ---------- reads: the lesson page's form ----------
+
+def _read_prop():
+    t = {"key": "k", "spec": {}, "headers": ["Ticket", "Subject", ""], "rows": 2, "preview": ["a", "b", ""]}
+    return {"pages": [{"steps": [{}]}, {"id": "d", "done": True, "steps": []}], "bank": [], "reads": [t, dict(t)],
+            "read_refused": None}
+
+
+def test_edits_reads_one_table():
+    from govaios.panel import lesson as lesson_ui
+    got = lesson_ui.edits(_read_prop(), {"read:0:1": "1", "read:0:0": "1", "rows:0": "first"})
+    assert len(got) == 6 and got[5] == {"table": 0, "columns": [0, 1], "rows": "first"}
+    assert lesson_ui.edits(_read_prop(), {"read:1:0": "1"})[5] == {"table": 1, "columns": [0], "rows": "all"}
+    assert lesson_ui.edits(_read_prop(), {})[5] is None
+
+
+def test_edits_rows_alone_is_no_read():
+    from govaios.panel import lesson as lesson_ui
+    assert lesson_ui.edits(_read_prop(), {"rows:0": "all", "rows:1": "all"})[5] is None
+
+
+def test_edits_refuses_two_tables():
+    from govaios.panel import lesson as lesson_ui
+    with pytest.raises(lesson_ui.BadCap, match="^Read columns from one table only$"):
+        lesson_ui.edits(_read_prop(), {"read:0:0": "1", "read:1:0": "1"})
+    prop = _read_prop()
+    prop["reads"][0]["headers"] = [f"h{i}" for i in range(11)]
+    assert len(lesson_ui.edits(prop, {f"read:0:{i}": "1" for i in range(10)})[5]["columns"]) == 10
+    with pytest.raises(lesson_ui.BadCap, match="^Read at most 10 columns$"):
+        lesson_ui.edits(prop, {f"read:0:{i}": "1" for i in range(11)})
+
+
+def test_edits_refuses_an_empty_header():
+    from govaios.panel import lesson as lesson_ui
+    prop = _read_prop()
+    prop["reads"][1]["headers"] = ["a\tb", "x" * 201, "x" * 200]
+    for bad in ({"read:0:2": "1"}, {"read:0:3": "1"}, {"read:2:0": "1"}, {"rows:0": "some"}, {"rows:2": "all"},
+                {"read:0:0": "on"}, {"read:1:0": "1"}, {"read:1:1": "1"}):
+        with pytest.raises(ValueError, match="^unknown field$"):
+            lesson_ui.edits(prop, bad)
+    assert lesson_ui.edits(prop, {"read:1:2": "1"})[5]["columns"] == [2]
+    prop["read_refused"], prop["reads"] = "no", []
+    with pytest.raises(ValueError, match="^unknown field$"):
+        lesson_ui.edits(prop, {"read:0:0": "1"})
+
+
+def test_edits_skips_the_done_page():
+    from govaios.panel import lesson as lesson_ui
+    assert lesson_ui.edits(_read_prop(), {"rep:0": "1", "cap:0": "3"})[2] == {0: 3}
+    for bad in ({"rep:1": "1", "cap:1": "3"}, {"cap:1": "3"}, {"del:1:0": "1"}):
+        with pytest.raises(ValueError):
+            lesson_ui.edits(_read_prop(), bad)
+
+
+def test_lesson_page_offers_reads(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _reading(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    prop["reads"][0]["headers"][1] = "<b>x</b>"
+    prop["reads"][0]["preview"][1] = "<b>y</b>"
+    html = lesson_ui.page("n", les, prop, set(), {}, "")
+    assert "<h2>Read from this page</h2>" in html and "Table 1: 2 rows seen" in html
+    assert "<input type=checkbox name='read:0:0' value=1>" in html and "read:0:2" not in html
+    assert "<input type=radio name='rows:0' value=all checked>" in html and "name='rows:0' value=first>" in html
+    assert "&lt;b&gt;x&lt;/b&gt;" in html and "&lt;b&gt;y&lt;/b&gt;" in html and "<b>x" not in html
+    assert html.count("<section class=appcard><h2><code>") == len(prop["pages"]) - 1
+    assert f"<code>{prop['pages'][-1]['id']}</code> · new" not in html
+    assert "The last page gets no steps" not in html
+    assert "approving again" not in html
+
+
+def test_lesson_page_hides_an_untickable_header(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _reading(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    prop["reads"][0]["headers"] = ["a\tb", "x" * 201, "Subject"]
+    html = lesson_ui.page("n", les, prop, set(), {}, "")
+    assert "read:0:0" not in html and "read:0:1" not in html and "name='read:0:2'" in html
+
+
+def test_lesson_page_shows_why_reads_are_refused(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _reading(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    prop["read_refused"], prop["reads"] = "Can't <read> here", []
+    html = lesson_ui.page("n", les, prop, set(), {}, "")
+    assert "Can&#x27;t &lt;read&gt; here" in html and "read:" not in html
+    prop["read_refused"], prop = None, lessons.propose(les, tmp_path / "pages", Bank())
+    html = lesson_ui.page("n", les, prop, {prop["pages"][-1]["id"]}, {}, "")
+    assert "This page is already in the app; reads not added" in html and "read:" not in html
+
+
+def test_lesson_page_hides_reads_for_studio(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _reading(tmp_path)
+    les["flow"] = None
+    html = lesson_ui.page("n", les, lessons.propose(les, tmp_path / "pages", Bank()), set(), {}, "")
+    assert "Read from this page" not in html
+
+
+def test_lesson_page_warns_other_apps_only_for_a_new_table_key(tmp_path):
+    from govaios import studio
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _reading(tmp_path)
+    doc = studio.draft_page(les["done_tree"], "helpdesk_tickets")
+    path = tmp_path / "pages" / "helpdesk_tickets.yaml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    others = {"helpdesk_tickets": ["Desk <app>"]}
+    html = lesson_ui.page("n", les, lessons.propose(les, tmp_path / "pages", Bank()), set(), others, "")
+    assert "approving again: Desk &lt;app&gt;" in html
+    doc["page"]["elements"]["tickets"] = {"role": "table", "has_text": "Ticket", "risk": "read"}
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    html = lesson_ui.page("n", les, lessons.propose(les, tmp_path / "pages", Bank()), set(), others, "")
+    assert "approving again" not in html and "name='read:0:0'" in html

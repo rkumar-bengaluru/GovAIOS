@@ -1694,6 +1694,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         grown, others = {p["id"] for p in proposal["pages"] if p["added"]}, {}
         grown |= {o["page"] for p in proposal["pages"] for s in p["steps"] for o in s.get("outcomes") or []
                   if o.get("adds")}   # a ticked count rewrites that known page
+        grown |= {p["id"] for p in proposal["pages"] if p.get("done") and not p["new"] and p["id"] not in cases
+                  and any(t["key"] not in p["yaml"]["page"]["elements"] for t in proposal["reads"])}   # a new table key
         for a in apps() if grown else ():
             if a.id != lesson.get("flow"):
                 for pid in grown & pages_used(yaml.safe_load(a.path.read_bytes())["workflow"]):
@@ -1739,7 +1741,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         back = f"/lesson/{name}"
         try:
             lesson, proposal, app, _, _ = lesson_ctx(name)
-            deleted, keeps, repeats, outcomes, sources = lesson_ui.edits(proposal, f)
+            deleted, keeps, repeats, outcomes, sources, reads = lesson_ui.edits(proposal, f)
         except lesson_ui.BadCap as e:
             tell(f"Not approved: {e}.")
             return back
@@ -1771,7 +1773,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return back
         try:
             plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir,
-                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes, sources)
+                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes, sources, reads=reads)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
