@@ -1,6 +1,6 @@
 """Teach recorder: each press the extension reports is read in the AX tree at once, before the page reacts, and
-saved to the open lesson as a click step. Clicks only: no field value is ever stored (stored trees have them
-blanked).
+saved to the open lesson as a click step. The fields typed in before the press come with it by name only: each value
+is read from the tree and saved as a type step. Stored trees still have every field's value blanked.
 Ported from spikes/plan6/match_spike.py (on_down, spec_of), which passed on JobLens."""
 import re
 from datetime import datetime
@@ -10,7 +10,7 @@ from . import capture, lessons, studio, terms
 from .policy import OWN_HOSTS, PANEL_PORT
 from .applyfiles import TEACH_OPEN, TEACH_OUT, remove, write_json
 from .engine import find_all
-from .formfill import FIELD_ROLES
+from .formfill import FIELD_ROLES, Field, restricted
 
 FLOW = "teach_new"
 CLICKABLE = ("link", "button", "tab", "radio")
@@ -19,6 +19,12 @@ OWN, PANEL_PORT = OWN_HOSTS, PANEL_PORT   # one source: policy
 MISMATCH = "Run could not find this. Do it again, or skip it."
 OUTSIDE = "This site's terms are not marked allowed in Studio: recording paused."
 UNSAVED = "Could not save this step. Do it again."
+MISSED = "Missed that press. Do it again."
+SECRET = "Password fields are never recorded: you type them at Run."
+HELD = "This field is not recorded: type it by hand at Run."
+MULTI = "Multi-line text is not supported yet: type it by hand at Run."
+SECURE = "native:AXSecureTextField"
+TYPED = ("text_field", "text_area", SECURE)
 
 
 def _plain(name):
@@ -40,12 +46,14 @@ def _blank(root):
     """The snapshot in capture.tree form with every field's value dropped: a lesson never stores what was typed."""
     t = capture.tree(root)
     for d in studio._walk(t):
-        if d["role"] in FIELD_ROLES or d["role"] == "text_area":
+        if d["role"] in FIELD_ROLES or d["role"] in TYPED:
             d.pop("value", None)
     return t
 
 
 def _line(title, ev):
+    if ev["kind"] == "type":
+        return f"{title}: type into {ev['label']}"
     return f"{title}: {'click' if ev['risk'] == 'navigate' else 'you press'} {ev['label']}"
 
 
@@ -106,7 +114,12 @@ class Recorder:
             else:
                 self.paused, self.note, self.at = False, "", None
         elif kind == "down" and not self.paused:
-            self._down(ev)
+            root, kept = None, ""
+            for name in ev.get("types") or []:   # typed before the press, so saved before it
+                root = self._type(ev, name, root)
+                kept = self.note or kept
+            self._down(ev, root)
+            self.note = self.note or kept   # a refused field's note outlives the press saved after it
         self._out()
 
     def _ok(self, url):
@@ -114,15 +127,47 @@ class Recorder:
         own = s.scheme == "http" and s.hostname in OWN and s.port != PANEL_PORT   # never the panel's own pages
         return own or (s.scheme == "https" and terms.verdict(self.home, url, ()) == "allowed")
 
-    def _down(self, ev):
+    def _type(self, ev, name, root):
+        """Saves the value the tree holds for the one field named `name`; returns the snapshot, read once per press."""
+        url = self.desk.current_url(self.app)
+        if not self._ok(url):
+            self.paused, self.note, self.at = True, OUTSIDE, None
+            return root
+        if _key(ev.get("url")) != _key(url):
+            self.note = MISSED
+            return root
+        root = self.desk.web_root(self.app) if root is None else root
+        hits = [n for n in root.walk() if n.role in TYPED and _plain(n.name) == _plain(name)] if root else []
+        if not _plain(name) or len(hits) != 1:   # rule 2: exactly the field the page reported
+            self.note = MISMATCH
+            return root
+        n = hits[0]
+        if n.role == SECURE or restricted(Field("", n.name, "text", (), False)):
+            self.note = SECRET if n.role == SECURE else HELD
+            return root
+        if any(ord(c) < 32 or ord(c) == 127 for c in n.value or ""):
+            self.note = MULTI
+            return root
+        spec = _spec(root, n)
+        if spec is None or [id(h) for h in find_all(root, spec, {"elements": {}})] != [id(n)]:   # a run finds it once
+            self.note = MISMATCH
+            return root
+        self._save(root, url, {"kind": "type", "spec": spec, "label": n.name, "value": n.value or "", "secure": False,
+                               "risk": "modify", "sure": True, "before": _blank(root)})
+        return root
+
+    def _down(self, ev, root=None):
         url = self.desk.current_url(self.app)
         if not self._ok(url):
             self.paused, self.note, self.at = True, OUTSIDE, None
             return
         if _key(ev.get("url")) != _key(url) or ev.get("x") is None or ev.get("y") is None:
-            return   # pressed on another page than the one read, or no point
+            self.note = MISSED   # pressed on another page than the one read, or no point
+            return
         hit = self.desk.element_at(ev["x"], ev["y"])
-        root = self.desk.web_root(self.app) if hit is not None else None   # one snapshot per press
+        if hit is None:
+            return
+        root = self.desk.web_root(self.app) if root is None else root   # one snapshot per press
         if root is None:
             return
         n = next((m for m in root.walk() if self.desk.same(m.handle, hit)), None)
@@ -140,6 +185,11 @@ class Recorder:
             return
         sure = [id(h) for h in find_all(root, spec, {"elements": {}})] == [id(n)]
         risk = lessons.level(n.role, n.name)
+        self._save(root, url, {"kind": "click", "spec": spec, "label": n.name, "value": "", "secure": False,
+                               "submit": risk != "navigate", "risk": risk, "sure": sure, "before": _blank(root)})
+
+    def _save(self, root, url, e):
+        """Adds the step to its page; a field typed again keeps only its latest value, at its latest place."""
         key = _key(url)
         pages, before = self.doc["pages"], list(self.doc["pages"])
         page = next((p for p in pages if p["url"] == key), None)
@@ -150,13 +200,12 @@ class Recorder:
             pages.remove(page)
             page = {**page, "events": []}
             pages.append(page)
-        e = {"kind": "click", "spec": spec, "label": n.name, "value": "", "secure": False,
-             "submit": risk != "navigate", "risk": risk, "sure": sure, "before": _blank(root)}
-        page["events"].append(e)
+        events = page["events"]
+        page["events"] = [x for x in events if e["kind"] != "type" or x["kind"] != "type" or x["spec"] != e["spec"]] + [e]
         try:
             lessons.write(self.home, self.name, self.doc)
         except OSError:   # undo in memory too, so what is shown is what is on disk
-            page["events"].pop()
+            page["events"] = events
             self.doc["pages"] = before
             self.note = UNSAVED
             return

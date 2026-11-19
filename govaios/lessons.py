@@ -78,14 +78,17 @@ def bind(home, name, flow_id, digest, step) -> None:
 
 
 _PAY = re.compile(r"\b(pay|buy|checkout)\b", re.I)
-_CHANGE = re.compile(r"\b(approve|promote|reject|delete|save|send|submit|apply|confirm)\b", re.I)
-_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand)\b", re.I)
+_CHANGE = re.compile(r"\b(approve|promote|reject|delete|save|send|submit|apply(?!\s+filters?\b)|confirm)\b", re.I)
+_LOOK = re.compile(r"\W*(review|open|view|show|close|back|details|more|expand|search|filter|apply filters?)\b", re.I)
+REQUEST = re.compile(r"\s*request\s+\w", re.I)   # "Request payment of ...": files a pending item, never a plain press
 
 
 def level(role: str, name: str) -> str:
     """The risk of pressing a recorded element, by the plan's ruling (payment beats submit)."""
     if role in ("tab", "link", "radio"):
         return "navigate"
+    if REQUEST.match(name):
+        return "modify"
     if _PAY.search(name):
         return "payment"
     if _CHANGE.search(name):
@@ -223,14 +226,19 @@ def propose(lesson, pages_dir, bank) -> dict:
             if kind == "attach":
                 k, chk, sure = _attach(look, page, root, evs, i, new)
             else:
-                k, sure = _key_for(look, root, spec, label) if kind == "click" and spec else (None, False)
+                k, sure = _key_for(look, root, spec, label) if kind in ("click", "type") and spec else (None, False)
                 if k:   # the recorder's own reading, made when pressed: the stored tree is only the page's first
                     sure = ev.get("sure", sure)
                     if "risk" in ev and (new or k not in page["elements"]):   # a known page's rating is kept
                         look["elements"][k]["risk"] = ev["risk"]
+                    if kind == "type" and RISK_ORDER.index(look["elements"][k].get("risk", "modify")) \
+                            > RISK_ORDER.index("modify"):
+                        sure = False   # the engine never types into a known page's higher-rated element
             target = f"{pid}.{k}" if k else None
-            line, keep = None, sure and not (kind == "click" and any(s["kind"] == "hand_over" for s in steps))
+            line, keep = None, sure and not (kind in ("click", "type") and any(s["kind"] == "hand_over" for s in steps))
             text = label + ("" if sure else " (check this target)")   # off until the admin checks it
+            if kind == "click" and k and not new and REQUEST.match(label) and look["elements"][k].get("risk") == "submit":
+                text += " (kept at submit: known page)"   # a "Request ..." button the page already stores at submit
             if kind == "attach" and k and k != chk:
                 text += f" via the button {evs[i - 1].get('label') or '?'!r}"   # the button replay clicks
             if kind == "click" and not k:
@@ -249,6 +257,16 @@ def propose(lesson, pages_dir, bank) -> dict:
             elif kind == "click":
                 line = {"kind": "click", "label": text, "target": target,
                         "keep": keep}   # a click after the hand over is dead: replay stops there
+            elif kind == "type" and k and not ev.get("secure"):
+                value = ev.get("value") or ""
+                op = _bank_op(label, value, bank, keys, ops)
+                nl = normalize(label)
+                known = next((e for e in bank.entries if nl and nl in {normalize(x) for x in e.labels}), None)
+                line = {"kind": "type", "label": text, "target": target, "keep": keep, "value": value,
+                        # bank only by default when Run would type what the admin typed
+                        "source": "bank" if known and known.answer == value else "input",
+                        "bank_key": known and known.key, "bank_value": known and known.answer,
+                        "bank_op": op if op and op["op"] == "add" else None, "input": _input_name(label)}
             elif kind == "attach":
                 line = {"kind": "attach_file", "label": label if chk is None else text, "target": target,
                         "check": f"{pid}.{chk}" if chk else None, "keep": keep}
@@ -258,7 +276,7 @@ def propose(lesson, pages_dir, bank) -> dict:
                     if not new and key not in page["elements"]:
                         added.append(key)
                     page["elements"][key] = look["elements"][key]
-            elif kind in ("click", "attach"):
+            elif kind in ("click", "attach", "type"):
                 continue
             elif kind in ("fill", "choose", "tick") and ev.get("secure"):
                 steps.append({"kind": "hand_fill", "label": label, "target": None, "keep": True})
@@ -364,6 +382,11 @@ def _identifies(page, root):
         return False
 
 
+def _input_name(label):
+    n = studio._slug(label, 40) or "text"
+    return studio._slug("t_" + n, 40) if n[0].isdigit() else n
+
+
 def _bank_op(label, value, bank, keys, ops):
     nl = normalize(label)
     if not value or not nl or any(normalize(o["label"]) == nl and o["value"] == value for o in ops):
@@ -414,6 +437,10 @@ def _do(line, page):
                 if line.get("target") and line.get("check") else None)
     if kind == "click":
         return {"action": "click", "target": line["target"]} if line.get("target") else None
+    if kind == "type" and line.get("target"):
+        src = {"literal": ("value", line["value"]), "input": ("value_from", f"input.{line['input']}"),
+               "bank": ("bank", line["bank_key"] or (line["bank_op"] or {}).get("key"))}[line["source"]]
+        return {"action": "type", "target": line["target"], src[0]: src[1]}
     return {"action": _DO[kind]} if kind in _DO else None
 
 
@@ -502,15 +529,19 @@ def _count_key(els, role, label):
 
 
 def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path, repeats=None, outcomes=None,
-          require_outcomes=True) -> dict:
+          require_outcomes=True, sources=None) -> dict:
     """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
     "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
     raw: read_bound's {path: bytes} from the digest check: the flow is built from those bytes, never re-read.
     deleted: {(page index, line index)}; keeps: {bank line index: keep}; repeats: {page index: cap}. ValueError when it cannot be written
     (the bank ops are tried against bank_path's bank as it is now, writing nothing). outcomes: {(page index, press
-    line index): [ticked proposal index]}; require_outcomes: every submit press needs one (Try it never presses)."""
+    line index): [ticked proposal index]}; require_outcomes: every submit press needs one (Try it never presses).
+    sources: {(page index, type line index): (literal|input|bank, input label)}; plan["tried"]: {type step id: the
+    recorded value}, what Try types instead."""
     pages_dir = Path(pages_dir)
     proposal, adds = copy.deepcopy(proposal), []   # count elements go on the after pages: never the caller's proposal
+    for (i, j), (src, label) in (sources or {}).items():   # _do reads the choice from the line
+        proposal["pages"][i]["steps"][j].update(source=src, input_label=label)
     by_id = {p["id"]: p for p in proposal["pages"]}
     for (i, j), ks in (outcomes or {}).items():
         for k in ks:
@@ -562,6 +593,31 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
         made[at].setdefault("outcomes", []).append({"for": made[press]["id"], **o})
     on.update(cases)
     n = sum(len(c["do"]) for c in cases.values())
+    tried, type_ops = {}, []
+    for (i, j), s in made.items():
+        if s["action"] != "type":
+            continue
+        line = proposal["pages"][i]["steps"][j]
+        tried[s["id"]] = line["value"]
+        if "value_from" in s:
+            ins, base = wf.setdefault("inputs", {}), line["input"]
+            name, k = base, 2
+            while name in ins:
+                name, k = f"{base}_{k}", k + 1
+            title = str(lesson["pages"][i].get("title") or proposal["pages"][i]["id"])[:80]
+            ins[name] = {"label": f"{line.get('input_label') or line['label'][:60]} (on {title})",
+                         "pattern": "[^\\x00-\\x1f]{1,200}"}
+            s["value_from"] = f"input.{name}"
+        elif "bank" in s and line["bank_key"] is None:
+            if not line["bank_op"]:
+                raise ValueError(f"{line['label'][:80]}: the bank has no answer for it")
+            type_ops.append({**line["bank_op"], "keep": "bank"})   # the step reads this key: never left unkept
+    if tried:
+        perms = wf["permissions"]
+        if "type_text" not in perms["allow"]:
+            perms["allow"].append("type_text")
+        if RISK_ORDER.index(perms["max_element_risk"]) < RISK_ORDER.index("modify"):
+            perms["max_element_risk"] = "modify"
     if any(s.get("press") and s["keep"] and (i, j) not in deleted for i, p in enumerate(proposal["pages"])
            if p["id"] in cases for j, s in enumerate(p["steps"])):   # a kept press needs submit; never lower it
         perms = wf["permissions"]
@@ -574,7 +630,7 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
         if origin(lp["url"]) not in dests and (site := _site(lp["url"])) not in dests:
             dests.append(site)
     try:
-        engine.check_learned(wf["steps"])
+        engine.check_learned(wf["steps"], inputs=wf.get("inputs") or {})
     except engine.Stop as e:
         raise ValueError(str(e)) from None
     data = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True).encode()
@@ -590,16 +646,16 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
         h.update(b)
         schemas[pid] = (yaml.safe_load(b) or {}).get("page", {})
     try:
-        engine.check_learned(wf["steps"], schemas)   # now with the pages: each count target is an element
+        engine.check_learned(wf["steps"], schemas, wf.get("inputs") or {})   # now with the pages: each count target is an element
     except engine.Stop as e:
         raise ValueError(str(e)) from None
     if require_outcomes and (missing := engine.outcomes_missing(wf, schemas)):
         raise ValueError("needs an outcome: " + ", ".join(missing))
-    ops = [{**o, "keep": keeps.get(i, o["keep"])} for i, o in enumerate(proposal["bank"])]
+    ops = [{**o, "keep": keeps.get(i, o["keep"])} for i, o in enumerate(proposal["bank"])] + type_ops
     formfill.apply_ops(Path(bank_path), ops, dry=True)   # a bad op is refused here, before Touch ID and any write
     kept = sum(1 for o in ops if o["keep"] == "bank")
     return {"pages": pages, "new": fresh, "flow": (flow_path, data), "digest": h.hexdigest(), "ops": ops,
-            "counts": f"pages {len(pages)} ({new} new), steps {n}, bank {kept}"}
+            "counts": f"pages {len(pages)} ({new} new), steps {n}, bank {kept}", "tried": tried}
 
 
 def _put(path, data, new=False):

@@ -59,3 +59,17 @@ def test_try_stops_before_attaching_a_file(tmp_path, monkeypatch):
     d, asked, why = pg.go(tmp_path, monkeypatch, [], keep=True)
     assert why == STOP.format("Approve & promote") and asked == []
     assert not any(c[0] in ("click", "choose_file") for c in d.calls if isinstance(c, tuple))
+
+
+def test_try_stops_before_request_button(tmp_path, monkeypatch):
+    f = pg.make(tmp_path)
+    _try_flow(f, "modify")
+    p = f.parent.parent / "pages" / "disc.yaml"
+    pd = yaml.safe_load(p.read_text())
+    pd["page"]["elements"]["approve"]["name"] = "Request release of PR-1"
+    p.write_text(yaml.safe_dump(pd))
+    monkeypatch.setattr(pg.Desk, "web_root", lambda self, app=None: pg.N("document", "Discover", children=[
+        pg.N("button", "Request release of PR-1")]))
+    d, asked, why = pg.go(tmp_path, monkeypatch, [], keep=True)
+    assert why == STOP.format("Request release of PR-1") and asked == []
+    assert not any(c[0] == "click" for c in d.calls if isinstance(c, tuple))

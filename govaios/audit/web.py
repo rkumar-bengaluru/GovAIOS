@@ -1739,7 +1739,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
         back = f"/lesson/{name}"
         try:
             lesson, proposal, app, _, _ = lesson_ctx(name)
-            deleted, keeps, repeats, outcomes = lesson_ui.edits(proposal, f)
+            deleted, keeps, repeats, outcomes, sources = lesson_ui.edits(proposal, f)
         except lesson_ui.BadCap as e:
             tell(f"Not approved: {e}.")
             return back
@@ -1771,7 +1771,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             return back
         try:
             plan = lessons.build(lesson, proposal, deleted, keeps, raw, None if sandbox else app.path, pages_dir,
-                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes)
+                                 home / applyfiles.BANK, repeats, outcomes, require_outcomes, sources)
         except (ValueError, KeyError, TypeError) as e:
             tell(f"Not approved: {str(e)[:200]}.")
             return back
@@ -1825,12 +1825,28 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             tell("A Studio lesson has no app to try.")
             return c.back
         tid, root = f"try_{c.app.id}", home / "try"
+        doc, dropped = yaml.safe_load(c.plan["flow"][1]), set()
+
+        def recorded(steps):   # a Try types what the lesson recorded, never asks for it (spec, My calls 9)
+            for s in steps:
+                if s.get("id") in c.plan["tried"]:
+                    dropped.add(s.pop("value_from", "").removeprefix("input."))
+                    s.pop("bank", None)
+                    s["value"] = c.plan["tried"][s["id"]]
+                recorded(s.get("steps", []))
+                for v in s.get("on_match", {}).values():
+                    if isinstance(v, dict) and isinstance(v.get("do"), list):
+                        recorded(v["do"])
+        recorded(doc["workflow"]["steps"])
+        ins = {k: v for k, v in (doc["workflow"].pop("inputs", None) or {}).items() if k not in dropped}
+        if ins:
+            tell("This app asks for inputs at Run; Try it cannot run it. Approve it, then Run.")
+            return c.back
         try:
             if root.is_symlink():
                 root.unlink()
             elif root.exists():
                 shutil.rmtree(root)   # each Try replaces the last one's tree
-            doc = yaml.safe_load(c.plan["flow"][1])
             doc["workflow"].update({"id": tid, "try": True})
             for d in (root, root / "flows", root / "pages"):
                 d.mkdir(mode=0o700)
@@ -2002,6 +2018,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
             ev.update({f: body[f][:200] for f in EVENT_STR if isinstance(body.get(f), str)})
             ev.update({f: body[f] for f in EVENT_NUM if isinstance(body.get(f), (int, float)) and not isinstance(body[f], bool)
                        and abs(body[f]) < 1e15})   # False for nan and inf; no OverflowError on a huge int
+            if k == "down" and isinstance(body.get("types"), list):   # the fields typed in before this press
+                ev["types"] = [x[:200] for x in body["types"] if isinstance(x, str)][:20]
             applyfiles.append_line(home, applyfiles.TEACH_IN, ev)
             return 200, {}
         with panel.lock:   # /ext/teach: the checks command() makes for a run, then the same start
@@ -2184,7 +2202,8 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 n = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 n = -1
-            if not 0 <= n <= 4096:
+            # an event's 20 typed field names (200 characters each, up to 3 bytes in UTF-8) must fit
+            if not 0 <= n <= (16384 if path == "/ext/event" else 4096):
                 return self._send(400, "{}", ctype="application/json")
             try:
                 st, obj = ext(method, path, self.headers, self.rfile.read(n))

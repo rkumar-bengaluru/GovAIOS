@@ -2488,7 +2488,8 @@ EXT = "chrome-extension://" + "a" * 32
 def _ext(P, path, body=None, token=None, origin=EXT, method=None):
     c = http.client.HTTPConnection("127.0.0.1", P.srv.server_address[1])
     h = {k: v for k, v in (("Origin", origin), ("X-GovAIOS-Token", token)) if v}
-    c.request(method or "POST", path, body=json.dumps({} if body is None else body), headers=h)
+    # raw UTF-8, as Chrome's JSON.stringify sends it
+    c.request(method or "POST", path, body=json.dumps({} if body is None else body, ensure_ascii=False).encode(), headers=h)
     r = c.getresponse()
     return r.status, json.loads(r.read() or b"null"), r
 
@@ -2589,7 +2590,23 @@ def test_ext_event_appended_with_run_id(panel):
     assert last["run"] == panel.srv.panel.run_id and last["kind"] == "down" and last["x"] == 3 and len(last["name"]) == 200
     assert set(last) <= {"run", "kind", "x", "y", "name", "role", "tag", "url", "t"} and "y" not in last
     assert _ext(panel, "/ext/event", {"kind": "bogus"}, token=tok)[0] == 400
-    assert _ext(panel, "/ext/event", {"kind": "x" * 5000}, token=tok)[0] == 400   # body over 4096
+    assert _ext(panel, "/ext/event", {"kind": "x" * 17000}, token=tok)[0] == 400   # body over 16384
+    assert _ext(panel, "/ext/state", {"kind": "x" * 5000}, token=tok)[0] == 400   # other paths: over 4096
+
+
+def test_ext_event_keeps_types_on_down(panel):
+    _open(panel)
+    tok = _paired(panel)
+    _approve_teach(panel)
+    _ext(panel, "/ext/teach", {}, token=tok)
+    last = lambda: json.loads((panel.home / "apply/teach_in.jsonl").read_text().splitlines()[-1])
+    assert _ext(panel, "/ext/event", {"kind": "down", "types": ["City", 5, "n" * 300] + ["x"] * 30}, token=tok)[0] == 200
+    assert last()["types"] == ["City", "n" * 200] + ["x"] * 18   # strings only, each 200 at most, 20 at most
+    names = ["पता" * 66 + "घर" for _ in range(20)]   # 200 Devanagari characters each: about 12 KB of UTF-8
+    s = _ext(panel, "/ext/event", {"kind": "down", "name": "Save", "url": "https://x.example/form", "types": names}, token=tok)[0]
+    assert s == 200 and last()["types"] == names
+    _ext(panel, "/ext/event", {"kind": "down", "types": "City"}, token=tok)
+    assert "types" not in last()
 
 
 def test_studio_disconnect_ends_open_lesson(panel):
@@ -2878,6 +2895,59 @@ def test_try_approval_is_revoked_when_the_report_raises(panel, monkeypatch):
     with pytest.raises(RuntimeError):
         panel.srv.panel.tick()
     assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def _typed_lesson(P, name):
+    """Adds "Home address" typed on Discover, before the press, to the lesson Done bound."""
+    from govaios import lessons
+    doc = lessons.load(P.home, name)
+    evs = doc["pages"][1]["events"]
+    evs.insert(len(evs) - 1, {"kind": "type", "spec": {"role": "text_field", "name": "Home address"},
+                              "label": "Home address", "value": "9 Willow Terrace", "secure": False, "risk": "modify",
+                              "sure": True, "before": None})
+    lessons.write(P.home, name, doc)
+
+
+def _try_steps(P):
+    wf = yaml.safe_load(Path(P.made[-1].flow_path).read_text())["workflow"]
+    return wf, [d for s in wf["steps"] for c in s.get("on_match", {}).values() if isinstance(c, dict)
+                for d in c.get("do", [])]
+
+
+def test_try_types_recorded_values(panel):
+    _open(panel)
+    name = _done(panel)
+    _typed_lesson(panel, name)
+    p, page = _lesson_form(panel, name)
+    assert "value=input checked>" in page
+    panel.post("/lesson/try", name=name, p=p)
+    wf, steps = _try_steps(panel)
+    [t] = [d for d in steps if d["action"] == "type"]
+    assert t["value"] == "9 Willow Terrace" and "value_from" not in t and "bank" not in t
+    assert "inputs" not in wf and "type_text" in wf["permissions"]["allow"]
+    assert panel.made[-1].started
+    from govaios.engine import Runner
+    Runner(panel.made[-1].flow_path, None, panel.home)   # the engine loads the Try copy: its checks pass
+
+
+def test_try_refused_when_the_app_already_asks_for_inputs(panel):
+    from govaios import lessons
+    from govaios.approvals import read_bound
+    _open(panel)
+    name = _done(panel)
+    _typed_lesson(panel, name)
+    flow = panel.flows / "studio_approve_shortlisted.yaml"
+    doc = yaml.safe_load(flow.read_text())
+    doc["workflow"]["inputs"] = {"employee": {"label": "Employee", "pattern": "E-[0-9]{4}"}}
+    flow.write_text(yaml.safe_dump(doc, sort_keys=False))
+    les = lessons.load(panel.home, name)
+    les["digest"] = read_bound(flow, panel.flows.parent / "pages")[0]
+    lessons.write(panel.home, name, les)
+    n = len(panel.asked)
+    panel.post("/lesson/try", name=name, p=_lesson_form(panel, name)[0])
+    assert _tells(panel)[-1].endswith("This app asks for inputs at Run; Try it cannot run it. Approve it, then Run.")
+    assert panel.made == [] and len(panel.asked) == n
+
 
 
 def test_try_prefix_is_reserved_in_the_apps_folder(panel):
