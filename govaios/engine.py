@@ -29,7 +29,7 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 
 
 NO_DEST = object()
-LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat", "type")   # what a taught page may do (Studio lessons)
+LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat", "type", "read_table")   # what a taught page may do (Studio lessons)
 CONTROL = re.compile(r"[\x00-\x1f]")   # never typed: a newline acts as a hidden Enter
 ITEM_ROLES = ("row", "article")   # what a repeat round works on: one list item
 MAX_LEARNED = 10   # learned pages run within one classify_page call
@@ -200,6 +200,27 @@ def check_type(d, inputs=None):
         raise Stop(f"learned steps: type value_from {d['value_from']} is not an input of this flow")
 
 
+def check_read(d, pages=None):
+    """A read_table step: one page.element table, 1 to 10 header names, the first or every row."""
+    t = d.get("target")
+    if not (isinstance(t, str) and re.fullmatch(r"[^.]+\.[^.]+", t)) or t.startswith(("current_page.", "current_item.")):
+        raise Stop("learned steps: read_table target must be page.element")
+    if pages is not None and pages.get(t.split(".")[0], {}).get("elements", {}).get(t.split(".")[1], {}).get("role") != "table":
+        raise Stop(f"learned steps: read_table target {t} is not a table of its page")
+    c = d.get("columns")
+    if not (isinstance(c, list) and 1 <= len(c) <= 10 and len(set(map(str, c))) == len(c)
+            and all(isinstance(x, str) and 1 <= len(x) <= 200 and not CONTROL.search(x) for x in c)):
+        raise Stop("learned steps: read_table columns must be 1 to 10 unique names of 1 to 200 characters")
+    if d.get("rows") not in ("first", "all"):
+        raise Stop("learned steps: read_table rows must be first or all")
+
+
+def table_rows(table):
+    """(header texts, data rows' cell texts) of a table node; a cell is each child of a row."""
+    rows = [[(c.text() or c.name).strip() for c in n.children] for n in table.walk() if n.role == "row"]
+    return (rows[0], rows[1:]) if rows else ([], [])
+
+
 def check_learned(steps, pages=None, inputs=None):
     """A learned page case {do: [steps], then: again|end}: only the allowed actions, each with its own id."""
     ids = []
@@ -226,6 +247,10 @@ def check_learned(steps, pages=None, inputs=None):
                     learned.add(d["id"])
                     if d["action"] == "type":
                         check_type(d, inputs)
+                    if d["action"] == "read_table":
+                        check_read(d, pages)
+                        if d is not v["do"][-1]:
+                            raise Stop("learned steps: read_table must be the last step of its page")
                     if d["action"] == "repeat":
                         check_repeat(d, pages)
                         for x in d["steps"]:
@@ -270,6 +295,8 @@ def check_repeat(d, pages=None):
             raise Stop("learned steps: a step without an id")
         if x.get("action") == "repeat":
             raise Stop("learned steps: a repeat cannot hold a repeat")
+        if x.get("action") == "read_table":
+            raise Stop("learned steps: a repeat cannot hold a read_table")
         if x.get("action") not in LEARNED_ACTIONS:
             raise Stop(f"learned steps: {x.get('action')} not allowed")
     if d["steps"][0].get("action") != "click" or d["steps"][0].get("target") != d.get("item"):
@@ -374,6 +401,7 @@ class Runner:
         self.launched = False
         self.shown = None   # digest of the last approval text shown (set by ask)
         self.report_path = None
+        self.report_items = 0
         self.app = self.flow["browser"]["application"]
         self.approvals = Approvals(self.home / "approvals.json")
         self.audit = AuditLog(self.home)
@@ -1182,13 +1210,40 @@ class Runner:
         self.gate("report", "read")
         rec = self.ctx.get("record", {})
         line = f"#{self.ctx.get('n')}: " + " | ".join(str(rec.get(f) or "")[:80] for f in s["fields"]) + "\n"
-        if self.report_path is None:
-            (self.home / "reports").mkdir(mode=0o700, exist_ok=True)
-            self.report_path = self.home / "reports" / f"{self.flow['id']}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.txt"
-            self.report_items = 0
+        self._report_file()
         self._act("report", self._append_report, line)
         self.report_items += 1
         print(f"report: {self.report_items} items -> {self.report_path}", flush=True)
+
+    def _report_file(self):
+        if self.report_path is None:
+            (self.home / "reports").mkdir(mode=0o700, exist_ok=True)
+            self.report_path = self.home / "reports" / f"{self.flow['id']}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.txt"
+        return self.report_path
+
+    def do_read_table(self, s):
+        """Picked columns of one table into the report file; the values never reach stdout or the audit."""
+        ref = self.ref(s["target"])
+        self.gate("extract_visible_text", "read", target=ref, destination=self.d.current_url(self.app))
+        self.gate("report", "read")
+        table, _ = self.page_element(ref)
+        headers, data = table_rows(table)
+        idx = []
+        for col in s["columns"]:
+            n = headers.count(col)
+            if n != 1:
+                raise Stop(f"column {col} {'not found' if n == 0 else 'found more than once'}")
+            idx.append(headers.index(col))
+        path = self._report_file()
+        got = data[:1] if s["rows"] == "first" else data[:200]
+        clean = lambda v: re.sub(r"[\x00-\x1f\x7f-\x9f]", "", v).replace("|", "/")[:200]
+        lines = [" | ".join(f"{c}: {clean(r[i]) if i < len(r) else '(missing)'}" for c, i in zip(s["columns"], idx))
+                 for r in got] or ["(no rows)"]
+        if s["rows"] == "all" and (len(data) > 200 or getattr(self.d, "capped", False)):
+            lines.append("(more rows not read)")
+        self._act("report", self._append_report, "\n".join(lines) + "\n", target=ref)
+        print(f"report saved: reports/{path.name}", flush=True)
+        self._audit("action", action="read_table", target=ref, columns=" | ".join(s["columns"]), rows=len(got), outcome="done")
 
     def _append_report(self, line):
         fd = os.open(self.report_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)

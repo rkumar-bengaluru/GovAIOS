@@ -190,6 +190,11 @@ class MacDesktop:
         return str(url.absoluteString()) if url is not None else ""
 
     # --- perception ---
+    @property
+    def capped(self):
+        """True when the last snapshot hit the node cap (a table may be cut)."""
+        return getattr(self, "_count", 0) >= MAX_NODES
+
     def web_root(self, app):
         """Snapshot of the focused window's top web document, or None if not built yet."""
         win = _attr(self._ax_app(app), "AXFocusedWindow")
