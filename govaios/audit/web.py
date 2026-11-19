@@ -265,7 +265,7 @@ REPORT_LINE = re.compile(r"report saved: reports/([a-z0-9_]{1,68})-\d{8}T\d{6}Z\
 
 
 def report_lines(home, name):
-    """A run's report file, as at most 200 control-free lines; None if it can't be opened safely.
+    """A run's report file, as at most 201 control-free lines (the runner's 200 values + its cut-short note); None if it can't be opened safely.
     The report holds untrusted page text: no symlinks, regular files only, never a FIFO's hang."""
     d = Path(home) / "reports"
     if d.is_symlink():
@@ -282,7 +282,10 @@ def report_lines(home, name):
         return None
     finally:
         os.close(fd)
-    return [re.sub(r"[\x00-\x1f\x7f]", "", l) for l in raw.decode(errors="replace").split("\n")[:200]]
+    lines = raw.decode(errors="replace").split("\n")
+    if lines[-1] == "":   # the trailing newline, not a line
+        lines.pop()
+    return [re.sub(r"[\x00-\x1f\x7f]", "", l) for l in lines[:201]]
 
 
 def _say(text):

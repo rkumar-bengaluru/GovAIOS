@@ -3110,9 +3110,25 @@ def test_finished_run_shows_its_report_escaped(panel):
     aid = P.srv.panel.app.id
     _put_report(P, aid)
     body = _end_with(P, r, _report_line(aid))
-    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 200
+    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 201
     assert "<b>T-0009" not in body and "\x07" not in body
     assert not any("T-0009" in l for l in _tells(P)) and not any("T-0009" in s for s in P.spoken)
+
+
+def test_report_shows_the_cut_short_note(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid, "v\n" * 200 + "(more rows not read)\n")
+    assert "(more rows not read)" in _end_with(P, r, _report_line(aid))
+
+
+def test_report_trailing_newline_makes_no_empty_item(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid, "one\ntwo\n")
+    assert "<li></li>" not in _end_with(P, r, _report_line(aid))
 
 
 def test_report_card_ignores_other_lines(panel):
@@ -3159,5 +3175,5 @@ def test_try_report_shows_after_the_try(panel):
     r = panel.made[-1]
     _put_report(panel, TRY_ID)
     body = _end_with(panel, r, _report_line(TRY_ID))
-    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 200
+    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 201
     assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
