@@ -3080,3 +3080,84 @@ def test_no_repeat_offer_on_a_page_the_flow_has():
     les = {"pages": [{"title": "T", "url": "https://a.example/", "tree": capture.tree(t)}]}
     assert "name='cap:0'" in pl.page("n", les, prop, set(), {}, "")
     assert "name='cap:0'" not in pl.page("n", les, prop, {"p"}, {}, "")
+
+
+# --- the finished run's report (G2 Task 4)
+
+STAMP = "20261119T101500Z"
+
+
+def _report_line(aid, tail=""):
+    return f"report saved: reports/{aid}-{STAMP}.txt{tail}"
+
+
+def _put_report(P, aid, text="Ticket: <b>T-0009</b>\x07\n" * 250):
+    d = P.home / "reports"
+    d.mkdir(exist_ok=True)
+    (d / f"{aid}-{STAMP}.txt").write_text(text)
+
+
+def _end_with(P, r, *lines):
+    r._lines.extend(lines)
+    r.done, r.code = True, 0
+    _tick(P)
+    return P.get("/")[1]
+
+
+def test_finished_run_shows_its_report_escaped(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    body = _end_with(P, r, _report_line(aid))
+    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 200
+    assert "<b>T-0009" not in body and "\x07" not in body
+    assert not any("T-0009" in l for l in _tells(P)) and not any("T-0009" in s for s in P.spoken)
+
+
+def test_report_card_ignores_other_lines(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    _put_report(P, "other_app")
+    body = _end_with(P, r, f"report saved: reports/../x-{STAMP}.txt", _report_line("other_app"),
+                   "report saved: /abs/path.txt", _report_line(aid, " more"))
+    assert "T-0009" not in body
+
+
+def test_report_card_refuses_symlinks(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    real = P.home / "elsewhere"
+    (P.home / "reports").rename(real)
+    (P.home / "reports").symlink_to(real)
+    assert "T-0009" not in _end_with(P, r, _report_line(aid))
+    (P.home / "reports").unlink()
+    (P.home / "reports").mkdir()
+    (P.home / "reports" / f"{aid}-{STAMP}.txt").symlink_to(real / f"{aid}-{STAMP}.txt")
+    assert "T-0009" not in P.get("/")[1]
+    f = P.home / "reports" / f"{aid}-{STAMP}.txt"
+    f.unlink()
+    os.mkfifo(f)   # must not hang the request thread
+    assert "T-0009" not in P.get("/")[1]
+
+
+def test_no_report_card_while_running(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    r._lines.append(_report_line(aid))
+    assert "T-0009" not in P.get("/")[1]
+
+
+def test_try_report_shows_after_the_try(panel):
+    _try(panel)
+    r = panel.made[-1]
+    _put_report(panel, TRY_ID)
+    body = _end_with(panel, r, _report_line(TRY_ID))
+    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 200
+    assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]

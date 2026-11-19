@@ -7,6 +7,7 @@ import json
 import math
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -260,6 +261,28 @@ RULES = {"claude_code": "Rules: every command is checked first and every action 
          "codex": "Rules: shell commands, file edits and plugin calls are checked first and logged; Codex's sandbox "
                   "stays on and web search is off (always on)."}
 APP_ID = re.compile(r"[a-z0-9_]{1,64}")
+REPORT_LINE = re.compile(r"report saved: reports/([a-z0-9_]{1,68})-\d{8}T\d{6}Z\.txt")   # 68: try_ + a 64-char app id
+
+
+def report_lines(home, name):
+    """A run's report file, as at most 200 control-free lines; None if it can't be opened safely.
+    The report holds untrusted page text: no symlinks, regular files only, never a FIFO's hang."""
+    d = Path(home) / "reports"
+    if d.is_symlink():
+        return None
+    try:
+        fd = os.open(d / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, 1 << 20)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return [re.sub(r"[\x00-\x1f\x7f]", "", l) for l in raw.decode(errors="replace").split("\n")[:200]]
 
 
 def _say(text):
@@ -837,7 +860,7 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                      f"</label><input id=cmd name=text list=cmds autocomplete=off{'' if otp or ans else ' autofocus'} "
                      f"placeholder='Type / for commands'><datalist id=cmds>{cmds}</datalist>"
                      f"<button class=go>Send</button></form>"
-                     f"{card(csrf)}{ans}{steps}{tasks_card()}{result_card()}<ul class=talk>{talked}</ul>",
+                     f"{card(csrf)}{ans}{steps}{tasks_card()}{result_card()}{report_card()}<ul class=talk>{talked}</ul>",
                      '<meta http-equiv="refresh" content="2">' if (live() or panel.queue) and (not ans or teaching()) else "",
                      here="/")
 
@@ -1080,6 +1103,18 @@ def make_server(home: Path, port: int = 0, now=time.time, flows_dir=None, launch
                 + (f"<p>Fill in Chrome yourself:</p>{you}" if you else "")
                 + (f"<p>Check:</p>{chk}" if chk else "")
                 + "<p class=m><a href='/apply/bank'>My answer bank</a></p></section>")
+
+    def report_card():
+        if live() or panel.run is None:
+            return ""
+        hit = next((m for l in reversed(panel.run.lines()) if (m := REPORT_LINE.fullmatch(l))), None)
+        if hit is None or hit[1] != panel.app.id:
+            return ""
+        rows = report_lines(home, hit[0].removeprefix("report saved: reports/"))
+        if not rows:
+            return ""
+        return (f"<section class=appcard><h2>{escape(panel.app.name)}: report</h2><ul>"
+                + "".join(f"<li>{escape(l)}</li>" for l in rows) + "</ul></section>")
 
     def apply_answer(f):
         """Check every answer, then write reply.json once for this ask. Values are never logged or echoed."""
