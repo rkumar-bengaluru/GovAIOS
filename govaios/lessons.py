@@ -196,12 +196,51 @@ def _keep(value):
     return "drop" if len(value) > 200 or _CODE.fullmatch(value) else "bank"
 
 
+READ_LAST = "Reading on the page your last press stayed on isn't supported yet"
+READ_EARLIER = "Reading on a page the flow already passed isn't supported yet"
+READ_MANY = "The page Done was pressed on looks like more than one page of this lesson; reads not added"
+
+
+def pages_of(lesson) -> list[dict]:
+    """The lesson's pages, then the page Done was pressed on (when the lesson kept it), with no events."""
+    t, url = lesson.get("done_tree"), lesson.get("done_url")
+    done = [{"url": url, "title": t.get("name") or "", "tree": t, "events": []}] if t and url else []
+    return lesson["pages"] + done
+
+
+def _table_key(els, spec):
+    """The page element for a table to read: an existing one with that spec, else a new key."""
+    want = {**spec, "risk": "read"}
+    if k := next((k for k, v in els.items() if v == want), None):
+        return k
+    base = f"{studio._slug(spec['has_text']) or 'table'}_table"
+    k, i = base, 2
+    while k in els:
+        k, i = f"{base}_{i}", i + 1
+    els[k] = want
+    return k
+
+
+def _tables(root, els):
+    """proposal["reads"]: each table that one of its headers alone locates on the page, keyed against els."""
+    els, out = dict(els), []
+    for t in (n for n in root.walk() if n.role == "table"):
+        headers, data = engine.table_rows(t)
+        for h in filter(None, headers):
+            spec = {"role": "table", "has_text": h}
+            if [id(n) for n in engine.find_all(root, spec, {"elements": {}})] == [id(t)]:   # identity: Node is a dataclass
+                out.append({"key": _table_key(els, spec), "spec": spec, "headers": headers, "rows": len(data),
+                            "preview": [c[:200] for c in data[0]] if data else []})
+                break
+    return out
+
+
 def propose(lesson, pages_dir, bank) -> dict:
     """The change a lesson proposes. Pure: reads pages_dir, never writes."""
     known = _known(pages_dir)
     taken = {f.stem for f in Path(pages_dir).glob("*.yaml")}   # unreadable files too: never overwritten
     out_pages, ops, keys, marks = [], [], {e.key for e in bank.entries}, []
-    for lp in lesson["pages"]:
+    for lp in pages_of(lesson):
         root = studio._as_nodes(lp["tree"])[0]
         hit = next(((pid, p) for pid, p in known if _identifies(p, root)), None)
         if hit:
@@ -261,11 +300,11 @@ def propose(lesson, pages_dir, bank) -> dict:
                 value = ev.get("value") or ""
                 op = _bank_op(label, value, bank, keys, ops)
                 nl = normalize(label)
-                known = next((e for e in bank.entries if nl and nl in {normalize(x) for x in e.labels}), None)
+                banked = next((e for e in bank.entries if nl and nl in {normalize(x) for x in e.labels}), None)
                 line = {"kind": "type", "label": text, "target": target, "keep": keep, "value": value,
                         # bank only by default when Run would type what the admin typed
-                        "source": "bank" if known and known.answer == value else "input",
-                        "bank_key": known and known.key, "bank_value": known and known.answer,
+                        "source": "bank" if banked and banked.answer == value else "input",
+                        "bank_key": banked and banked.key, "bank_value": banked and banked.answer,
                         "bank_op": op if op and op["op"] == "add" else None, "input": _input_name(label)}
             elif kind == "attach":
                 line = {"kind": "attach_file", "label": label if chk is None else text, "target": target,
@@ -288,12 +327,24 @@ def propose(lesson, pages_dir, bank) -> dict:
                     ops.append(op)
         out_pages.append({"id": pid, "new": new, "yaml": {"page": page}, "steps": steps,
                           "added": added})
+    n, reads, refused = len(lesson["pages"]), [], None
+    if len(out_pages) > n:   # the Done page: kept, last, only when it is none of the lesson's pages
+        droot = studio._as_nodes(lesson["done_tree"])[0]
+        hits = [k for k in range(n) if _identifies(out_pages[k]["yaml"]["page"], droot)]
+        if hits or lesson.get("flow") in SANDBOX:
+            out_pages.pop()
+            marks.pop()
+            if hits and lesson.get("flow") not in SANDBOX:
+                refused = READ_MANY if len(hits) > 1 else READ_LAST if hits == [n - 1] else READ_EARLIER
+        else:
+            out_pages[-1]["done"] = True
+            reads = _tables(droot, out_pages[-1]["yaml"]["page"]["elements"])
     _outcomes(lesson, out_pages, marks)
-    if out_pages and not all(own(lp["url"]) for lp in lesson["pages"]) \
-            and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[-1]["steps"]):
-        out_pages[-1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None,
-                                       "keep": True})
-    return {"pages": out_pages, "bank": ops}
+    if n and not all(own(lp["url"]) for lp in lesson["pages"]) \
+            and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[n - 1]["steps"]):
+        out_pages[n - 1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None,
+                                          "keep": True})
+    return {"pages": out_pages, "bank": ops, "reads": reads, "read_refused": refused}
 
 
 def _counts(tree):
@@ -332,8 +383,9 @@ def _outcomes(lesson, out_pages, marks):
     done = lesson.get("done_tree")
     if done:
         droot = studio._as_nodes(done)[0]
-        done_pid = next((p["id"] for p in reversed(out_pages) if _identifies(p["yaml"]["page"], droot)),
-                        out_pages[-1]["id"])
+        n = len(lesson["pages"])   # never the Done page itself: count outcomes stay on the lesson's pages
+        done_pid = next((p["id"] for p in reversed(out_pages[:n]) if _identifies(p["yaml"]["page"], droot)),
+                        out_pages[n - 1]["id"] if n else None)
     for (i, e), j in presses.items():
         outs = out_pages[i]["steps"][j]["outcomes"] = []
         before = lesson["pages"][i]["events"][e].get("before")
@@ -437,6 +489,8 @@ def _do(line, page):
                 if line.get("target") and line.get("check") else None)
     if kind == "click":
         return {"action": "click", "target": line["target"]} if line.get("target") else None
+    if kind == "read_table":
+        return {"action": "read_table", "target": line["target"], "columns": line["columns"], "rows": line["rows"]}
     if kind == "type" and line.get("target"):
         src = {"literal": ("value", line["value"]), "input": ("value_from", f"input.{line['input']}"),
                "bank": ("bank", line["bank_key"] or (line["bank_op"] or {}).get("key"))}[line["source"]]
@@ -510,6 +564,7 @@ def _cases(proposal, deleted, ids, on, repeats=None, made=None):
 def preview(lesson, pages_dir, bank) -> tuple[list[str], str]:
     """What the extension shows while teaching: a line per kept click or hand-over, and the cases' YAML."""
     proposal = propose(lesson, pages_dir, bank)
+    proposal["pages"] = [p for p in proposal["pages"] if not p.get("done")]
     lines = [f"{lp['title']}: {'press' if s.get('press') else 'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
              for p, lp in zip(proposal["pages"], lesson["pages"]) for s in p["steps"]
              if s["keep"] and s["target"] and s["kind"] in ("click", "hand_over")]   # never the closing hand-over
@@ -529,7 +584,7 @@ def _count_key(els, role, label):
 
 
 def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path, repeats=None, outcomes=None,
-          require_outcomes=True, sources=None) -> dict:
+          require_outcomes=True, sources=None, reads=None) -> dict:
     """The approved change in memory, checked before Touch ID: {"pages": {path: bytes}, "new": {paths},
     "flow": (path, bytes) | None, "digest": the digest the written files must have, "ops": bank ops, "counts": str}.
     raw: read_bound's {path: bytes} from the digest check: the flow is built from those bytes, never re-read.
@@ -537,9 +592,35 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     (the bank ops are tried against bank_path's bank as it is now, writing nothing). outcomes: {(page index, press
     line index): [ticked proposal index]}; require_outcomes: every submit press needs one (Try it never presses).
     sources: {(page index, type line index): (literal|input|bank, input label)}; plan["tried"]: {type step id: the
-    recorded value}, what Try types instead."""
+    recorded value}, what Try types instead. reads: {"table": index in proposal["reads"], "columns": [header index],
+    "rows": first|all}: the Done page becomes the last case, reading that table."""
     pages_dir = Path(pages_dir)
     proposal, adds = copy.deepcopy(proposal), []   # count elements go on the after pages: never the caller's proposal
+    if reads is None:
+        proposal["pages"] = [p for p in proposal["pages"] if not p.get("done")]
+    else:
+        if proposal.get("read_refused"):
+            raise ValueError(proposal["read_refused"])
+        if not proposal["pages"] or not proposal["pages"][-1].get("done"):
+            raise ValueError("No page to read on")
+        if not 0 <= reads["table"] < len(proposal["reads"]):
+            raise ValueError("no such table")
+        p, t = proposal["pages"][-1], proposal["reads"][reads["table"]]
+        cols = []
+        for c in reads["columns"]:
+            h = t["headers"][c] if 0 <= c < len(t["headers"]) else ""
+            if not h:
+                raise ValueError("a column without a header cannot be read")
+            if t["headers"].count(h) != 1:
+                raise ValueError(f"column {h} appears twice in this table")
+            cols.append(h)
+        els, want = p["yaml"]["page"]["elements"], {**t["spec"], "risk": "read"}
+        if t["key"] not in els and not p["new"]:
+            p["added"].append(t["key"])   # a reused equal entry rewrites nothing
+        if els.setdefault(t["key"], want) != want:
+            raise ValueError("the page changed; teach it again")
+        p["steps"].append({"kind": "read_table", "label": f"Read {', '.join(cols)}", "target": f"{p['id']}.{t['key']}",
+                           "columns": cols, "rows": reads["rows"], "keep": True})
     for (i, j), (src, label) in (sources or {}).items():   # _do reads the choice from the line
         proposal["pages"][i]["steps"][j].update(source=src, input_label=label)
     by_id = {p["id"]: p for p in proposal["pages"]}
@@ -556,7 +637,7 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
             else:
                 adds.append(((i, j), tuple(o["at"]), {"kind": "item_left"}))
     pages, fresh = {}, set()
-    for p, lp in zip(proposal["pages"], lesson["pages"]):
+    for p, lp in zip(proposal["pages"], pages_of(lesson)):
         if p["new"] or p["added"]:   # a known page gaining nothing is not rewritten
             path = pages_dir / f"{p['id']}.yaml"
             if p["new"] and os.path.lexists(path):
@@ -579,6 +660,13 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     if step is None or step.get("action") != "classify_page":
         raise ValueError("the step this lesson belongs to is gone; teach it again")
     on = step.setdefault("on_match", {})
+    if reads is not None:
+        if proposal["pages"][-1]["id"] in on:
+            raise ValueError("This page is already in the app; reads not added")
+        n = len(lesson["pages"])
+        last = proposal["pages"][n - 1]["id"] if n else None
+        if last in on and not (isinstance(on[last], dict) and on[last].get("then") == "again"):
+            raise ValueError("The page before this one ends the app; reads not added")   # the run would never get here
     can = repeatable(proposal, lesson)
     if any(i not in can for i in repeats or {}):
         raise ValueError("this page has no list to repeat on")
@@ -618,6 +706,9 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
             perms["allow"].append("type_text")
         if RISK_ORDER.index(perms["max_element_risk"]) < RISK_ORDER.index("modify"):
             perms["max_element_risk"] = "modify"
+    if any(s["action"] == "read_table" for s in made.values()):
+        allow = wf["permissions"]["allow"]
+        allow += [a for a in ("extract_visible_text", "report") if a not in allow]
     if any(s.get("press") and s["keep"] and (i, j) not in deleted for i, p in enumerate(proposal["pages"])
            if p["id"] in cases for j, s in enumerate(p["steps"])):   # a kept press needs submit; never lower it
         perms = wf["permissions"]
@@ -626,7 +717,7 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     if "unknown" in on:
         on["unknown"] = on.pop("unknown")   # stays the last case, as written by hand
     dests = wf.setdefault("destinations", [])
-    for lp in lesson["pages"]:
+    for _, lp in zip(proposal["pages"], pages_of(lesson)):
         if origin(lp["url"]) not in dests and (site := _site(lp["url"])) not in dests:
             dests.append(site)
     try:

@@ -854,23 +854,35 @@ def test_build_input_name_clashes_with_an_existing_input(tmp_path):
     assert list(yaml.safe_load(plan["flow"][1])["workflow"]["inputs"]) == ["home_address", "home_address_2"]
 
 
-def test_build_old_lesson_unchanged(tmp_path, monkeypatch):
+OLD_HASH = "e6d0f21fb22953570305418d0d088d351d46a7709a90956dbf51255caa7e8523"
+
+
+def _pin_date(monkeypatch):
+    """The drafts write today's date into the bytes: pinned to the day OLD_HASH was taken."""
     import datetime
-    import hashlib
     from govaios import studio
 
-    class Day(datetime.date):   # the drafts write today's date into the bytes: pinned to the day the hash was taken
+    class Day(datetime.date):
         @classmethod
         def today(cls):
             return cls(2026, 11, 18)
     monkeypatch.setattr(studio, "date", Day)
-    les, app = joblens(tmp_path)
-    plan = _plan(tmp_path, les, app, lessons.propose(les, tmp_path / "pages", Bank()), require_outcomes=False)
+
+
+def _hash(plan):
+    import hashlib
     h = hashlib.sha256(plan["flow"][1])
     for p in sorted(plan["pages"]):
         h.update(plan["pages"][p])
+    return h.hexdigest()
+
+
+def test_build_old_lesson_unchanged(tmp_path, monkeypatch):
+    _pin_date(monkeypatch)
+    les, app = joblens(tmp_path)
+    plan = _plan(tmp_path, les, app, lessons.propose(les, tmp_path / "pages", Bank()), require_outcomes=False)
     # the bytes this lesson built before typed text (commit 189578f); a change to the shipped pages changes it too
-    assert h.hexdigest() == "e6d0f21fb22953570305418d0d088d351d46a7709a90956dbf51255caa7e8523"
+    assert _hash(plan) == OLD_HASH
     assert plan["tried"] == {}
 
 
@@ -905,3 +917,202 @@ def test_edits_reads_sources():
             lesson_ui.edits(prop, bad)
     line["bank_key"] = "city"
     assert lesson_ui.edits(prop, {"src:0:0": "bank"})[4] == {(0, 0): ("bank", "Home address")}
+
+
+# ---------- reads: the Done page's tables ----------
+
+def _cell(x):
+    return Node("cell", "", children=[Node("text", x)])
+
+
+def _table(head, rows):
+    return Node("table", "", children=[Node("row", "", children=[_cell(h) for h in head])]
+                + [Node("row", "", children=[_cell(c) for c in r]) for r in rows])
+
+
+def _tickets(*tables):
+    from govaios import capture
+    return capture.tree(Node("document", "JobLens · My tickets", children=[Node("heading", "My tickets"), *tables]))
+
+
+def _reading(tmp_path, done=None):
+    """joblens() with Done pressed on a tickets page holding one table."""
+    les, app = joblens(tmp_path)
+    les["done_tree"] = done or _tickets(_table(["Ticket", "Subject", ""],
+                                               [["T-0009", "VPN down", ""], ["T-0012", "Printer", ""]]))
+    les["done_url"] = "http://localhost:8100/tickets"
+    return les, app
+
+
+READ = {"table": 0, "columns": [0, 1], "rows": "all"}
+
+
+def _on(plan):
+    return next(s for s in yaml.safe_load(plan["flow"][1])["workflow"]["steps"] if s["id"] == "on_start")["on_match"]
+
+
+def test_propose_offers_the_done_pages_tables(tmp_path):
+    les, _ = _reading(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    d = prop["pages"][-1]
+    assert (d["done"], d["new"], d["steps"], len(prop["pages"])) == (True, True, [], 3)
+    assert prop["reads"] == [{"key": "ticket_table", "spec": {"role": "table", "has_text": "Ticket"},
+                              "headers": ["Ticket", "Subject", ""], "rows": 2, "preview": ["T-0009", "VPN down", ""]}]
+    assert prop["read_refused"] is None
+
+
+def test_build_without_reads_is_unchanged(tmp_path, monkeypatch):
+    _pin_date(monkeypatch)
+    les, app = _reading(tmp_path)
+    plan = _plan(tmp_path, les, app, lessons.propose(les, tmp_path / "pages", Bank()), require_outcomes=False)
+    assert _hash(plan) == OLD_HASH
+    assert len(plan["new"]) == 1 and _on(plan)["localhost_joblens"]["then"] == "end"
+
+
+def test_build_adds_the_done_page_and_its_read(tmp_path):
+    les, app = _reading(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    pid = prop["pages"][-1]["id"]
+    before = yaml.safe_load(_plan(tmp_path, les, app, prop, require_outcomes=False)["flow"][1])["workflow"]
+    plan = _plan(tmp_path, les, app, prop, require_outcomes=False, reads=READ)
+    path = tmp_path / "pages" / f"{pid}.yaml"
+    assert path in plan["new"]
+    assert yaml.safe_load(plan["pages"][path])["page"]["elements"]["ticket_table"] == \
+        {"role": "table", "has_text": "Ticket", "risk": "read"}
+    on = _on(plan)
+    assert on[pid] == {"do": [{"id": f"learned_{pid}_1", "action": "read_table", "target": f"{pid}.ticket_table",
+                               "columns": ["Ticket", "Subject"], "rows": "all"}], "then": "end"}
+    assert on["localhost_joblens"]["then"] == "again" and list(on)[-1] == "unknown"
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    assert {"extract_visible_text", "report"} <= set(wf["permissions"]["allow"])
+    assert wf["permissions"]["max_element_risk"] == before["permissions"]["max_element_risk"]
+    assert not {"extract_visible_text", "report"} & set(before["permissions"]["allow"])
+    assert wf["destinations"].count("http://localhost:8100") == 1
+
+
+def _refused(tmp_path, done, text):
+    les, app = _reading(tmp_path, done)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert (prop["read_refused"], prop["reads"]) == (text, [])
+    assert not any(p.get("done") for p in prop["pages"])
+    with pytest.raises(ValueError, match=text.replace(".", r"\.")):
+        _plan(tmp_path, les, app, prop, require_outcomes=False, reads=READ)
+
+
+def test_read_on_the_last_page_refused(tmp_path):
+    les, _ = joblens(tmp_path)
+    _refused(tmp_path / "x", les["pages"][1]["tree"], "Reading on the page your last press stayed on isn't supported yet")
+
+
+def test_read_on_an_earlier_page_refused(tmp_path):
+    les, _ = joblens(tmp_path)
+    _refused(tmp_path / "x", les["pages"][0]["tree"], "Reading on a page the flow already passed isn't supported yet")
+
+
+def test_read_on_two_pages_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(lessons, "_identifies", lambda p, r: True)
+    _refused(tmp_path, None, "The page Done was pressed on looks like more than one page of this lesson; reads not added")
+
+
+def _with_case(tmp_path, app, page, then):
+    """A hand-written case for page (its file written too), then the lesson proposed again: the page is known now."""
+    pid = page["id"]
+    (tmp_path / "pages" / f"{pid}.yaml").write_text(yaml.safe_dump(page["yaml"], sort_keys=False))
+    doc = yaml.safe_load(app.read_text())
+    step = next(s for s in doc["workflow"]["steps"] if s["id"] == "on_start")
+    step["on_match"] = {pid: {"do": [{"id": "hand_written", "action": "hand_over"}], "then": then},
+                        **step["on_match"]}
+    app.write_text(yaml.safe_dump(doc, sort_keys=False))
+    return pid
+
+
+def test_read_on_a_page_the_app_handles_refused(tmp_path):
+    from govaios.approvals import read_bound
+    les, app = _reading(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    pid = _with_case(tmp_path, app, prop["pages"][-1], "end")
+    les["digest"] = read_bound(app, tmp_path / "pages")[0]
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert (prop["pages"][-1]["id"], prop["pages"][-1]["new"]) == (pid, False)
+    with pytest.raises(ValueError, match="^This page is already in the app; reads not added$"):
+        _plan(tmp_path, les, app, prop, require_outcomes=False, reads=READ)
+
+
+def test_read_after_a_page_that_ends_the_app_refused(tmp_path):
+    les, app = _reading(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    _with_case(tmp_path, app, prop["pages"][1], "end")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    with pytest.raises(ValueError, match="^The page before this one ends the app; reads not added$"):
+        _plan(tmp_path, les, app, prop, require_outcomes=False, reads=READ)
+
+
+def test_read_on_a_known_page_adds_its_table(tmp_path):
+    from govaios import studio
+    les, app = _reading(tmp_path)
+    (tmp_path / "pages" / "helpdesk_tickets.yaml").write_text(
+        yaml.safe_dump(studio.draft_page(les["done_tree"], "helpdesk_tickets"), sort_keys=False))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert (prop["pages"][-1]["new"], prop["pages"][-1]["id"]) == (False, "helpdesk_tickets")
+    plan = _plan(tmp_path, les, app, prop, require_outcomes=False, reads=READ)
+    path = tmp_path / "pages" / "helpdesk_tickets.yaml"
+    assert path in plan["pages"] and path not in plan["new"]
+    assert "ticket_table" in yaml.safe_load(plan["pages"][path])["page"]["elements"]
+
+
+def test_read_on_a_known_page_holding_the_table_rewrites_nothing(tmp_path):
+    from govaios import studio
+    les, app = _reading(tmp_path)
+    doc = studio.draft_page(les["done_tree"], "helpdesk_tickets")
+    doc["page"]["elements"]["tickets"] = {"role": "table", "has_text": "Ticket", "risk": "read"}
+    (tmp_path / "pages" / "helpdesk_tickets.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert prop["reads"][0]["key"] == "tickets"
+    plan = _plan(tmp_path, les, app, prop, require_outcomes=False, reads=READ)
+    assert tmp_path / "pages" / "helpdesk_tickets.yaml" not in plan["pages"]
+    assert _on(plan)["helpdesk_tickets"]["do"][0]["target"] == "helpdesk_tickets.tickets"
+
+
+def test_table_spec_skips_a_header_another_table_shows(tmp_path):
+    les, _ = _reading(tmp_path, _tickets(_table(["Net", "Gross"], [["1", "2"]]), _table(["Amount"], [["Net"]]),
+                                         _table(["Amount"], [["3"]])))
+    reads = lessons.propose(les, tmp_path / "pages", Bank())["reads"]
+    assert [r["spec"]["has_text"] for r in reads] == ["Gross"]   # both Amount tables share their only header
+
+
+def test_build_refuses_a_header_shown_twice(tmp_path):
+    les, app = _reading(tmp_path, _tickets(_table(["Net", "Net", "Gross"], [["1", "2", "3"]])))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    with pytest.raises(ValueError, match="^column Net appears twice in this table$"):
+        _plan(tmp_path, les, app, prop, require_outcomes=False, reads={"table": 0, "columns": [0], "rows": "first"})
+
+
+def test_sandbox_lesson_offers_no_reads(tmp_path):
+    les, _ = _reading(tmp_path)
+    les["flow"] = None
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert prop["reads"] == [] and prop["read_refused"] is None and not any(p.get("done") for p in prop["pages"])
+
+
+def test_preview_ignores_the_done_page(tmp_path):
+    les, _ = _reading(tmp_path)
+    _, text = lessons.preview(les, tmp_path / "pages", Bank())
+    assert list(yaml.safe_load(text)) == ["joblens_applications", "localhost_joblens"]
+    assert yaml.safe_load(text)["localhost_joblens"]["then"] == "end"
+
+
+def test_read_with_no_presses(tmp_path):
+    les, app = _reading(tmp_path)
+    les["pages"] = []
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert [r["key"] for r in prop["reads"]] == ["ticket_table"] and len(prop["pages"]) == 1
+    pid = prop["pages"][0]["id"]
+    on = _on(_plan(tmp_path, les, app, prop, require_outcomes=False, reads=READ))
+    assert [k for k in on if k.startswith("learned") or k == pid] == [pid] and on[pid]["then"] == "end"
+
+
+def test_done_page_after_a_typed_field(tmp_path):
+    les, _ = _typed(tmp_path, ("Home address", "9 Willow Terrace"))
+    les["done_tree"], les["done_url"] = _tickets(_table(["Ticket"], [["T-1"]])), "http://localhost:8100/tickets"
+    prop = lessons.propose(les, tmp_path / "pages", Bank())   # the type line once hid the known pages' list
+    assert prop["pages"][-1]["done"] and [r["key"] for r in prop["reads"]] == ["ticket_table"]
