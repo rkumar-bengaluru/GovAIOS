@@ -34,7 +34,8 @@ and also after a Try.
 - Caps: 200 rows, 200 characters per value, 10 columns, one table. The panel shows at most 200 lines.
 - Report name: `reports/<flow id>-<UTC %Y%m%dT%H%M%SZ>.txt`, mode 0600, in a 0700 `reports/` directory.
 - Stdout line, verbatim: `report saved: reports/<flow id>-<stamp>.txt`.
-- Panel pattern, verbatim: `re.fullmatch(r"report saved: reports/[a-z0-9_]{1,64}-\d{8}T\d{6}Z\.txt", ln)`.
+- Panel pattern, verbatim: `re.fullmatch(r"report saved: reports/[a-z0-9_]{1,68}-\d{8}T\d{6}Z\.txt", ln)`
+  (68, not the spec's 64: a Try id is `try_` plus an app id of up to 64; see Task 4, amendment 3).
 - With nothing ticked, the built flow and page bytes are exactly as before this plan.
 
 ## Review Focus
@@ -174,19 +175,38 @@ and also after a Try.
 - [ ] **Step 4: Run the tests, then the full suite.** Expected: PASS.
 - [ ] **Step 5: Commit.**
   ```bash
-  git add govaios/engine.py govaios/desktop/macos.py tests/test_read_table.py
+  git add govaios/engine.py govaios/desktop/macos.py govaios/audit/log.py tests/test_read_table.py
   git commit -m "feat(engine): a read_table step reads picked columns into the run's report"
   ```
+
+**Amendments (architect review, binding):**
+1. **The audit rejects the planned entry.** `AuditLog.append` (govaios/audit/log.py:115-120) allows only names in
+   `FIELDS` and only str/int values, so `columns=[...]` and `rows=` raise `AuditError`. Add `"columns"` and `"rows"` to
+   `FIELDS` in `govaios/audit/log.py`, and audit `columns=" | ".join(s["columns"])` (a str) and `rows=<int>`. In
+   `test_read_audit_has_no_values`, the entry has `columns == "Ticket"`. Add `govaios/audit/log.py` to this task's
+   Files and to its `git add`.
+2. **`path` and `report_path` must exist before the write.** `_append_report` writes to `self.report_path`, and step 8
+   uses an undefined `path`. After step 3 (every column matched) and before step 7, call `path = self._report_file()`.
+   Never call it earlier: `test_read_table_twice_stops` needs `reports/` to stay absent.
+3. **`report_items` moves to `__init__`.** Today it is first set inside `do_report`'s `report_path is None` branch. Once
+   `_report_file()` owns that branch, a `report` step after a `read_table` would hit an `AttributeError`. Set
+   `self.report_items = 0` next to `self.report_path = None` (engine.py:376).
+4. Cleaning a value strips `[\x00-\x1f\x7f-\x9f]` (DEL and C1 are control characters too), not just `CONTROL`. Only
+   `check_read`'s column check keeps `CONTROL`. Extend `test_read_cleans_values` with a `\x7f`.
+5. `check_read` refuses a target that starts with `current_page.` or `current_item.`, the same way `check_repeat`
+   does: `page_element` cannot resolve those. The message is the "must be page.element" one.
+6. When `rows: all` reads no data rows and the snapshot is capped, the lines are `["(no rows)", "(more rows not
+   read)"]`, in that order.
 
 ### Task 2: Lessons: offer the Done page's tables; build the read
 
 **Files:**
 - Modify: `govaios/lessons.py`:
-  - `propose` (line 197);
+  - `propose` (line 199);
   - `_outcomes` (`done_pid`, line 334);
-  - `_do` (line 422);
-  - `preview` (line 513);
-  - `build` (line 535);
+  - `_do` (line 432);
+  - `preview` (line 510);
+  - `build` (line 531);
   - new `pages_of`, `_tables` and `_table_key`.
 - Test: `tests/test_lessons.py`. Reuse `joblens(tmp_path)`, `_plan(...)` and the hash in
   `test_build_old_lesson_unchanged`.
@@ -316,18 +336,51 @@ and also after a Try.
   git commit -m "feat(lessons): offer the Done page's tables; build a read_table case when one is ticked"
   ```
 
+**Amendments (architect review, binding):**
+1. **Order in `propose`.** Run the page loop over `pages_of(lesson)`. Then decide whether to keep the Done entry, and
+   pop it from both `out_pages` and `marks` if it isn't kept. Then call `_outcomes`, then add the closing hand-over to
+   `out_pages[n - 1]`. Its guard `out_pages and …` becomes `n and …`.
+2. **`_outcomes` with no lesson pages.** A read where the stuck page is the table page has `lesson["pages"] == []`.
+   Today `next(..., out_pages[-1]["id"])` evaluates its default eagerly and raises `IndexError`, which the panel
+   doesn't catch, so the page fails with a 500. Use the default `out_pages[n - 1]["id"] if n else None`. Add
+   `test_read_with_no_presses`: `les["pages"] = []`. Propose offers the table, and the build's only new case is the
+   Done page's, at `then: end`.
+3. **Permissions get their own block.** "In the block that adds `type_text`" means *beside* it, not inside
+   `if tried:`, which runs only when a type step exists. Use
+   `if any(s["action"] == "read_table" for s in made.values()):` and add each permission if it is missing.
+4. **A pre-existing `then: end` hides the read.** If the last lesson page is already a case in `on` (so `_cases` skips
+   it) and that case has `then: end`, the run ends before the Done page and nothing is read, with no error. When a
+   read is built and `n > 0`, require `on[proposal["pages"][n - 1]["id"]]["then"] == "again"` whenever that id is in
+   `on`. Otherwise raise
+   `ValueError("The page before this one ends the app; reads not added")`. Add a test.
+5. **A known page is rewritten only when it changes.** On a known Done page, put the table key in `added` only when
+   the key wasn't already in its elements. A reused equal entry rewrites nothing and doesn't make the page's other
+   apps approve again.
+6. **Only offer headers a run can read.** `_tables` and `proposal["reads"]` keep every header text, so indices stay
+   stable. A header is *tickable* only when it is 1-200 characters with no `CONTROL` character, which is what
+   `check_read` accepts. Task 3 shows tick boxes only for tickable headers, and `edits` refuses the others.
+7. **Fixture detail.** In `_reading`, each data row carries a third, empty cell, so `preview == ["T-0009", "VPN down",
+   ""]` holds.
+8. **Evaluation of the planner's adjustments (accepted).**
+   - (a) `pages_of` always appends the Done page, and `propose` keeps it only when new. Accepted, because newness
+     needs the drafted YAML. `zip` truncation keeps `repeatable`, `build` and `preview` aligned.
+   - (b) The three refusals are found in `propose` and raised again by `build`, while "already in the app" is checked
+     only in `build`. Accepted: `propose` has no flow. Task 3 shows that refusal from `flow_cases`.
+   - (d) `build` refuses a ticked header that appears twice. Accepted: it costs one line and stops an approval that
+     could never run.
+
 ### Task 3: Lesson page "Read from this page", and Try reads
 
 **Files:**
 - Modify: `govaios/panel/lesson.py`:
   - `edits` (line 25);
-  - `page` (line 106): skip the `done` page in the section loop; the "last page gets no steps" note uses the last
+  - `page` (line 107): skip the `done` page in the section loop; the "last page gets no steps" note uses the last
     non-`done` page;
   - `BadCap`'s docstring;
   - new `_reads(proposal, flow_cases)`.
 - Modify: `govaios/audit/web.py`:
-  - `lesson_ctx` (line 1680): a known Done page with offered tables joins `grown`, so its other apps are listed;
-  - `lesson_plan` (line 1742): unpack and pass `reads`.
+  - `lesson_ctx` (line 1681): a known Done page with offered tables joins `grown`, so its other apps are listed;
+  - `lesson_plan` (line 1733; `edits` is called at 1742): unpack and pass `reads`.
 - Test: `tests/test_lessons.py` (the `edits` and page tests, beside `test_edits_reads_sources`) and
   `tests/test_panel_web.py` (Try, beside `test_try_types_recorded_values`).
 
@@ -392,12 +445,24 @@ and also after a Try.
   git commit -m "feat(studio): pick a table's columns to read on the lesson page; Try runs the read"
   ```
 
+**Amendments (architect review, binding):**
+1. **Hiding for Studio needs no code.** `propose` returns `reads == []` and `read_refused is None` for a `SANDBOX`
+   lesson, so `_reads(proposal, flow_cases)` shows nothing. Don't add a lesson parameter just for that check.
+   `test_lesson_page_hides_reads_for_studio` stays.
+2. **The column cap is a form choice.** More than 10 ticked columns raise `BadCap("Read at most 10 columns")`. That
+   way the admin sees a plain message, not `check_read`'s. Add the case to `test_edits_refuses_two_tables`, or give
+   it its own test.
+3. Tick boxes exist only for tickable headers (Task 2, amendment 6). `edits` raises `ValueError("unknown field")` for a
+   `read:<t>:<c>` on any other header, the empty one included, and for a tick whose value isn't `"1"`.
+4. `edits` reads `proposal.get("reads") or []` everywhere, including the bounds checks, so a proposal with
+   `read_refused` set refuses every `read:` field.
+
 ### Task 4: The panel shows the finished run's report
 
 **Files:**
 - Modify: `govaios/audit/web.py`:
   - new module-level `REPORT_LINE` and `report_lines(home, name)`;
-  - new `report_card()` inside `make_server`, rendered in `talk()` right after `result_card()` (line 846).
+  - new `report_card()` inside `make_server`, rendered in `talk()` right after `result_card()` (line 840).
 - Modify: `docs/backlog.md`: G2 built 2026-11-19. P2 and A1 still need G3's dropdowns, or hand-added filter steps.
 - Test: `tests/test_panel_web.py`. Reuse `_running`, `_tick`, `_tells` and `P.spoken`.
 
@@ -447,6 +512,17 @@ and also after a Try.
   git add govaios/audit/web.py docs/backlog.md tests/test_panel_web.py
   git commit -m "feat(panel): show a finished run's report, escaped, on the Talk page"
   ```
+
+**Amendments (architect review, binding):**
+1. **Evaluation of the planner's adjustment (c), accepted.** The report is picked up by scanning `panel.run.lines()`
+   in web.py. `HelperRun` forwards only lines (helper.py:278), so a `RunLaunch`-only attribute such as `capture` would
+   never reach a helper run. `lines()` is unbounded in both classes, so the line can't fall off.
+2. **No hang on a FIFO.** `report_lines` opens with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, and returns `None` unless
+   `stat.S_ISREG(os.fstat(fd).st_mode)`. A FIFO planted at the report name would otherwise block the panel's request
+   thread on `open`. Add the case to `test_report_card_refuses_symlinks`.
+3. **Long Try ids.** A Try's flow id is `try_<app id>`, and app ids are up to 64 characters (web.py:262 `APP_ID`), so
+   it can be 68. Use `[a-z0-9_]{1,68}` in `REPORT_LINE`, and in the Global Constraints pattern too. Otherwise a Try of a
+   61-64 character app id shows no report. The group-1 equality with `panel.app.id` stays the real check.
 
 ## Live check (the admin, on the Mac, after merge)
 
