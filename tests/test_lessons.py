@@ -854,8 +854,16 @@ def test_build_input_name_clashes_with_an_existing_input(tmp_path):
     assert list(yaml.safe_load(plan["flow"][1])["workflow"]["inputs"]) == ["home_address", "home_address_2"]
 
 
-def test_build_old_lesson_unchanged(tmp_path):
+def test_build_old_lesson_unchanged(tmp_path, monkeypatch):
+    import datetime
     import hashlib
+    from govaios import studio
+
+    class Day(datetime.date):   # the drafts write today's date into the bytes: pinned to the day the hash was taken
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 18)
+    monkeypatch.setattr(studio, "date", Day)
     les, app = joblens(tmp_path)
     plan = _plan(tmp_path, les, app, lessons.propose(les, tmp_path / "pages", Bank()), require_outcomes=False)
     h = hashlib.sha256(plan["flow"][1])
