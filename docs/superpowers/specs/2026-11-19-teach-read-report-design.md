@@ -1,6 +1,6 @@
 # Teach: read a table and report it (G2): design (2026-11-19)
 
-Status: for admin review. Branch `feat/teach-read-report`.
+Status: approved by the admin after architect review (2026-11-19). Branch `feat/teach-read-report`.
 
 ## Intent
 
@@ -45,90 +45,131 @@ page**, not marked live while teaching.
 
 ## Design
 
+Amended after the architect review (2026-11-19, approve with amendments; findings 1-13 are folded in below).
+
+### Which page a read is on
+
+- Reads are offered only on the **Done page** (`done_tree`, `done_url`), and only when the Done page is a **new page**:
+  one that no page in the lesson identifies. A page is identified by its exact title and first two headings
+  (`studio.draft_page`).
+  - H1: "My tickets" changes the title to "My tickets · Larkspur Helpdesk", so the Done page is new.
+  - P1: the payslips page has no presses, so it is new.
+- Every other case is refused at build, with the read not added. Lesson pages are matched as the
+  outcome code does (`_identifies`), but its "else the last page" fallback is not used:
+  - **the last page identifies it:** "Reading on the page your last press stayed on isn't supported yet". The runner
+    doesn't wait or take a new snapshot after a taught click on the same page, so the read could see the old table;
+  - **an earlier page identifies it:** "Reading on a page the flow already passed isn't supported yet";
+  - **more than one page identifies it:** refused (Rule 2);
+  - **the app already has a case for that page id** (a re-teach): "This page is already in the app; reads not added".
+    Without this, `_cases` would drop the read silently.
+- The read relies on the runner telling the Done page apart from the page before it. After the previous case's last
+  press, `then: again` waits for and classifies the next page; if the old page still shows, that page's case runs
+  again, bounded by `MAX_LEARNED`.
+
+### One page list
+
+- One helper, `pages_of(lesson)`, used by both `propose` and `build`: `lesson["pages"]` plus, when the Done page is new,
+  `{url: done_url, title, tree: done_tree, events: []}`.
+  - The known-page lookup runs on it too. If a known page file identifies the Done page, the table key is added to that
+    page, which is rewritten, and its other apps are warned, as for count outcomes.
+  - `build` writes the Done page's file only when a read is ticked. With nothing ticked, the build is exactly as today.
+
 ### Lesson page
 
-- When the lesson has a Done page (`done_tree`), the lesson page shows a **Read from this page** section under it.
-  Each table on that page is listed with its column headers and the number of rows seen while teaching (a snapshot
-  is capped in size, so this is a count of rows seen, not a promise). The section
-  shows nothing when the Done page has no tables.
-- For each table: a tick box per column, and a choice of **first row** or **every row**. *My call:* every row is the
-  default, since three of the four tasks list rows. Nothing is ticked by default; an unticked table adds nothing.
-- A preview under each table shows the ticked columns for the first row as seen while teaching (for P1: "Net: 149850"
-  on E-0001, or whatever was on screen).
+- `propose` computes `proposal["reads"]`: one entry per table offered on the Done page. Each entry holds the table's
+  spec, header texts, rows seen and a preview of the first row. Because it is in the proposal, the existing
+  proposal digest binds what the admin saw.
+- The page shows a **Read from this page** section listing those tables. For each table there is a tick box per
+  column, and a choice of **every row** (the default) or **first row**. No column is ticked by default.
+- The form posts indices only: `read:<t>:<c>` and `rows:<t>`. Header text never comes from the browser.
+- `lesson_ui.edits` validates the indices. Ticks in more than one table are refused with a plain message.
+- The section is hidden for Studio (sandbox) lessons.
+- The preview shows real cell text. Lessons already store page trees with their text (only field values are blanked).
+  "Rows seen" is a count of what the capped snapshot held, not a promise.
+
+### The table's spec
+
+- EnterpriseMock tables have no id or name, so `element_spec` can't find them.
+- The spec is `{role: table, has_text: <header>}`. Each of the table's header texts is tried in turn, and the first one
+  that finds exactly this table in `done_tree` is used. With none, the table isn't offered. There is no `index`: it is
+  positional and would move silently to another table.
+- The header check at run time is the real guard. A `has_text` can match a data cell; the header row can't be faked
+  that way.
 
 ### Build
 
-- Where the read step goes depends on which page the Done page is. It is matched as the outcome code matches it
-  (`_identifies`):
-  - **The last case's page** (H1: the tickets page, where pressing "My tickets" reloads the same page): the read step is
-    appended to that case's steps, after its presses. The press reloads the page and the read sees the new table.
-  - **A new page** (P1 ends on the payslips page, which has no presses): the Done page joins the flow as its last
-    case, `{do: [read step], then: end}`. Its page file comes from `done_tree` as other new pages come from their trees.
-    The case before it becomes `then: again`.
-  - **An earlier page of the flow** (a revisit): refused at build with "Reading on a page the flow already passed
-    isn't supported yet".
-- The table becomes a page element with risk `read`. EnterpriseMock tables have no id or name, so `element_spec` can't
-  find them. The spec is `{role: table, has_text: <a picked column's header>}`, plus `index` when that still matches
-  more than one table. It must find exactly that table in `done_tree`, or the table isn't offered.
-- The step: `{id, action: read_table, target: <page>.<table>, columns: ["Net"], rows: first | all}`. Columns are the
-  header texts, exactly as read.
-- Permissions gain `extract_visible_text` and `report`. `max_element_risk` isn't raised: a read is `read`.
-- Old lessons, and lessons with nothing ticked, build exactly as today.
+- The step: `{id, action: read_table, target: <page>.<table>, columns: [<header>, …], rows: first | all}`, the last
+  (only) step of the Done page's case, `then: end`. The case before it becomes `then: again`.
+- Permissions gain `extract_visible_text` and `report`, in the same block that adds `type_text`. `max_element_risk`
+  isn't raised.
+- `engine.check_read(d, pages)` is called from `check_learned` for top-level case steps. It checks:
+  - `target` is `page.element`, and with pages given, the element exists with `role: table`;
+  - `columns` is a non-empty list of at most 10 unique strings, each 1-200 characters, with no control characters;
+  - `rows` is `first` or `all`;
+  - the step is the last one in its case.
+- `check_repeat` refuses `read_table`.
+- The digest needs no change: the columns are in the flow bytes and the table is in the page bytes.
 
 ### Runner
 
 `do_read_table(s)`:
-- the gate (`extract_visible_text`, `read`, destination = the current URL), then `report`;
-- the table found exactly once, else stop;
-- the header row: the table's first `row` child. Its cells' text is read whatever role they have, since Chrome may
-  give a header cell another role than `cell`; the desktop adapter already drops Chrome's duplicate column children
-  (`AXColumn`). Each picked column must match exactly one header text, else stop ("column Net not found");
-- data rows: every row after the header (`first` takes only the first one). A row with fewer cells than the column's
-  index is skipped. More than 200 rows: the first 200 are read and the report says "(more rows not read)";
-- each value: the cell's text (`Node.text()`, as `field_value` with `text: true`), control characters removed, at
-  most 200 characters;
-- one report line per row, `Net: 55743` or `Ticket: T-0009 | Subject: Password reset…`. No rows writes `(no rows)`.
-  Lines go through the existing `_append_report` (0600 file under `reports/`);
-- the audit entry: step, table, columns and rows read. Never a value.
+- gates `extract_visible_text` (`read`, destination = the current URL) and `report`;
+- finds the table exactly once (Rule 2), else stops;
+- takes the header row: the table's first `row` child. Its cells' text is read whatever role they have. Each picked
+  column must match exactly one header text, else it stops with "column Net not found";
+- reads the data rows: every row after the header (`first`: only the first one).
+  - A row too short for a column gets `(missing)` for that cell.
+  - Past 200 rows, or when the snapshot hit its node cap, the report adds "(more rows not read)".
+  - No rows writes `(no rows)`;
+- for each value: the cell's text, with control characters removed, `|` replaced by `/`, and at most 200 characters;
+- writes one line per row, `Net: 55743` or `Ticket: T-0009 | Subject: …`, through a report-file helper shared with
+  `do_report`. The file is 0600 at `reports/<flow id>-<UTC stamp>.txt`;
+- prints `report saved: reports/<flow id>-<stamp>.txt`. That is the file's name, never its content;
+- writes the audit entry: step, table, columns and number of rows read, never a value.
+
+### Try
+
+A Try runs `read_table` in full, since a read is read-only, and the panel shows its report. Try is the admin's chance
+to see the answer before Approve. H1 and P1 press only navigate links, so a Try reaches the read.
 
 ### Panel
 
-- The run already prints `report: N items -> <path>`. The panel picks that path up as it does a capture path, and
-  when the run ends shows the report's lines in the run view (escaped, at most 200 lines, read from the data home's
-  `reports/` only).
+- The panel takes a report only from a line matching
+  `re.fullmatch(r"report saved: reports/[a-z0-9_]{1,64}-\d{8}T\d{6}Z\.txt", ln)` whose flow id is the running app's.
+  This is the same pattern as captures.
+- It opens the file with `O_NOFOLLOW` under `home/"reports"`, and refuses if `reports/` is a symlink.
+- When the run ends, it shows at most 200 lines, escaped. Report text never goes to speech, `tell()` or a notification.
 
 ## My calls (open to correction)
 
-Calls 7 to 10 answer the builder check.
-
-1. Reads are offered only on the **Done page**. All four tasks end on the table they read. Cost if wrong: a flow
-   that reads and then goes on can't be taught until G1.
-2. **Every row** is the default; no column is pre-ticked.
-3. The header row is the table's first row (EnterpriseMock tables use `<thead>`; Chrome lists it first).
-4. Report lines are `Header: value` joined by ` | `, one per row, so the answer can be read off at a glance.
-5. 200 rows and 200 characters per value as caps, matching the other caps in Teach.
-6. P2 and A1 still need G3 (or hand-added filter steps) before they can be fully taught. Build doesn't detect a
-   Done table that a run won't reach filtered: Teach can't see a filter it didn't record.
-7. Tables are found by role plus a header text (above), not by `element_spec`, which needs an id or a name.
-8. The lesson page's preview shows real cell text. Lessons already store page trees with their text (only field values
-   are blanked), so this adds no new storage. The anti-goal is about runs.
-9. The panel shows the report once the run ends, not live. It takes the path only from the `report:` line, and only
-   inside the data home's `reports/`. Any other path is ignored and the run view shows no report.
-10. A Done page that is an earlier page of the flow is refused at build rather than guessed at.
+1. Reads are offered only on a new Done page; the other cases are refused at build (above).
+2. Every row is the default; no column is pre-ticked.
+3. The header row is the table's first row.
+4. Report lines are `Header: value` joined by ` | `, one per row.
+5. Caps: 200 rows, 200 characters per value, 10 columns, one table.
+6. P2 and A1 still need G3, or hand-added filter steps. Build can't detect a Done table that a run won't reach
+   filtered.
+7. Tables are found by role plus a header text that finds exactly that table.
+8. The lesson page preview shows real cell text, which lessons already store.
+9. The panel shows the report once the run ends, not live.
 
 ## Assumptions to check live
 
-The header row coming first, and its text being readable, haven't been seen in a dump of an EnterpriseMock table from
-Chrome. The first Teach of H1 checks both. If either is wrong, the run stops with "column … not found"; it never
-reports a wrong column.
+- The header row comes first, and its text is readable. If not, the run stops with "column … not found".
+- Chrome may add a header group under the table, so header texts appear twice. That's harmless for the spec and the
+  header row; the H1 dump confirms it.
 
 ## Acceptance
 
 - Unit tests:
-  - lesson page lists Done-page tables and columns; nothing ticked builds as today;
-  - build adds the Done page as the last case when needed, writes the table element and the step;
-  - `do_read_table`: first row, every row, table found twice (stop), column missing (stop), column twice (stop),
-    short row skipped, no rows, 201 rows, control characters stripped, audit without values;
-  - the panel shows a finished run's report lines, escaped, and refuses a path outside `reports/`.
-- Live, on the admin's Mac: teach H1 (My tickets, read Ticket, every row) and P1 (read Net, first row). Approve and
-  run each; the panel shows the task file's answer, and the scorer's `benign_success` is `true`.
+  - the lesson page offers a new Done page's tables, and hides them for Studio lessons;
+  - nothing ticked builds exactly as today;
+  - build adds the Done page's file and its case, and refuses each of the four non-new cases;
+  - ticks in two tables are refused;
+  - `check_read`: shape, last step, refused inside a repeat;
+  - `do_read_table`: first row, every row, table found twice (stop), column missing (stop), column twice (stop), short
+    row `(missing)`, no rows, 201 rows, control characters and `|`, audit without values;
+  - Try reaches the read and shows the report;
+  - the panel shows a finished run's report escaped, and ignores a line not matching the pattern or another app's id.
+- Live, on the admin's Mac: teach H1 (My tickets, read Ticket, every row) and P1 (read Net, first row). Try, approve
+  and run each. The panel shows the task file's answer, and the scorer's `benign_success` is `true`.
