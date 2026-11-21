@@ -200,6 +200,9 @@ class FakeDesktop:
     def current_url(self, app):
         return self.url + ("?utm=x" if "himalayas" in self.url else "")
 
+    def loaded(self, app):
+        return None
+
     def window_title(self, app):
         return "x"
 

@@ -299,7 +299,7 @@ def test_click_refuses_when_something_else_is_under_the_point(env):
 def _snap_tree(env, monkeypatch, tree):
     """tree: {el: (role, sub, kids)}; fake CopyMultipleAttributeValues."""
     monkeypatch.setattr(macos, "AXUIElementCopyMultipleAttributeValues",
-                        lambda el, attrs, o, n: (0, (tree[el][0], tree[el][1], "t", None, None, None, [], tree[el][2])))
+                        lambda el, attrs, o, n: (0, (tree[el][0], tree[el][1], "t", None, tree[el][3] if len(tree[el]) > 3 else None, None, [], tree[el][2])))
     env.d._count = 0
     return env.d._snap("root")
 
@@ -307,6 +307,22 @@ def _snap_tree(env, monkeypatch, tree):
 def test_radio_outside_tab_list_is_radio(env, monkeypatch):
     n = _snap_tree(env, monkeypatch, {"root": ("AXGroup", None, ["r"]), "r": ("AXRadioButton", None, [])})
     assert n.children[0].role == "radio"
+
+
+@pytest.mark.parametrize("role,v,want", [("AXCheckBox", 1, "1"), ("AXCheckBox", 0, "0"), ("AXRadioButton", 1, "1"), ("AXHeading", 2, "")])
+def test_snap_number_value(env, monkeypatch, role, v, want):
+    n = _snap_tree(env, monkeypatch, {"root": ("AXGroup", None, ["x"]), "x": (role, None, [], v)})
+    assert n.children[0].value == want   # only checkbox/radio read a number; a heading level stays ""
+
+
+@pytest.mark.parametrize("v,want", [(True, True), (False, False), (None, None)])
+def test_loaded_reads_web_area(env, monkeypatch, v, want):
+    attrs = {("app", "AXFocusedWindow"): "win", ("web", "AXLoaded"): v}
+    monkeypatch.setattr(env.d, "_ax_app", lambda app: "app")
+    monkeypatch.setattr(env.d, "_find", lambda el, role, depth: "web")
+    monkeypatch.setattr(macos, "AXUIElementCopyAttributeValue",
+                        lambda el, name, _: (0, attrs[el, name]) if attrs.get((el, name)) is not None else (1, None))
+    assert env.d.loaded("Chrome") is want
 
 
 def test_radio_in_tab_list_is_tab(env, monkeypatch):

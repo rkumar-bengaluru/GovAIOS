@@ -1,5 +1,6 @@
-// Watches presses and typing on this one tab. It reads only aria-label, innerText, placeholder, tagName, type and role;
-// it never reads what was typed (GOV-AIOS reads that from the accessibility tree), and never clicks, types or submits.
+// Watches presses, typing, dropdown changes and checkbox ticks on this one tab. It reads only aria-label, innerText,
+// placeholder, tagName, type, multiple and role; it never reads what was typed or chosen (GOV-AIOS reads that from the
+// accessibility tree), and never clicks, types or submits.
 if (!window.__govaiosTeach) {
   const SKIP = ["password", "hidden"];   // never reported, not even by name
   const TEXT = ["text", "search", "email", "tel", "url", "number"];
@@ -8,7 +9,8 @@ if (!window.__govaiosTeach) {
   const onInput = (e) => {
     if (!e.isTrusted) return;
     const el = e.target;
-    if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && TEXT.includes(el.type) && !SKIP.includes(el.type))) dirty.add(el);
+    if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && TEXT.includes(el.type) && !SKIP.includes(el.type)) ||
+        (el instanceof HTMLSelectElement && !el.multiple) || (el instanceof HTMLInputElement && el.type === "checkbox")) dirty.add(el);
   };
   // the press name rule: aria-label, else its label's text, else placeholder
   const fieldName = (el) => clean(el.getAttribute("aria-label") || (el.labels && el.labels[0] && el.labels[0].innerText) ||

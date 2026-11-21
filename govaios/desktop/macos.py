@@ -189,6 +189,13 @@ class MacDesktop:
         url = _attr(doc, "AXURL") if doc is not None else None
         return str(url.absoluteString()) if url is not None else ""
 
+    def loaded(self, app):
+        """AXLoaded of the focused window's web area: True/False, or None when there is none or no attribute."""
+        win = _attr(self._ax_app(app), "AXFocusedWindow")
+        doc = self._find(win, "AXWebArea", 30) if win is not None else None
+        v = _attr(doc, "AXLoaded") if doc is not None else None
+        return None if v is None else bool(v)
+
     # --- perception ---
     @property
     def capped(self):
@@ -229,7 +236,9 @@ class MacDesktop:
             neutral = "radio"   # Chrome's role=tab and plain radios are both AXRadioButton
         if "AXSecureTextField" in (role, sub):   # Chrome: the role; AppKit: AXTextField + this subrole
             neutral, value = "native:AXSecureTextField", ""   # a password never reaches a snapshot (lessons store trees)
-        node = Node(role=neutral, name=_s(title) or _s(desc), value=_s(value), dom_id=_s(dom_id),
+        # Chrome gives a checkbox/radio a number (1/0), not a string; only these two neutral roles read it
+        val = str(int(value)) if neutral in ("checkbox", "radio") and isinstance(value, (int, bool)) else _s(value)
+        node = Node(role=neutral, name=_s(title) or _s(desc), value=val, dom_id=_s(dom_id),
                     dom_class=tuple(c for c in classes if isinstance(c, str)) if hasattr(classes, '__iter__') and not isinstance(classes, str) else (), handle=el)
         if neutral == "document" and self._count > 1:
             node.role = "embedded_document"   # iframes (ads); not descended into

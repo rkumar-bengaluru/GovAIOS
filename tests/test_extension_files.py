@@ -72,3 +72,9 @@ def test_content_js_sends_typed_fields_with_the_press():
 def test_content_js_never_reports_password():
     src = (EXT / "content.js").read_text()
     assert '"password"' in src and '"hidden"' in src
+
+
+def test_content_js_reports_selects_and_checkboxes():
+    src = (Path(__file__).parent.parent / "extension" / "content.js").read_text()
+    assert "HTMLSelectElement" in src and '"checkbox"' in src
+    assert src.split("const onInput = (e) => {")[1].lstrip().startswith("if (!e.isTrusted)")
