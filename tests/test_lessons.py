@@ -951,7 +951,10 @@ def test_lesson_page_shows_choice_lines(tmp_path):
     [(i, j, s), (ti, tj, _)] = _choice_lines(prop)
     html = lesson_ui.page("n", les, prop, set(), {}, "")
     assert f"Choose: Department “R&amp;D &lt;x&gt;” <label><input type=checkbox name='del:{i}:{j}' value=1> Delete" in html
-    assert f"Tick: Overdue only (on) <label><input type=checkbox name='del:{ti}:{tj}' value=1> Delete" in html
+    assert f"Tick: Overdue only <label><input type=checkbox name='del:{ti}:{tj}' value=1> Delete" in html
+    prop["pages"][ti]["steps"][tj]["value"] = False
+    assert f"Untick: Overdue only <label><input type=checkbox name='del:{ti}:{tj}'" in lesson_ui.page("n", les, prop, set(), {}, "")
+    prop["pages"][ti]["steps"][tj]["value"] = True
     plan = _plan(tmp_path, les, app, prop, {_press(prop), (i, j), (ti, tj)}, require_outcomes=False)
     wf = yaml.safe_load(plan["flow"][1])["workflow"]
     assert b"choose" not in plan["flow"][1] and b"tick" not in plan["flow"][1]
@@ -1370,6 +1373,13 @@ def test_read_here_offered_after_navigate_click(tmp_path):
     assert len(prop["pages"]) == 2 and not any(p.get("done") for p in prop["pages"])
     assert [(r["key"], r["headers"], r["preview"]) for r in prop["reads"]] == [("id_table", ["ID", "Name"], ["E-1", "Ann"])]
     assert prop["pages"][1]["steps"][-1]["label"] == "Filter employees"   # no closing hand-over: an own app
+
+
+def test_read_here_refused_when_done_page_has_no_table(tmp_path):
+    les, _ = _filtered(tmp_path)
+    les["done_tree"]["children"].pop()   # the reloaded page holds no readable table
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert (prop["read_here"], prop["read_refused"], prop["reads"]) == (False, lessons.READ_LAST, [])
 
 
 def test_read_here_refused_when_last_line_not_navigate(tmp_path):

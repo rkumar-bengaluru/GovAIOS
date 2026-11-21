@@ -273,3 +273,30 @@ def test_try_runs_choose_tick_and_wait_url(tmp_path, monkeypatch):
     assert (d.dept, d.overdue) == ("Engineering", "1")
     (f,) = (tmp_path / "reports").iterdir()
     assert f.read_text() == "Ticket: T-0009\n"
+
+
+class Stuck(Desk):
+    def loaded(self, app):
+        return False
+
+
+def test_wait_url_never_loaded_stops_without_reading(tmp_path, monkeypatch):
+    e = go(tmp_path, monkeypatch, Stuck(), [press(), read()])
+    assert str(e) == "the page did not finish loading after Filter"
+    assert not (tmp_path / "reports").exists()
+
+
+def test_tick_unclear_state_stops_without_click(tmp_path, monkeypatch):
+    d = Desk(overdue="2")
+    assert str(go(tmp_path, monkeypatch, d, [tick()])) == "the box's state is unclear: Overdue only"
+    assert clicks(d) == []
+
+
+def test_wait_url_unreadable_address_stops_before_press(tmp_path, monkeypatch):
+    d = Desk()
+    r = runner(tmp_path, monkeypatch, d, [tick()])
+    d.url = ""
+    monkeypatch.setattr(r, "gate", lambda *a, **k: None)   # the gate itself needs an address
+    with pytest.raises(Stop) as e:
+        r.do_click(press())
+    assert str(e.value) == "cannot read the page's address" and clicks(d) == []

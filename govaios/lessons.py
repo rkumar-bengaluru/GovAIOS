@@ -350,9 +350,9 @@ def propose(lesson, pages_dir, bank) -> dict:
             # a navigate press (a GET filter) reloaded this page: the run waits for its new address, then reads
             if last.get("kind") == "click" and last["keep"] and last["target"] and all(
                     own(lp["url"]) for lp in lesson["pages"]) and out_pages[n - 1]["yaml"]["page"]["elements"][
-                    last["target"].split(".", 1)[1]].get("risk") == "navigate":
-                refused, here = None, True
-                reads = _tables(droot, out_pages[n - 1]["yaml"]["page"]["elements"])
+                    last["target"].split(".", 1)[1]].get("risk") == "navigate" \
+                    and (tables := _tables(droot, out_pages[n - 1]["yaml"]["page"]["elements"])):
+                refused, here, reads = None, True, tables
         else:
             out_pages[-1]["done"] = True
             reads = _tables(droot, out_pages[-1]["yaml"]["page"]["elements"])

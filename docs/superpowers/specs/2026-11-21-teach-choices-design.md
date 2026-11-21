@@ -167,14 +167,17 @@ address (no address is stored); the run checks it, and Try shows "the page did n
 `do_tick(s)`:
 - has the same risk cap and gate;
 - if the box already has the state, it does nothing; else it clicks it once;
-- reads back `value == "1"` against the taught state, else stops.
+- reads back `value == "1"` against the taught state, else stops;
+- the audit action is `tick_box`; a box whose value is not "0" or "1" stops with "the box's state is unclear: <label>".
 
 `do_click` with `wait_url: true`:
 - after the press, it polls `current_url` up to 15 s for an address different from the one before;
+- an empty address before the press stops with "cannot read the page's address", before pressing;
 - the new address must be on the same origin, else it stops with "the press went to another site";
 - then it waits for the new document to finish loading: `AXLoaded` on the `AXWebArea`, when Chrome exposes it (a
   new desktop method, `loaded(app)`, None when the attribute is missing; then no wait, and the backlog's
-  part-loaded note stands);
+  part-loaded note stands); if it still says not loaded after 15 s, it stops with "the page did not finish loading
+  after <label>";
 - an unchanged address after the wait is retried inside the existing `for attempt in range(1 if submit else 2)` loop,
   so a submit is never pressed twice; then it stops with "the page did not change after <label>";
 - no extra `wait_for_page`: the read's `page_element` → `page_root` takes a fresh snapshot, and since the address

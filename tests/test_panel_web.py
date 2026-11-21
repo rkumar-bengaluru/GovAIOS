@@ -2237,6 +2237,41 @@ def test_reading_a_shared_known_page_warns_its_other_apps(cc):
     assert "name='read:0:0'" in page and "approving again" not in page
 
 
+def test_read_here_on_a_shared_known_page_warns_its_other_apps(cc):
+    """A same-page read (navigate press) on a known page another app uses: warns only for a new table key."""
+    from govaios import capture, lessons
+    from govaios.desktop import Node
+    ja = _approve_job_apply(cc)
+    own = cc.flows.parent / "pages" / "own_list.yaml"
+    own.write_text("page:\n  id: own_list\n  identification: {title_matches: '^Own$', anchors: [heading]}\n"
+                   "  elements:\n    heading: {role: heading, name: List, risk: read}\n"
+                   "    list: {role: link, name: List, risk: navigate}\n")
+    (cc.flows / "other.yaml").write_text((cc.flows / "job_apply.yaml").read_text()
+                                         .replace("id: job_apply", "id: other_flow", 1)
+                                         .replace('app: "Job Apply"', 'app: "Other app"', 1)
+                                         .replace("greenhouse_application: continue", "own_list: continue", 1))
+    cell = lambda x: Node("cell", "", children=[Node("text", x)])
+    table = Node("table", "", children=[Node("row", "", children=[cell("Ticket")]),
+                                        Node("row", "", children=[cell("T-1")])])
+    start = Node("document", "Own", children=[Node("heading", "List"), Node("link", "List")])
+    name = lessons.save(cc.home, "job_apply", ja.digest, "on_form", [
+        {"url": "http://localhost:8100/list", "title": "Own", "tree": start,
+         "events": [{"kind": "click", "spec": {"role": "link", "name": "List"}, "label": "List", "value": "",
+                     "secure": False, "risk": "navigate", "sure": True, "before": None}]}])
+    doc = lessons.load(cc.home, name)
+    doc["done_tree"] = capture.tree(Node("document", "Own", children=[Node("heading", "List"),
+                                                                       Node("link", "List"), table]))
+    doc["done_url"] = "http://localhost:8100/list?x=1"
+    lessons.write(cc.home, name, doc)
+    from govaios.formfill import Bank
+    assert lessons.propose(lessons.load(cc.home, name), cc.flows.parent / "pages", Bank())["read_here"]
+    page = _lesson_form(cc, name)[1]
+    assert "name='read:0:0'" in page and "Reading this table changes this page, which means approving again: Other app." in page
+    own.write_text(own.read_text() + "    tickets: {role: table, has_text: Ticket, risk: read}\n")
+    page = _lesson_form(cc, name)[1]
+    assert "name='read:0:0'" in page and "approving again" not in page
+
+
 def test_new_page_made_during_touch_id_is_never_replaced(cc, monkeypatch):
     from govaios import auth
     name, _ = _lesson(cc)

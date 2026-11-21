@@ -1173,6 +1173,8 @@ class Runner:
         else:
             self.gate("click", spec["risk"], target=ref)
         before = self.d.current_url(self.app)
+        if s.get("wait_url") and not before:
+            raise Stop("cannot read the page's address")
         # open_link: go to the link's own address instead of clicking it (JobLens's two-line titles defeat the
         # click-point check); same site only, so it never reaches a destination the click could not
         # a learned link on an outside site is opened the same way: a click there can be held by a full-page ad
@@ -1209,6 +1211,9 @@ class Runner:
                         if self.d.loaded(self.app) is not False:
                             break
                         time.sleep(0.25)
+                    if self.d.loaded(self.app) is False:
+                        raise Stop(f"the page did not finish loading after "
+                                   f"{getattr(node, 'name', '') or spec.get('name') or ref}")
                     return
                 continue
             if "verify_page" not in s:
@@ -1632,6 +1637,8 @@ class Runner:
         ref = self._gate_choice(s)
         node, _ = self.page_element(ref)
         label = (node.name or ref)[:80]
+        if node.value not in ("0", "1"):
+            raise Stop(f"the box's state is unclear: {label}")
         if (node.value == "1") == s["value"]:
             self._audit("action", action="tick_box", target=ref, outcome="already")
             return

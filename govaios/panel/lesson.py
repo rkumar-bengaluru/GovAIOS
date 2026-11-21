@@ -164,8 +164,8 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
                 text = f"Press: {escape(str(s.get('label'))[:200])} (asks Touch ID before the first run's press)"
             if s["kind"] in ("type", "choose"):
                 text += f" “{escape(s['value'][:200])}”"
-            if s["kind"] == "tick":
-                text += " (on)" if s["value"] else " (off)"
+            if s["kind"] == "tick" and not s["value"]:
+                text = f"Untick: {escape(str(s.get('label'))[:200])}"
             if s["kind"] == "hand_fill" or not s["keep"]:
                 note = " (not replayed)" if s["kind"] != "hand_fill" else ""
                 rows.append(f"<li>{text}{note}</li>")

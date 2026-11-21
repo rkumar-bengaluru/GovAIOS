@@ -13,6 +13,8 @@ Open:
 - Type-ahead with an option containing a space: untested live.
 - `AXLoaded` presence: untested live.
 - An untouched dropdown isn't recorded.
+- The recorder holds every checkbox as "multi" on a page with 2+ checkboxes anywhere (`formfill.group_of` climbs to the root); upgrade: call `_read` on the checkbox's form ancestor.
+- A run that starts on an already-filtered address: choose/tick say already, Filter reloads the same URL, and the run stops "the page did not change" after two presses (~30 s); fails safe.
 
 ## Teach read-report (G2 built 2026-11-19, branch `feat/teach-read-report`)
 
