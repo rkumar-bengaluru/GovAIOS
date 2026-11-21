@@ -854,6 +854,110 @@ def test_build_input_name_clashes_with_an_existing_input(tmp_path):
     assert list(yaml.safe_load(plan["flow"][1])["workflow"]["inputs"]) == ["home_address", "home_address_2"]
 
 
+# --- taught choices (teach-choices Task 4)
+
+def _chose(tmp_path, dept="Engineering", tick="1"):
+    """The JobLens lesson with Department picked, Overdue only ticked and Filter clicked before the press."""
+    les, app = joblens(tmp_path)
+    p = les["pages"][1]
+    p["tree"]["children"] += [{"role": "popup_button", "name": "Department"},
+                              {"role": "checkbox", "name": "Overdue only"}, {"role": "button", "name": "Filter"}]
+    p["events"][-1:-1] = [
+        {"kind": "pick", "spec": {"role": "popup_button", "name": "Department"}, "label": "Department", "value": dept,
+         "secure": False, "risk": "modify", "sure": True, "before": None},
+        {"kind": "tickbox", "spec": {"role": "checkbox", "name": "Overdue only"}, "label": "Overdue only",
+         "value": tick, "secure": False, "risk": "modify", "sure": True, "before": None},
+        {"kind": "click", "spec": {"role": "button", "name": "Filter"}, "label": "Filter", "value": "",
+         "secure": False, "submit": False, "risk": "navigate", "sure": True}]
+    return les, app
+
+
+def _choice_lines(prop):
+    return [(i, j, s) for i, p in enumerate(prop["pages"]) for j, s in enumerate(p["steps"])
+            if s["kind"] in ("choose", "tick")]
+
+
+def test_propose_pick_and_tickbox_lines(tmp_path):
+    les, _ = _chose(tmp_path)
+    p = lessons.propose(les, tmp_path / "pages", Bank())["pages"][1]
+    pid = p["id"]
+    assert [(s["kind"], s["label"], s["target"], s["keep"], s.get("value")) for s in p["steps"][2:5]] == [
+        ("choose", "Department", f"{pid}.department", True, "Engineering"),
+        ("tick", "Overdue only", f"{pid}.overdue_only", True, True),
+        ("click", "Filter", f"{pid}.button_filter", True, None)]
+    assert p["yaml"]["page"]["elements"]["department"] == {"role": "popup_button", "name": "Department",
+                                                           "risk": "modify"}
+
+
+def test_propose_choice_on_known_page_above_modify_is_unsure(tmp_path):
+    les, _ = _chose(tmp_path)
+    pages = tmp_path / "pages"
+    p = lessons.propose(les, pages, Bank())["pages"][1]
+    page = p["yaml"]["page"]
+    page["elements"]["department"]["risk"] = "submit"
+    (pages / f"{p['id']}.yaml").write_text(yaml.safe_dump({"page": page}))
+    p2 = lessons.propose(les, pages, Bank())["pages"][1]
+    assert not p2["new"]
+    [s] = [s for s in p2["steps"] if s["kind"] == "choose"]
+    assert (s["label"], s["keep"]) == ("Department (check this target)", False)
+
+
+def test_propose_choice_after_hand_over_is_dead(tmp_path):
+    t = tree(Node("button", "Submit"), Node("popup_button", "Department"))
+    pick = {**ev("pick", "popup_button", "Department", "Engineering"), "risk": "modify", "sure": True}
+    les = lesson(tmp_path, page(t, [ev("click", "button", "Submit"), pick]))
+    [p] = lessons.propose(les, tmp_path / "pages", Bank())["pages"]
+    assert [(s["kind"], s["keep"]) for s in p["steps"]] == [("hand_over", True), ("choose", False)]
+
+
+def _chose_flow(tmp_path, **kw):
+    les, app = _chose(tmp_path, **kw)
+    doc = yaml.safe_load(app.read_text())
+    doc["workflow"]["permissions"] = {"allow": [a for a in doc["workflow"]["permissions"]["allow"]
+                                                if a != "fill_field"], "max_element_risk": "navigate"}
+    app.write_text(yaml.safe_dump(doc, sort_keys=False))
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    return les, app, prop
+
+
+def test_build_choose_and_tick_steps(tmp_path):
+    les, app, prop = _chose_flow(tmp_path)
+    plan = _plan(tmp_path, les, app, prop, {_press(prop)}, require_outcomes=False)
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    pid = prop["pages"][1]["id"]
+    do = [{k: v for k, v in d.items() if k != "id"} for d in
+          next(s for s in wf["steps"] if s["id"] == "on_start")["on_match"][pid]["do"]]
+    assert {"action": "choose", "target": f"{pid}.department", "value": "Engineering"} in do
+    assert {"action": "tick", "target": f"{pid}.overdue_only", "value": True} in do
+    perms = wf["permissions"]
+    assert "fill_field" in perms["allow"] and "type_text" not in perms["allow"]
+    assert perms["max_element_risk"] == "modify"
+
+
+def test_preview_shows_choose_and_tick(tmp_path):
+    les, _ = _chose(tmp_path)
+    lines, text = lessons.preview(les, tmp_path / "pages", Bank())
+    assert lines[3:6] == ["JobLens · Discover: choose Engineering in Department",
+                          "JobLens · Discover: tick Overdue only", "JobLens · Discover: click Filter"]
+    do = yaml.safe_load(text)["localhost_joblens"]["do"]
+    assert [(d["action"], d.get("value")) for d in do][2:4] == [("choose", "Engineering"), ("tick", True)]
+    les2, _ = _chose(tmp_path / "b", tick="0")
+    assert "JobLens · Discover: untick Overdue only" in lessons.preview(les2, tmp_path / "b" / "pages", Bank())[0]
+
+
+def test_lesson_page_shows_choice_lines(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, app, prop = _chose_flow(tmp_path, dept="R&D <x>")
+    [(i, j, s), (ti, tj, _)] = _choice_lines(prop)
+    html = lesson_ui.page("n", les, prop, set(), {}, "")
+    assert f"Choose: Department “R&amp;D &lt;x&gt;” <label><input type=checkbox name='del:{i}:{j}' value=1> Delete" in html
+    assert f"Tick: Overdue only (on) <label><input type=checkbox name='del:{ti}:{tj}' value=1> Delete" in html
+    plan = _plan(tmp_path, les, app, prop, {_press(prop), (i, j), (ti, tj)}, require_outcomes=False)
+    wf = yaml.safe_load(plan["flow"][1])["workflow"]
+    assert b"choose" not in plan["flow"][1] and b"tick" not in plan["flow"][1]
+    assert wf["permissions"]["max_element_risk"] == "navigate"   # no choice step: no fill_field
+
+
 OLD_HASH = "e6d0f21fb22953570305418d0d088d351d46a7709a90956dbf51255caa7e8523"
 
 

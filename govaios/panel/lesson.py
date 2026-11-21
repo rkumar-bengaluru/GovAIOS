@@ -9,7 +9,8 @@ from govaios import engine, lessons
 
 KEEPS = (("bank", "Keep in bank"), ("job", "This job only"), ("drop", "Don't keep"))
 WORDS = {"click": "Click", "fill_form": "Fill the form from the bank", "attach_file": "Attach your CV",
-         "hand_over": "Hand over: you check and submit", "hand_fill": "You fill this yourself", "type": "Type"}
+         "hand_over": "Hand over: you check and submit", "hand_fill": "You fill this yourself", "type": "Type",
+         "choose": "Choose", "tick": "Tick"}
 SOURCES = ("literal", "input", "bank")
 
 
@@ -160,8 +161,10 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
             text = f"{WORDS.get(s['kind'], escape(s['kind']))}: {escape(str(s.get('label'))[:200])}"
             if s.get("press"):
                 text = f"Press: {escape(str(s.get('label'))[:200])} (asks Touch ID before the first run's press)"
-            if s["kind"] == "type":
+            if s["kind"] in ("type", "choose"):
                 text += f" “{escape(s['value'][:200])}”"
+            if s["kind"] == "tick":
+                text += " (on)" if s["value"] else " (off)"
             if s["kind"] == "hand_fill" or not s["keep"]:
                 note = " (not replayed)" if s["kind"] != "hand_fill" else ""
                 rows.append(f"<li>{text}{note}</li>")

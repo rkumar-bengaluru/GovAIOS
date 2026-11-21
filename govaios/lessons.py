@@ -265,16 +265,16 @@ def propose(lesson, pages_dir, bank) -> dict:
             if kind == "attach":
                 k, chk, sure = _attach(look, page, root, evs, i, new)
             else:
-                k, sure = _key_for(look, root, spec, label) if kind in ("click", "type") and spec else (None, False)
+                k, sure = _key_for(look, root, spec, label) if kind in TAUGHT and spec else (None, False)
                 if k:   # the recorder's own reading, made when pressed: the stored tree is only the page's first
                     sure = ev.get("sure", sure)
                     if "risk" in ev and (new or k not in page["elements"]):   # a known page's rating is kept
                         look["elements"][k]["risk"] = ev["risk"]
-                    if kind == "type" and RISK_ORDER.index(look["elements"][k].get("risk", "modify")) \
+                    if kind != "click" and RISK_ORDER.index(look["elements"][k].get("risk", "modify")) \
                             > RISK_ORDER.index("modify"):
-                        sure = False   # the engine never types into a known page's higher-rated element
+                        sure = False   # the engine never types or chooses on a known page's higher-rated element
             target = f"{pid}.{k}" if k else None
-            line, keep = None, sure and not (kind in ("click", "type") and any(s["kind"] == "hand_over" for s in steps))
+            line, keep = None, sure and not (kind in TAUGHT and any(s["kind"] == "hand_over" for s in steps))
             text = label + ("" if sure else " (check this target)")   # off until the admin checks it
             if kind == "click" and k and not new and REQUEST.match(label) and look["elements"][k].get("risk") == "submit":
                 text += " (kept at submit: known page)"   # a "Request ..." button the page already stores at submit
@@ -306,6 +306,10 @@ def propose(lesson, pages_dir, bank) -> dict:
                         "source": "bank" if banked and banked.answer == value else "input",
                         "bank_key": banked and banked.key, "bank_value": banked and banked.answer,
                         "bank_op": op if op and op["op"] == "add" else None, "input": _input_name(label)}
+            elif kind in ("pick", "tickbox") and k and not ev.get("secure"):
+                line = {"kind": "choose", "label": text, "target": target, "keep": keep, "value": ev.get("value") or ""} \
+                    if kind == "pick" else \
+                    {"kind": "tick", "label": text, "target": target, "keep": keep, "value": ev.get("value") == "1"}
             elif kind == "attach":
                 line = {"kind": "attach_file", "label": label if chk is None else text, "target": target,
                         "check": f"{pid}.{chk}" if chk else None, "keep": keep}
@@ -315,7 +319,7 @@ def propose(lesson, pages_dir, bank) -> dict:
                     if not new and key not in page["elements"]:
                         added.append(key)
                     page["elements"][key] = look["elements"][key]
-            elif kind in ("click", "attach", "type"):
+            elif kind in ("attach", *TAUGHT):
                 continue
             elif kind in ("fill", "choose", "tick") and ev.get("secure"):
                 steps.append({"kind": "hand_fill", "label": label, "target": None, "keep": True})
@@ -457,6 +461,7 @@ def _bank_op(label, value, bank, keys, ops):
 
 
 SANDBOX = (None, "web_sandbox")   # a lesson with no flow: its pages go to Studio, nothing else changes
+TAUGHT = ("click", "type", "pick", "tickbox")   # the recorder's events that become lines through _key_for
 _DO = {"click": "click", "fill_form": "fill_form", "attach_file": "attach_file", "hand_over": "hand_over"}
 
 
@@ -491,6 +496,8 @@ def _do(line, page):
         return {"action": "click", "target": line["target"]} if line.get("target") else None
     if kind == "read_table":
         return {"action": "read_table", "target": line["target"], "columns": line["columns"], "rows": line["rows"]}
+    if kind in ("choose", "tick") and line.get("target"):
+        return {"action": kind, "target": line["target"], "value": line["value"]}
     if kind == "type" and line.get("target"):
         src = {"literal": ("value", line["value"]), "input": ("value_from", f"input.{line['input']}"),
                "bank": ("bank", line["bank_key"] or (line["bank_op"] or {}).get("key"))}[line["source"]]
@@ -562,12 +569,17 @@ def _cases(proposal, deleted, ids, on, repeats=None, made=None):
 
 
 def preview(lesson, pages_dir, bank) -> tuple[list[str], str]:
-    """What the extension shows while teaching: a line per kept click or hand-over, and the cases' YAML."""
+    """What the extension shows while teaching: a line per kept click, hand-over, choose or tick, and the cases' YAML."""
     proposal = propose(lesson, pages_dir, bank)
     proposal["pages"] = [p for p in proposal["pages"] if not p.get("done")]
-    lines = [f"{lp['title']}: {'press' if s.get('press') else 'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
-             for p, lp in zip(proposal["pages"], lesson["pages"]) for s in p["steps"]
-             if s["keep"] and s["target"] and s["kind"] in ("click", "hand_over")]   # never the closing hand-over
+    def said(s):
+        if s["kind"] == "choose":
+            return f"choose {s['value']} in {s['label']}"
+        if s["kind"] == "tick":
+            return f"{'tick' if s['value'] else 'untick'} {s['label']}"
+        return f"{'press' if s.get('press') else 'click' if s['kind'] == 'click' else 'you press'} {s['label']}"
+    lines = [f"{lp['title']}: {said(s)}" for p, lp in zip(proposal["pages"], lesson["pages"]) for s in p["steps"]
+             if s["keep"] and s["target"] and s["kind"] in ("click", "hand_over", "choose", "tick")]   # never the closing hand-over
     return lines, yaml.safe_dump(_cases(proposal, set(), set(), {}), sort_keys=False)
 
 
@@ -700,11 +712,12 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
             if not line["bank_op"]:
                 raise ValueError(f"{line['label'][:80]}: the bank has no answer for it")
             type_ops.append({**line["bank_op"], "keep": "bank"})   # the step reads this key: never left unkept
-    if tried:
+    chose = any(s["action"] in ("choose", "tick") for s in made.values())
+    for need, used in (("type_text", tried), ("fill_field", chose)):   # each step's permission, run at modify
         perms = wf["permissions"]
-        if "type_text" not in perms["allow"]:
-            perms["allow"].append("type_text")
-        if RISK_ORDER.index(perms["max_element_risk"]) < RISK_ORDER.index("modify"):
+        if used and need not in perms["allow"]:
+            perms["allow"].append(need)
+        if used and RISK_ORDER.index(perms["max_element_risk"]) < RISK_ORDER.index("modify"):
             perms["max_element_risk"] = "modify"
     if any(s["action"] == "read_table" for s in made.values()):
         allow = wf["permissions"]["allow"]
