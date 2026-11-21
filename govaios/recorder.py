@@ -10,7 +10,7 @@ from . import capture, lessons, studio, terms
 from .policy import OWN_HOSTS, PANEL_PORT
 from .applyfiles import TEACH_OPEN, TEACH_OUT, remove, write_json
 from .engine import find_all
-from .formfill import FIELD_ROLES, Field, restricted
+from .formfill import FIELD_ROLES, Field, _read, restricted
 
 FLOW = "teach_new"
 CLICKABLE = ("link", "button", "tab", "radio")
@@ -25,6 +25,7 @@ HELD = "This field is not recorded: type it by hand at Run."
 MULTI = "Multi-line text is not supported yet: type it by hand at Run."
 SECURE = "native:AXSecureTextField"
 TYPED = ("text_field", "text_area", SECURE)
+CHOICE = ("popup_button", "checkbox")
 
 
 def _plain(name):
@@ -54,6 +55,10 @@ def _blank(root):
 def _line(title, ev):
     if ev["kind"] == "type":
         return f"{title}: type into {ev['label']}"
+    if ev["kind"] == "pick":
+        return f"{title}: choose {ev['value']} in {ev['label']}"
+    if ev["kind"] == "tickbox":
+        return f"{title}: {'tick' if ev['value'] == '1' else 'untick'} {ev['label']}"
     return f"{title}: {'click' if ev['risk'] == 'navigate' else 'you press'} {ev['label']}"
 
 
@@ -116,7 +121,7 @@ class Recorder:
         elif kind == "down" and not self.paused:
             root, kept = None, ""
             for name in ev.get("types") or []:   # typed before the press, so saved before it
-                root = self._type(ev, name, root)
+                root = self._field(ev, name, root)
                 kept = self.note or kept
             self._down(ev, root)
             self.note = self.note or kept   # a refused field's note outlives the press saved after it
@@ -127,8 +132,8 @@ class Recorder:
         own = s.scheme == "http" and s.hostname in OWN and s.port != PANEL_PORT   # never the panel's own pages
         return own or (s.scheme == "https" and terms.verdict(self.home, url, ()) == "allowed")
 
-    def _type(self, ev, name, root):
-        """Saves the value the tree holds for the one field named `name`; returns the snapshot, read once per press."""
+    def _field(self, ev, name, root):
+        """Saves the value (typed text, picked option, tick state) the tree holds for the one field named `name`; returns the snapshot, read once per press."""
         url = self.desk.current_url(self.app)
         if not self._ok(url):
             self.paused, self.note, self.at = True, OUTSIDE, None
@@ -137,7 +142,7 @@ class Recorder:
             self.note = MISSED
             return root
         root = self.desk.web_root(self.app) if root is None else root
-        hits = [n for n in root.walk() if n.role in TYPED and _plain(n.name) == _plain(name)] if root else []
+        hits = [n for n in root.walk() if n.role in TYPED + CHOICE and _plain(n.name) == _plain(name)] if root else []
         if not _plain(name) or len(hits) != 1:   # rule 2: exactly the field the page reported
             self.note = MISMATCH
             return root
@@ -145,14 +150,25 @@ class Recorder:
         if n.role == SECURE or restricted(Field("", n.name, "text", (), False)):
             self.note = SECRET if n.role == SECURE else HELD
             return root
-        if any(ord(c) < 32 or ord(c) == 127 for c in n.value or ""):
+        kind, value = "type", n.value or ""
+        if n.role in CHOICE:
+            f = next((f for f, m in _read(root) if m is n), None)   # a grouped checkbox is read as its group: not n
+            if f is None or f.kind == "multi" or restricted(f):
+                self.note = HELD
+                return root
+            kind = "pick" if n.role == "popup_button" else "tickbox"
+            value = value if kind == "pick" else "1" if n.value == "1" else "0"
+        if any(ord(c) < 32 or ord(c) == 127 for c in value):
             self.note = MULTI
+            return root
+        if kind == "pick" and (not value or [d.name for d in n.walk() if d.role == "native:AXMenuItem"].count(value) != 1):
+            self.note = MISMATCH
             return root
         spec = _spec(root, n)
         if spec is None or [id(h) for h in find_all(root, spec, {"elements": {}})] != [id(n)]:   # a run finds it once
             self.note = MISMATCH
             return root
-        self._save(root, url, {"kind": "type", "spec": spec, "label": n.name, "value": n.value or "", "secure": False,
+        self._save(root, url, {"kind": kind, "spec": spec, "label": n.name, "value": value, "secure": False,
                                "risk": "modify", "sure": True, "before": _blank(root)})
         return root
 
@@ -201,7 +217,8 @@ class Recorder:
             page = {**page, "events": []}
             pages.append(page)
         events = page["events"]
-        page["events"] = [x for x in events if e["kind"] != "type" or x["kind"] != "type" or x["spec"] != e["spec"]] + [e]
+        page["events"] = [x for x in events if e["kind"] not in ("type", "pick", "tickbox") or x["kind"] != e["kind"]
+                                or x["spec"] != e["spec"]] + [e]
         try:
             lessons.write(self.home, self.name, self.doc)
         except OSError:   # undo in memory too, so what is shown is what is on disk

@@ -2,7 +2,7 @@
 from govaios import applyfiles, lessons
 from govaios.desktop import Node
 from govaios import terms
-from govaios.recorder import MISMATCH, OUTSIDE, Recorder
+from govaios.recorder import HELD, MISMATCH, OUTSIDE, Recorder
 
 HOME, DISCOVER = "http://localhost:8100/", "http://localhost:8100/discover"
 
@@ -450,3 +450,75 @@ def test_down_on_another_page_says_missed(tmp_path):
     r = rec(tmp_path, desk)
     r.handle({**down("Discover"), "x": None})
     assert out(tmp_path)["note"] == "Missed that press. Do it again."
+
+
+def popup(name, value, *items):
+    return Node("popup_button", name, value=value, children=[Node("native:AXMenuItem", i) for i in items])
+
+
+def press(tmp_path, *kids, names=("Department",)):
+    desk = Desk(FORM, {FORM: [form_tree(*kids)]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save(*names))
+    return r, [e for e in lessons.load(tmp_path, r.name)["pages"][0]["events"] if e["kind"] != "click"]
+
+
+def test_pick_records_selected_option(tmp_path):
+    from govaios.engine import find_all
+    tree = form_tree(popup("Department", "Engineering", "All departments", "Engineering", "Sales"))
+    desk = Desk(FORM, {FORM: [tree]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("Department"))
+    (p,) = [e for e in lessons.load(tmp_path, r.name)["pages"][0]["events"] if e["kind"] == "pick"]
+    assert p == {"kind": "pick", "spec": p["spec"], "label": "Department", "value": "Engineering", "secure": False,
+                 "risk": "modify", "sure": True, "before": p["before"]}
+    assert len(find_all(tree, p["spec"], {"elements": {}})) == 1
+    assert "Engineering" not in str([n for n in p["before"]["children"] if n["role"] == "popup_button"][0].get("value"))
+    assert out(tmp_path)["lines"][0] == "JobLens · Profile: choose Engineering in Department"
+
+
+def test_pick_option_not_in_menu_refused(tmp_path):
+    r, evs = press(tmp_path, popup("Department", "Ops", "All departments", "Engineering"))
+    assert evs == [] and out(tmp_path)["note"] == MISMATCH
+
+
+def test_pick_option_twice_refused(tmp_path):
+    r, evs = press(tmp_path, popup("Department", "Engineering", "Engineering", "Engineering"))
+    assert evs == [] and out(tmp_path)["note"] == MISMATCH
+
+
+def test_pick_empty_value_refused(tmp_path):
+    r, evs = press(tmp_path, popup("Department", "", "Engineering"))
+    assert evs == [] and out(tmp_path)["note"] == MISMATCH
+
+
+def test_tickbox_records_state(tmp_path):
+    r, (e,) = press(tmp_path, Node("checkbox", "Overdue only", value="1"), names=("Overdue only",))
+    assert e["kind"] == "tickbox" and e["value"] == "1" and e["risk"] == "modify"
+    assert out(tmp_path)["lines"][0] == "JobLens · Profile: tick Overdue only"
+    r, (e,) = press(tmp_path, Node("checkbox", "Overdue only", value="0"), names=("Overdue only",))
+    assert e["value"] == "0" and out(tmp_path)["lines"][0] == "JobLens · Profile: untick Overdue only"
+
+
+def test_tickbox_in_a_group_held(tmp_path):
+    grp = Node("group", "Tags", children=[Node("checkbox", "Red", value="1"), Node("checkbox", "Blue", value="0")])
+    r, evs = press(tmp_path, grp, names=("Red",))
+    assert evs == [] and out(tmp_path)["note"] == HELD
+
+
+def test_pick_restricted_label_held(tmp_path):
+    r, evs = press(tmp_path, popup("Gender", "Female", "Female", "Male"), names=("Gender",))
+    assert evs == [] and out(tmp_path)["note"] == HELD
+
+
+def test_latest_pick_wins(tmp_path):
+    desk = Desk(FORM, {FORM: [form_tree(popup("Department", "Sales", "Engineering", "Sales"))]})
+    desk.hit = "save"
+    r = rec(tmp_path, desk)
+    r.handle(save("Department"))
+    desk.trees[FORM] = [form_tree(popup("Department", "Engineering", "Engineering", "Sales"))]
+    r.handle(save("Department"))
+    picks = [e for e in lessons.load(tmp_path, r.name)["pages"][0]["events"] if e["kind"] == "pick"]
+    assert [p["value"] for p in picks] == ["Engineering"]
