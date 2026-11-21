@@ -28,7 +28,7 @@ FIELDS = {"flow", "flow_version", "flow_hash", "executor", "step", "action", "ri
           "destination", "decision", "approver", "channel", "outcome", "reason", "auth", "command",
           "file_hash", "response_code", "listing_id", "session", "field", "shown", "folder", "source", "item",
           "run", "run_seq", "run_prev", "fingerprint", "round", "count_before", "count_after", "expected",
-          "chain_count", "chain_head"}
+          "chain_count", "chain_head", "columns", "rows"}
 ZERO = "0" * 64
 
 

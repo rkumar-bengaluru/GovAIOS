@@ -3,6 +3,16 @@
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
 Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-tasks`); 2026-11-07 Job Apply; before that 2026-11-08 Claude Code and Codex governance (PRs #16, #17).
 
+## Teach read-report (G2 built 2026-11-19, branch `feat/teach-read-report`)
+
+Built: Teach records a table read; the lesson page picks columns; a `read_table` step writes a 0600 report file;
+the panel shows the finished run's (or Try's) report, escaped, on the Talk page.
+
+Open:
+- P2 and A1 still need G3's dropdowns, or hand-added filter steps.
+- A table whose rows load after the page is recognised (JS-rendered) could be read part-loaded without a stop. Not an
+  issue for EnterpriseMock's server-rendered pages; revisit with G3.
+
 ## Teach typed text, EnterpriseMock (G0 built 2026-11-18, branch `feat/teach-typed-text`)
 
 Built: Teach records text typed into a field; the lesson page picks each value's source (always this text, asked

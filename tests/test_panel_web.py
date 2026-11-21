@@ -2206,6 +2206,37 @@ def test_count_on_a_shared_known_page_warns_its_other_apps(cc):
     assert "Changing this page means approving again: Other app." in page
 
 
+def test_reading_a_shared_known_page_warns_its_other_apps(cc):
+    """A Done page another app uses: approving again is said only when its table's key is new to the page."""
+    from govaios import capture, lessons
+    from govaios.desktop import Node
+    ja = _approve_job_apply(cc)
+    own = cc.flows.parent / "pages" / "own_list.yaml"
+    own.write_text("page:\n  id: own_list\n  identification: {title_matches: '^Own$', anchors: [heading]}\n"
+                   "  elements:\n    heading: {role: heading, name: List, risk: read}\n")
+    (cc.flows / "other.yaml").write_text((cc.flows / "job_apply.yaml").read_text()
+                                         .replace("id: job_apply", "id: other_flow", 1)
+                                         .replace('app: "Job Apply"', 'app: "Other app"', 1)
+                                         .replace("greenhouse_application: continue", "own_list: continue", 1))
+    cell = lambda x: Node("cell", "", children=[Node("text", x)])
+    table = Node("table", "", children=[Node("row", "", children=[cell("Ticket")]),
+                                        Node("row", "", children=[cell("T-1")])])
+    start = Node("document", "Start", children=[Node("heading", "Start"), Node("link", "List")])
+    name = lessons.save(cc.home, "job_apply", ja.digest, "on_form", [
+        {"url": "http://localhost:8100/", "title": "Start", "tree": start,
+         "events": [{"kind": "click", "spec": {"role": "link", "name": "List"}, "label": "List", "value": "",
+                     "secure": False, "risk": "navigate", "sure": True, "before": None}]}])
+    doc = lessons.load(cc.home, name)
+    doc["done_tree"] = capture.tree(Node("document", "Own", children=[Node("heading", "List"), table]))
+    doc["done_url"] = "http://localhost:8100/list"
+    lessons.write(cc.home, name, doc)
+    page = _lesson_form(cc, name)[1]
+    assert "name='read:0:0'" in page and "Reading this table changes this page, which means approving again: Other app." in page
+    own.write_text(own.read_text() + "    tickets: {role: table, has_text: Ticket, risk: read}\n")
+    page = _lesson_form(cc, name)[1]
+    assert "name='read:0:0'" in page and "approving again" not in page
+
+
 def test_new_page_made_during_touch_id_is_never_replaced(cc, monkeypatch):
     from govaios import auth
     name, _ = _lesson(cc)
@@ -2930,6 +2961,31 @@ def test_try_types_recorded_values(panel):
     Runner(panel.made[-1].flow_path, None, panel.home)   # the engine loads the Try copy: its checks pass
 
 
+def test_try_reads_the_table(panel):
+    from govaios import capture, lessons
+    from govaios.desktop import Node
+    _open(panel)
+    name = _done(panel)
+    doc = lessons.load(panel.home, name)
+    cell = lambda x: Node("cell", "", children=[Node("text", x)])
+    table = Node("table", "", children=[Node("row", "", children=[cell("Ticket"), cell("Subject")]),
+                                        Node("row", "", children=[cell("T-0009"), cell("VPN down")])])
+    doc["done_tree"] = capture.tree(Node("document", "JobLens · My tickets",
+                                         children=[Node("heading", "My tickets"), table]))
+    doc["done_url"] = "http://localhost:8100/tickets"
+    lessons.write(panel.home, name, doc)
+    p, page = _lesson_form(panel, name)
+    assert "name='read:0:0'" in page
+    panel.post("/lesson/try", **{"name": name, "p": p, "read:0:0": "1", "rows:0": "all"})
+    wf, steps = _try_steps(panel)
+    [r] = [d for d in steps if d["action"] == "read_table"]
+    assert r["columns"] == ["Ticket"] and r["rows"] == "all"
+    assert "report" in wf["permissions"]["allow"]
+    assert panel.made[-1].started
+    from govaios.engine import Runner
+    Runner(panel.made[-1].flow_path, None, panel.home)   # check_read passes with the pages
+
+
 def test_try_refused_when_the_app_already_asks_for_inputs(panel):
     from govaios import lessons
     from govaios.approvals import read_bound
@@ -3024,3 +3080,100 @@ def test_no_repeat_offer_on_a_page_the_flow_has():
     les = {"pages": [{"title": "T", "url": "https://a.example/", "tree": capture.tree(t)}]}
     assert "name='cap:0'" in pl.page("n", les, prop, set(), {}, "")
     assert "name='cap:0'" not in pl.page("n", les, prop, {"p"}, {}, "")
+
+
+# --- the finished run's report (G2 Task 4)
+
+STAMP = "20261119T101500Z"
+
+
+def _report_line(aid, tail=""):
+    return f"report saved: reports/{aid}-{STAMP}.txt{tail}"
+
+
+def _put_report(P, aid, text="Ticket: <b>T-0009</b>\x07\n" * 250):
+    d = P.home / "reports"
+    d.mkdir(exist_ok=True)
+    (d / f"{aid}-{STAMP}.txt").write_text(text)
+
+
+def _end_with(P, r, *lines):
+    r._lines.extend(lines)
+    r.done, r.code = True, 0
+    _tick(P)
+    return P.get("/")[1]
+
+
+def test_finished_run_shows_its_report_escaped(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    body = _end_with(P, r, _report_line(aid))
+    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 201
+    assert "<b>T-0009" not in body and "\x07" not in body
+    assert not any("T-0009" in l for l in _tells(P)) and not any("T-0009" in s for s in P.spoken)
+
+
+def test_report_shows_the_cut_short_note(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid, "v\n" * 200 + "(more rows not read)\n")
+    assert "(more rows not read)" in _end_with(P, r, _report_line(aid))
+
+
+def test_report_trailing_newline_makes_no_empty_item(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid, "one\ntwo\n")
+    assert "<li></li>" not in _end_with(P, r, _report_line(aid))
+
+
+def test_report_card_ignores_other_lines(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    _put_report(P, "other_app")
+    body = _end_with(P, r, f"report saved: reports/../x-{STAMP}.txt", _report_line("other_app"),
+                   "report saved: /abs/path.txt", _report_line(aid, " more"))
+    assert "T-0009" not in body
+
+
+def test_report_card_refuses_symlinks(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    real = P.home / "elsewhere"
+    (P.home / "reports").rename(real)
+    (P.home / "reports").symlink_to(real)
+    assert "T-0009" not in _end_with(P, r, _report_line(aid))
+    (P.home / "reports").unlink()
+    (P.home / "reports").mkdir()
+    (P.home / "reports" / f"{aid}-{STAMP}.txt").symlink_to(real / f"{aid}-{STAMP}.txt")
+    assert "T-0009" not in P.get("/")[1]
+    f = P.home / "reports" / f"{aid}-{STAMP}.txt"
+    f.unlink()
+    os.mkfifo(f)   # must not hang the request thread
+    assert "T-0009" not in P.get("/")[1]
+
+
+def test_no_report_card_while_running(panel):
+    P = panel
+    r = _running(P)
+    aid = P.srv.panel.app.id
+    _put_report(P, aid)
+    r._lines.append(_report_line(aid))
+    assert "T-0009" not in P.get("/")[1]
+
+
+def test_try_report_shows_after_the_try(panel):
+    _try(panel)
+    r = panel.made[-1]
+    _put_report(panel, TRY_ID)
+    body = _end_with(panel, r, _report_line(TRY_ID))
+    assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 201
+    assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]

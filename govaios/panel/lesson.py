@@ -5,7 +5,7 @@ import json
 import re
 from html import escape
 
-from govaios import lessons
+from govaios import engine, lessons
 
 KEEPS = (("bank", "Keep in bank"), ("job", "This job only"), ("drop", "Don't keep"))
 WORDS = {"click": "Click", "fill_form": "Fill the form from the bank", "attach_file": "Attach your CV",
@@ -19,30 +19,43 @@ def digest(proposal):
 
 
 class BadCap(ValueError):
-    """The Repeat's cap is not a whole number from 1 to 100."""
+    """A form choice the admin can fix: a Repeat's cap, or the columns picked to read."""
+
+
+def _tickable(h):
+    """A header a run can read: what engine.check_read accepts."""
+    return 1 <= len(h) <= 200 and not engine.CONTROL.search(h)
 
 
 def edits(proposal, form):
     """(deleted {(page, line)}, keeps {bank line: keep}, repeats {page: cap}, outcomes {(page, line): [ticked
-    proposal]}, sources {(page, type line): (source, input label)}) from the posted form; ValueError on anything else."""
-    deleted, keeps, repeats, outcomes, src, lab = set(), {}, {}, {}, {}, {}
+    proposal]}, sources {(page, type line): (source, input label)}, reads None or {"table", "columns", "rows"}) from the
+    posted form; ValueError on anything else."""
+    deleted, keeps, repeats, outcomes, src, lab, ticks = set(), {}, {}, {}, {}, {}, {}
+    pages = [p for p in proposal["pages"] if not p.get("done")]   # the Done page has no steps of its own
+    tables = proposal.get("reads") or []
     for k, v in form.items():
         if k in ("csrf", "name", "p"):
             continue
+        rd, rw = re.fullmatch(r"read:([0-9]{1,3}):([0-9]{1,3})", k), re.fullmatch(r"rows:([0-9]{1,3})", k)
+        if rd and v == "1" and int(rd[1]) < len(tables) and int(rd[2]) < len(tables[int(rd[1])]["headers"]) \
+                and _tickable(tables[int(rd[1])]["headers"][int(rd[2])]):
+            ticks.setdefault(int(rd[1]), []).append(int(rd[2]))
+            continue
+        if rw and v in ("first", "all") and int(rw[1]) < len(tables):
+            continue   # read below, for the ticked table
         d, b = re.fullmatch(r"del:([0-9]{1,3}):([0-9]{1,3})", k), re.fullmatch(r"keep:([0-9]{1,3})", k)
         r = re.fullmatch(r"(rep|cap):([0-9]{1,3})", k)
         o = re.fullmatch(r"out:([0-9]{1,3}):([0-9]{1,3}):([0-9]{1,3})", k)
         t = re.fullmatch(r"(src|lab):([0-9]{1,3}):([0-9]{1,3})", k)
-        line = (proposal["pages"][int(t[2])]["steps"][int(t[3])] if t and int(t[2]) < len(proposal["pages"])
-                and int(t[3]) < len(proposal["pages"][int(t[2])]["steps"]) else {})
-        if r and int(r[2]) < len(proposal["pages"]) and (r[1] == "cap" or v == "1"):
+        line = (pages[int(t[2])]["steps"][int(t[3])] if t and int(t[2]) < len(pages)
+                and int(t[3]) < len(pages[int(t[2])]["steps"]) else {})
+        if r and int(r[2]) < len(pages) and (r[1] == "cap" or v == "1"):
             continue   # read below: a cap counts only when its Repeat is ticked
-        if d and v == "1" and int(d[1]) < len(proposal["pages"]) \
-                and int(d[2]) < len(proposal["pages"][int(d[1])]["steps"]):
+        if d and v == "1" and int(d[1]) < len(pages) and int(d[2]) < len(pages[int(d[1])]["steps"]):
             deleted.add((int(d[1]), int(d[2])))
-        elif o and v == "1" and int(o[1]) < len(proposal["pages"]) \
-                and int(o[2]) < len(proposal["pages"][int(o[1])]["steps"]) \
-                and int(o[3]) < len(proposal["pages"][int(o[1])]["steps"][int(o[2])].get("outcomes") or []):
+        elif o and v == "1" and int(o[1]) < len(pages) and int(o[2]) < len(pages[int(o[1])]["steps"]) \
+                and int(o[3]) < len(pages[int(o[1])]["steps"][int(o[2])].get("outcomes") or []):
             outcomes.setdefault((int(o[1]), int(o[2])), []).append(int(o[3]))
         elif b and int(b[1]) < len(proposal["bank"]) and v in dict(KEEPS):
             keeps[int(b[1])] = v
@@ -59,9 +72,16 @@ def edits(proposal, form):
             if not re.fullmatch(r"[0-9]{1,3}", cap) or not 1 <= int(cap) <= 100:
                 raise BadCap("the Repeat's limit must be a whole number from 1 to 100")
             repeats[int(k[4:])] = int(cap)
-    sources = {at: (src.get(at, proposal["pages"][at[0]]["steps"][at[1]]["source"]),
-                    lab.get(at) or proposal["pages"][at[0]]["steps"][at[1]]["label"][:60]) for at in {*src, *lab}}
-    return deleted, keeps, repeats, outcomes, sources
+    sources = {at: (src.get(at, pages[at[0]]["steps"][at[1]]["source"]),
+                    lab.get(at) or pages[at[0]]["steps"][at[1]]["label"][:60]) for at in {*src, *lab}}
+    if len(ticks) > 1:
+        raise BadCap("Read columns from one table only")
+    reads = None
+    for t, cols in ticks.items():
+        if len(cols) > 10:
+            raise BadCap("Read at most 10 columns")
+        reads = {"table": t, "columns": sorted(cols), "rows": form.get(f"rows:{t}", "all")}
+    return deleted, keeps, repeats, outcomes, sources, reads
 
 
 def _outcome_line(proposal, o, others):
@@ -104,11 +124,36 @@ def _sources(i, j, s):
             f"maxlength=60 value='{escape(s['label'][:60])}'></li>{bank}</ul>")
 
 
+def _reads(proposal, flow_cases, others):
+    """Read from this page: the Done page's tables, a tick box per readable header and every row or the first."""
+    done = proposal["pages"][-1] if proposal["pages"] and proposal["pages"][-1].get("done") else None
+    if proposal.get("read_refused"):
+        body = f"<p class=note>{escape(proposal['read_refused'])}.</p>"
+    elif done and proposal.get("reads") and done["id"] in flow_cases:
+        body = "<p class=note>This page is already in the app; reads not added.</p>"
+    elif done and proposal.get("reads"):
+        body = ""
+        for t, r in enumerate(proposal["reads"]):
+            cells = "".join(f"<li><label><input type=checkbox name='read:{t}:{c}' value=1> {escape(h)}</label> "
+                            f"“{escape(r['preview'][c] if c < len(r['preview']) else '')}”</li>"
+                            for c, h in enumerate(r["headers"]) if _tickable(h))
+            warn = (f"<p class=note>Reading this table changes this page, which means approving again: "
+                    f"{escape(', '.join(others[done['id']]))}.</p>"
+                    if others.get(done["id"]) and r["key"] not in done["yaml"]["page"]["elements"] else "")
+            body += (f"<fieldset><legend>Table {t + 1}: {r['rows']} rows seen</legend>{warn}<ul>{cells}</ul>"
+                     f"<label><input type=radio name='rows:{t}' value=all checked> Every row</label> "
+                     f"<label><input type=radio name='rows:{t}' value=first> First row</label></fieldset>")
+    else:
+        return ""
+    return f"<section class=appcard><h2>Read from this page</h2>{body}</section>"
+
+
 def page(name, lesson, proposal, flow_cases, others, hidden):
     """The page body. flow_cases: page ids the flow's step already handles (their steps are not added);
     others: {known page gaining elements: names of the other apps that use it}."""
     secs, can = [], lessons.repeatable(proposal, lesson)
-    for i, p in enumerate(proposal["pages"]):
+    pages = [p for p in proposal["pages"] if not p.get("done")]   # the Done page shows only as Read from this page
+    for i, p in enumerate(pages):
         lp = lesson["pages"][i] if i < len(lesson["pages"]) else {}
         rows = []
         for j, s in enumerate(p["steps"]):
@@ -143,7 +188,7 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
                     f"</h2><p class=m>{escape(str(lp.get('title') or '')[:200])} "
                     f"<code>{escape(str(lp.get('url') or '')[:200])}</code></p>{added}{handled}"
                     f"{offer}<ol>{''.join(rows)}</ol></section>")
-    last = proposal["pages"][-1] if proposal["pages"] else None
+    last = pages[-1] if pages else None
     if last and lesson.get("flow") not in lessons.SANDBOX and (last["id"] in flow_cases or not any(
             s["keep"] and lessons._do(s, last) for s in last["steps"])):
         secs.append("<p class=note>The last page gets no steps, so the run does not end there: it looks at the "
@@ -155,7 +200,8 @@ def page(name, lesson, proposal, flow_cases, others, hidden):
     return (f"<h1>What I learned</h1><p class=m>Lesson <code>{escape(name)}</code> for <b>{flow}</b>. Nothing changes "
             f"until you approve it with Touch ID.</p>"
             f"<form method=post action=/lesson/approve>{hidden}<input type=hidden name=name value='{escape(name)}'>"
-            f"<input type=hidden name=p value='{digest(proposal)}'>{''.join(secs)}{bank}"
+            f"<input type=hidden name=p value='{digest(proposal)}'>{''.join(secs)}"
+            f"{_reads(proposal, flow_cases, others)}{bank}"
             f"<p><button class=go>Approve with Touch ID</button></p>"
             + ("" if lesson.get("flow") in lessons.SANDBOX else
                "<p class=note>Try it runs the steps once on the real pages and stops before any button that changes "
