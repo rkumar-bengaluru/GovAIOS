@@ -29,7 +29,7 @@ REPO = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).p
 
 
 NO_DEST = object()
-LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat", "type", "read_table")   # what a taught page may do (Studio lessons)
+LEARNED_ACTIONS = ("click", "fill_form", "attach_file", "hand_over", "repeat", "type", "read_table", "choose", "tick")   # what a taught page may do (Studio lessons)
 CONTROL = re.compile(r"[\x00-\x1f]")   # never typed: a newline acts as a hidden Enter
 ITEM_ROLES = ("row", "article")   # what a repeat round works on: one list item
 MAX_LEARNED = 10   # learned pages run within one classify_page call
@@ -215,6 +215,21 @@ def check_read(d, pages=None):
         raise Stop("learned steps: read_table rows must be first or all")
 
 
+def check_choice(d, pages=None):
+    """A choose or tick step: one page.element popup or box; choose names the option, tick the box's state."""
+    a, t = d["action"], d.get("target")
+    if not (isinstance(t, str) and re.fullmatch(r"[^.]+\.[^.]+", t)) or t.startswith(("current_page.", "current_item.")):
+        raise Stop(f"learned steps: {a} target must be page.element")
+    role = "popup_button" if a == "choose" else "checkbox"
+    if pages is not None and pages.get(t.split(".")[0], {}).get("elements", {}).get(t.split(".")[1], {}).get("role") != role:
+        raise Stop(f"learned steps: {a} target {t} is not a {role} of its page")
+    v = d.get("value")
+    if a == "choose" and not (isinstance(v, str) and 1 <= len(v) <= 200 and not CONTROL.search(v)):
+        raise Stop("learned steps: choose value must be 1 to 200 characters with no control character")
+    if a == "tick" and not isinstance(v, bool):
+        raise Stop("learned steps: tick value must be true or false")
+
+
 def table_rows(table):
     """(header texts, data rows' cell texts) of a table node; a cell is each child of a row."""
     rows = [[(c.text() or c.name).strip() for c in n.children] for n in table.walk() if n.role == "row"]
@@ -247,6 +262,16 @@ def check_learned(steps, pages=None, inputs=None):
                     learned.add(d["id"])
                     if d["action"] == "type":
                         check_type(d, inputs)
+                    if d["action"] in ("choose", "tick"):
+                        check_choice(d, pages)
+                    if "wait_url" in d:   # a same-page read: the press must load a new address before the read
+                        if not (d["wait_url"] is True and d["action"] == "click" and len(v["do"]) > 1
+                                and d is v["do"][-2] and v["do"][-1].get("action") == "read_table"):
+                            raise Stop("learned steps: wait_url only on the click just before a read_table")
+                        t = str(d.get("target"))
+                        if pages is not None and pages.get(t.split(".")[0], {}).get("elements", {}).get(
+                                t.split(".")[-1], {}).get("risk") != "navigate":
+                            raise Stop("learned steps: wait_url only on a navigate click")
                     if d["action"] == "read_table":
                         check_read(d, pages)
                         if d is not v["do"][-1]:
@@ -295,8 +320,10 @@ def check_repeat(d, pages=None):
             raise Stop("learned steps: a step without an id")
         if x.get("action") == "repeat":
             raise Stop("learned steps: a repeat cannot hold a repeat")
-        if x.get("action") == "read_table":
-            raise Stop("learned steps: a repeat cannot hold a read_table")
+        if x.get("action") in ("read_table", "choose", "tick"):
+            raise Stop(f"learned steps: a repeat cannot hold a {x['action']}")
+        if "wait_url" in x:
+            raise Stop("learned steps: wait_url only on the click just before a read_table")
         if x.get("action") not in LEARNED_ACTIONS:
             raise Stop(f"learned steps: {x.get('action')} not allowed")
     if d["steps"][0].get("action") != "click" or d["steps"][0].get("target") != d.get("item"):
@@ -1168,6 +1195,22 @@ class Runner:
                     self._pending[s["id"]] = pending
                 else:
                     self._audit("outcome", outcome="unchecked", step=s["id"])
+            if s.get("wait_url"):   # a same-page read follows: the press must load a new address on this site
+                now = before
+                for _ in range(60):   # 15 s
+                    now = self.d.current_url(self.app)
+                    if now and now != before:
+                        break
+                    time.sleep(0.25)
+                if now and now != before:
+                    if origin(now) != origin(before):
+                        raise Stop("the press went to another site")
+                    for _ in range(60):   # None: Chrome does not say, no wait
+                        if self.d.loaded(self.app) is not False:
+                            break
+                        time.sleep(0.25)
+                    return
+                continue
             if "verify_page" not in s:
                 return
             page, _ = self.wait_for_page([s["verify_page"]], s.get("timeout_seconds", 15))
@@ -1176,6 +1219,8 @@ class Runner:
                 return
             if self.d.current_url(self.app) != before:
                 break                                    # went somewhere unexpected: never retry
+        if s.get("wait_url"):
+            raise Stop(f"the page did not change after {getattr(node, 'name', '') or spec.get('name') or ref}")
         raise Stop(f"after click expected {s['verify_page']}")
 
     def do_extract(self, s):
@@ -1549,6 +1594,54 @@ class Runner:
         self._audit("action", action="type_text", target=ref, source=source, outcome="done" if held else "mismatch")
         if not held:
             raise Stop(f"typed value did not hold: {label}")
+
+    def _gate_choice(self, s):
+        """choose and tick: capped at modify like typing, gated as fill_field on the current address."""
+        ref = self.ref(s["target"])
+        page_id, el = ref.split(".")
+        risk = self.pages[page_id]["elements"][el].get("risk", "modify")
+        if RISK_ORDER.index(risk) > min(RISK_ORDER.index("modify"),
+                                        RISK_ORDER.index(self.flow["permissions"]["max_element_risk"])):
+            raise Stop(f"{ref}: setting a {risk} element denied")
+        self.gate("fill_field", "modify", target=ref, destination=self.d.current_url(self.app))
+        return ref
+
+    def do_choose(self, s):
+        """One taught option in one dropdown, then read back exactly. The value is never logged."""
+        ref, value = self._gate_choice(s), s["value"]
+        node, _ = self.page_element(ref)
+        label = (node.name or ref)[:80]
+        if [n.name for n in node.walk() if n.role == "native:AXMenuItem"].count(value) != 1:
+            raise Stop(f"option not offered: {label}")
+        if node.value == value:
+            self._audit("action", action="choose_option", target=ref, outcome="already")
+            return
+        self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
+        node, _ = self.page_element(ref)   # positions changed after scrolling
+        # shortcut: type-ahead picks the first prefix match; an option listed after a longer one with the same start always stops
+        if not self._enter("select", node, value, None, label, None):
+            self._audit("action", action="choose_option", target=ref, outcome="not_open")
+            raise Stop(f"could not open the menu: {label}")
+        held = self.page_element(ref)[0].value == value
+        self._audit("action", action="choose_option", target=ref, outcome="done" if held else "mismatch")
+        if not held:
+            raise Stop(f"the choice did not hold: {label}")
+
+    def do_tick(self, s):
+        """A checkbox to its taught state: one click only if it differs, then read back."""
+        ref = self._gate_choice(s)
+        node, _ = self.page_element(ref)
+        label = (node.name or ref)[:80]
+        if (node.value == "1") == s["value"]:
+            self._audit("action", action="tick_box", target=ref, outcome="already")
+            return
+        self._act("scroll_into_view", self.d.scroll_into_view, node, target=ref)
+        node, _ = self.page_element(ref)   # positions changed after scrolling
+        self._act("click", self.d.click, node, target=ref)
+        held = (self.page_element(ref)[0].value == "1") == s["value"]
+        self._audit("action", action="tick_box", target=ref, outcome="done" if held else "mismatch")
+        if not held:
+            raise Stop(f"the choice did not hold: {label}")
 
     def do_attach_file(self, s):
         """Attach the admin's CV through the native file dialog, Touch ID every time. The path is never logged."""
