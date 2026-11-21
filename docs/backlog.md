@@ -3,6 +3,17 @@
 Work not in an active plan. Ask "show me all backlog" to see this file. Newest areas first.
 Updated 2026-11-08 with JobLens tasks and Web Sandbox (branch `feat/joblens-tasks`); 2026-11-07 Job Apply; before that 2026-11-08 Claude Code and Codex governance (PRs #16, #17).
 
+## Teach dropdowns and checkboxes (G3 built 2026-11-21, branch `feat/teach-choices`)
+
+Built: Teach records dropdown picks and checkbox ticks as `choose`/`tick` steps; a read can run on the page a
+navigate press (a GET filter) reloaded, the press waiting for the new address.
+
+Open:
+- O4 sends the filter at the press; not prevented.
+- Type-ahead with an option containing a space: untested live.
+- `AXLoaded` presence: untested live.
+- An untouched dropdown isn't recorded.
+
 ## Teach read-report (G2 built 2026-11-19, branch `feat/teach-read-report`)
 
 Built: Teach records a table read; the lesson page picks columns; a `read_table` step writes a 0600 report file;

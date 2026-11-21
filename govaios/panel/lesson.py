@@ -126,8 +126,9 @@ def _sources(i, j, s):
 
 
 def _reads(proposal, flow_cases, others):
-    """Read from this page: the Done page's tables, a tick box per readable header and every row or the first."""
-    done = proposal["pages"][-1] if proposal["pages"] and proposal["pages"][-1].get("done") else None
+    """Read from this page: the Done page's tables (or, with read_here, the last page's after its navigate click),
+    a tick box per readable header and every row or the first."""
+    done = lessons.read_page(proposal)
     if proposal.get("read_refused"):
         body = f"<p class=note>{escape(proposal['read_refused'])}.</p>"
     elif done and proposal.get("reads") and done["id"] in flow_cases:

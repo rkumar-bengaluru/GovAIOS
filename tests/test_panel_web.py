@@ -3177,3 +3177,38 @@ def test_try_report_shows_after_the_try(panel):
     body = _end_with(panel, r, _report_line(TRY_ID))
     assert body.count("Ticket: &lt;b&gt;T-0009&lt;/b&gt;") == 201
     assert TRY_ID not in Approvals(panel.home / "approvals.json").snapshot()["flows"]
+
+
+def test_try_keeps_wait_url_and_choices(panel):
+    """A same-page read (teach-choices Task 5): Try's private copy keeps the press's wait_url and the taught values."""
+    from govaios import capture, lessons
+    from govaios.desktop import Node
+    _open(panel)
+    name = _done(panel)
+    doc = lessons.load(panel.home, name)
+    p = doc["pages"][1]
+    p["tree"]["children"] += [{"role": "popup_button", "name": "Department"},
+                              {"role": "checkbox", "name": "Overdue only"},
+                              {"role": "button", "name": "Filter employees"}]
+    p["events"] = [
+        {"kind": "pick", "spec": {"role": "popup_button", "name": "Department"}, "label": "Department",
+         "value": "Engineering", "secure": False, "risk": "modify", "sure": True, "before": None},
+        {"kind": "tickbox", "spec": {"role": "checkbox", "name": "Overdue only"}, "label": "Overdue only",
+         "value": "1", "secure": False, "risk": "modify", "sure": True, "before": None},
+        {"kind": "click", "spec": {"role": "button", "name": "Filter employees"}, "label": "Filter employees",
+         "value": "", "secure": False, "submit": False, "risk": "navigate", "sure": True, "before": None}]
+    cell = lambda x: Node("cell", "", children=[Node("text", x)])
+    done = dict(p["tree"], children=[*p["tree"]["children"], capture.tree(Node("table", "", children=[
+        Node("row", "", children=[cell("ID")]), Node("row", "", children=[cell("E-1")])]))])
+    doc["done_tree"], doc["done_url"] = done, "http://localhost:8100/discover?dept=Engineering"
+    lessons.write(panel.home, name, doc)
+    pf, page = _lesson_form(panel, name)
+    assert "name='read:0:0'" in page
+    panel.post("/lesson/try", **{"name": name, "p": pf, "read:0:0": "1", "rows:0": "all"})
+    wf, steps = _try_steps(panel)
+    acts = [(d["action"], d.get("value"), d.get("wait_url")) for d in steps]
+    assert acts[-4:] == [("choose", "Engineering", None), ("tick", True, None), ("click", None, True),
+                         ("read_table", None, None)]
+    assert "fill_field" in wf["permissions"]["allow"] and panel.made[-1].started
+    from govaios.engine import Runner
+    Runner(panel.made[-1].flow_path, None, panel.home)   # check_learned passes the Try copy with its pages

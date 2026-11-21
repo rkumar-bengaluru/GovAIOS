@@ -1336,3 +1336,110 @@ def test_lesson_page_warns_other_apps_only_for_a_new_table_key(tmp_path):
     path.write_text(yaml.safe_dump(doc, sort_keys=False))
     html = lesson_ui.page("n", les, lessons.propose(les, tmp_path / "pages", Bank()), set(), others, "")
     assert "approving again" not in html and "name='read:0:0'" in html
+
+
+# ---------- same-page read after a navigate press (teach-choices Task 5) ----------
+
+def _filtered(tmp_path, last=None, url=None):
+    """_chose's Discover page with only pick, tick, click "Filter employees" (navigate); Done pressed on the same
+    page reloaded, now holding a table "ID". last: an event added after the click."""
+    from govaios import capture
+    les, app = _chose(tmp_path)
+    p = les["pages"][1]
+    p["events"] = p["events"][2:-1]
+    p["events"][-1].update(spec={"role": "button", "name": "Filter employees"}, label="Filter employees")
+    p["tree"]["children"][-1]["name"] = "Filter employees"
+    if last:
+        p["events"].append(last)
+    if url:
+        for lp in les["pages"]:
+            lp["url"] = url + lp["url"].split("8100", 1)[1]
+    done = copy.deepcopy(p["tree"])
+    done["children"].append(capture.tree(_table(["ID", "Name"], [["E-1", "Ann"]])))
+    les["done_tree"], les["done_url"] = done, "http://localhost:8100/discover?dept=Engineering"
+    return les, app
+
+
+HERE = {"table": 0, "columns": [0, 1], "rows": "all"}
+
+
+def test_read_here_offered_after_navigate_click(tmp_path):
+    les, _ = _filtered(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert (prop["read_here"], prop["read_refused"]) == (True, None)
+    assert len(prop["pages"]) == 2 and not any(p.get("done") for p in prop["pages"])
+    assert [(r["key"], r["headers"], r["preview"]) for r in prop["reads"]] == [("id_table", ["ID", "Name"], ["E-1", "Ann"])]
+    assert prop["pages"][1]["steps"][-1]["label"] == "Filter employees"   # no closing hand-over: an own app
+
+
+def test_read_here_refused_when_last_line_not_navigate(tmp_path):
+    typed = {"kind": "type", "spec": {"role": "text_field", "name": "Note"}, "label": "Note", "value": "x",
+             "secure": False, "risk": "modify", "sure": True}
+    for k, les in enumerate([_filtered(tmp_path / "a", typed)[0], _filtered(tmp_path / "b")[0]]):
+        if k:   # the filter press rated submit: a press, not a navigate click
+            les["pages"][1]["events"][-1].update(risk="submit", submit=True)
+        les["pages"][1]["tree"]["children"].append({"role": "text_field", "name": "Note"})
+        prop = lessons.propose(les, tmp_path / "ab"[k] / "pages", Bank())
+        assert (prop["read_here"], prop["read_refused"], prop["reads"]) == (False, lessons.READ_LAST, [])
+
+
+def test_read_here_refused_off_own_app(tmp_path):
+    les, _ = _filtered(tmp_path, url="https://hr.acme.example")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert (prop["read_here"], prop["read_refused"], prop["reads"]) == (False, lessons.READ_LAST, [])
+    assert prop["pages"][1]["steps"][-1]["kind"] == "hand_over"
+
+
+def test_build_read_here_adds_wait_url_and_read(tmp_path):
+    les, app = _filtered(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    pid = prop["pages"][1]["id"]
+    plan = _plan(tmp_path, les, app, prop, reads=HERE)
+    case = _on(plan)[pid]
+    assert case["then"] == "end"
+    assert [{k: v for k, v in d.items() if k != "id"} for d in case["do"]][-2:] == [
+        {"action": "click", "target": f"{pid}.button_filter_employees", "wait_url": True},
+        {"action": "read_table", "target": f"{pid}.id_table", "columns": ["ID", "Name"], "rows": "all"}]
+    assert {p.stem for p in plan["pages"]} <= {p["id"] for p in prop["pages"]}   # no extra page file
+    assert yaml.safe_load(plan["pages"][tmp_path / "pages" / f"{pid}.yaml"])["page"]["elements"]["id_table"] == \
+        {"role": "table", "has_text": "ID", "risk": "read"}
+    assert prop["pages"][1]["steps"][-1]["kind"] == "click"   # never the caller's proposal
+
+
+def test_build_read_here_filter_click_deleted_refused(tmp_path):
+    les, app = _filtered(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    j = len(prop["pages"][1]["steps"]) - 1
+    with pytest.raises(ValueError, match=f"^{lessons.READ_LAST}$"):
+        _plan(tmp_path, les, app, prop, {(1, j)}, reads=HERE)
+
+
+def test_build_read_here_nothing_ticked_unchanged(tmp_path):
+    les, app = _filtered(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    plain = {**prop, "read_here": False, "reads": [], "read_refused": lessons.READ_LAST}
+    a, b = _plan(tmp_path, les, app, prop), _plan(tmp_path, les, app, plain)
+    assert (a["flow"], a["pages"], a["digest"]) == (b["flow"], b["pages"], b["digest"])
+    assert b"wait_url" not in a["flow"][1] and b"read_table" not in a["flow"][1]
+
+
+def test_build_read_here_page_already_in_app_refused(tmp_path):
+    les, app = _filtered(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    pid = _with_case(tmp_path, app, prop["pages"][1], "end")
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    assert (prop["read_here"], prop["pages"][1]["id"], prop["pages"][1]["new"]) == (True, pid, False)
+    with pytest.raises(ValueError, match="^This page is already in the app; reads not added$"):
+        _plan(tmp_path, les, app, prop, reads=HERE)
+
+
+def test_lesson_page_offers_read_here_tables(tmp_path):
+    from govaios.panel import lesson as lesson_ui
+    les, _ = _filtered(tmp_path)
+    prop = lessons.propose(les, tmp_path / "pages", Bank())
+    html = lesson_ui.page("n", les, prop, set(), {}, "")
+    assert "<h2>Read from this page</h2>" in html and "Table 1: 1 rows seen" in html
+    assert "name='read:0:0'" in html and "name='read:0:1'" in html
+    assert lesson_ui.edits(prop, {"read:0:0": "1"})[5] == {"table": 0, "columns": [0], "rows": "all"}
+    html = lesson_ui.page("n", les, prop, {prop["pages"][1]["id"]}, {}, "")
+    assert "This page is already in the app; reads not added" in html and "read:" not in html

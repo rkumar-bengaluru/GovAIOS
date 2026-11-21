@@ -208,6 +208,12 @@ def pages_of(lesson) -> list[dict]:
     return lesson["pages"] + done
 
 
+def read_page(proposal):
+    """The page reads go on: the Done page, or with read_here the last lesson page; None when there is none."""
+    p = proposal["pages"][-1] if proposal["pages"] else None
+    return p if p and (p.get("done") or proposal.get("read_here")) else None
+
+
 def _table_key(els, spec):
     """The page element for a table to read: an existing one with that spec, else a new key."""
     want = {**spec, "risk": "read"}
@@ -331,7 +337,7 @@ def propose(lesson, pages_dir, bank) -> dict:
                     ops.append(op)
         out_pages.append({"id": pid, "new": new, "yaml": {"page": page}, "steps": steps,
                           "added": added})
-    n, reads, refused = len(lesson["pages"]), [], None
+    n, reads, refused, here = len(lesson["pages"]), [], None, False
     if len(out_pages) > n:   # the Done page: kept, last, only when it is none of the lesson's pages
         droot = studio._as_nodes(lesson["done_tree"])[0]
         hits = [k for k in range(n) if _identifies(out_pages[k]["yaml"]["page"], droot)]
@@ -340,6 +346,13 @@ def propose(lesson, pages_dir, bank) -> dict:
             marks.pop()
             if hits and lesson.get("flow") not in SANDBOX:
                 refused = READ_MANY if len(hits) > 1 else READ_LAST if hits == [n - 1] else READ_EARLIER
+            last = (out_pages[n - 1]["steps"] or [{}])[-1] if refused == READ_LAST else {}
+            # a navigate press (a GET filter) reloaded this page: the run waits for its new address, then reads
+            if last.get("kind") == "click" and last["keep"] and last["target"] and all(
+                    own(lp["url"]) for lp in lesson["pages"]) and out_pages[n - 1]["yaml"]["page"]["elements"][
+                    last["target"].split(".", 1)[1]].get("risk") == "navigate":
+                refused, here = None, True
+                reads = _tables(droot, out_pages[n - 1]["yaml"]["page"]["elements"])
         else:
             out_pages[-1]["done"] = True
             reads = _tables(droot, out_pages[-1]["yaml"]["page"]["elements"])
@@ -348,7 +361,7 @@ def propose(lesson, pages_dir, bank) -> dict:
             and not any(s["kind"] == "hand_over" and s["keep"] for s in out_pages[n - 1]["steps"]):
         out_pages[n - 1]["steps"].append({"kind": "hand_over", "label": "You check and submit", "target": None,
                                           "keep": True})
-    return {"pages": out_pages, "bank": ops, "reads": reads, "read_refused": refused}
+    return {"pages": out_pages, "bank": ops, "reads": reads, "read_refused": refused, "read_here": here}
 
 
 def _counts(tree):
@@ -605,7 +618,8 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     line index): [ticked proposal index]}; require_outcomes: every submit press needs one (Try it never presses).
     sources: {(page index, type line index): (literal|input|bank, input label)}; plan["tried"]: {type step id: the
     recorded value}, what Try types instead. reads: {"table": index in proposal["reads"], "columns": [header index],
-    "rows": first|all}: the Done page becomes the last case, reading that table."""
+    "rows": first|all}: the Done page becomes the last case, reading that table; with proposal["read_here"], the last
+    lesson page reads it instead, after its navigate click, which waits for the new address."""
     pages_dir = Path(pages_dir)
     proposal, adds = copy.deepcopy(proposal), []   # count elements go on the after pages: never the caller's proposal
     if reads is None:
@@ -613,11 +627,14 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     else:
         if proposal.get("read_refused"):
             raise ValueError(proposal["read_refused"])
-        if not proposal["pages"] or not proposal["pages"][-1].get("done"):
+        p = read_page(proposal)
+        if p is None:
             raise ValueError("No page to read on")
         if not 0 <= reads["table"] < len(proposal["reads"]):
             raise ValueError("no such table")
-        p, t = proposal["pages"][-1], proposal["reads"][reads["table"]]
+        t, i = proposal["reads"][reads["table"]], len(proposal["pages"]) - 1
+        if proposal.get("read_here"):   # the line whose step must be the navigate click (checked once made)
+            here = (i, max((j for j, s in enumerate(p["steps"]) if s["keep"] and (i, j) not in deleted), default=None))
         cols = []
         for c in reads["columns"]:
             h = t["headers"][c] if 0 <= c < len(t["headers"]) else ""
@@ -687,6 +704,12 @@ def build(lesson, proposal, deleted, keeps, raw, flow_path, pages_dir, bank_path
     made = {}
     cases = _cases(proposal, deleted, set(_ids(wf["steps"])), on, {i: (can[i], c) for i, c in (repeats or {}).items()},
                    made)
+    if reads is not None and proposal.get("read_here"):
+        s = made.get(here)
+        els = proposal["pages"][here[0]]["yaml"]["page"]["elements"]
+        if s is None or s["action"] != "click" or els[s["target"].split(".", 1)[1]].get("risk") != "navigate":
+            raise ValueError(READ_LAST)
+        s["wait_url"] = True
     for press, at, o in adds:
         if press not in made or at not in made:
             raise ValueError("the step an outcome is checked after was removed")
